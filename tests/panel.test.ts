@@ -3,47 +3,13 @@ import { HOST_BODY_CAP, LOG_MAX_LINES } from '../panel/config';
 import type { HostRequest, HostResponse } from '../panel/host-port';
 import { isAtBottom, mountPanel, type PanelHandle } from '../panel/panel';
 import type { Job, Pipeline } from '../panel/types';
-import { FakeHost, FakeTimers, GIT_CONFIG, flush, readyContext } from './fakes';
+import { FakeHost, FakeTimers, GIT_CONFIG, flush, job, pipeline, readyContext } from './fakes';
 
 const HOST = 'https://gitlab.com';
 
 afterEach(() => {
   document.body.replaceChildren();
 });
-
-function pipeline(overrides: Partial<Pipeline> = {}): Pipeline {
-  return {
-    id: 1,
-    iid: 1,
-    status: 'success',
-    source: 'push',
-    ref: 'main',
-    sha: 'abcdef1234567890',
-    web_url: 'https://gitlab.com/group/project/-/pipelines/1',
-    created_at: '2026-09-30T11:50:00Z',
-    updated_at: '2026-09-30T11:58:00Z',
-    started_at: '2026-09-30T11:50:00Z',
-    finished_at: '2026-09-30T11:52:00Z',
-    duration: 120,
-    ...overrides,
-  };
-}
-
-function job(overrides: Partial<Job> = {}): Job {
-  return {
-    id: 1,
-    name: 'build',
-    stage: 'build',
-    status: 'success',
-    allow_failure: false,
-    duration: 10,
-    created_at: '2026-09-30T11:50:00Z',
-    started_at: '2026-09-30T11:50:00Z',
-    finished_at: '2026-09-30T11:50:10Z',
-    web_url: 'https://gitlab.com/group/project/-/jobs/1',
-    ...overrides,
-  };
-}
 
 function configuredHost(): FakeHost {
   const host = new FakeHost();
@@ -800,5 +766,159 @@ describe('project override setting', () => {
     await flush();
     expect(text(root)).toContain('gitlab.com/group/project');
     expect(text(root)).not.toContain('pinned');
+  });
+});
+
+describe('session handoff', () => {
+  function failedRun() {
+    return handlerFor({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 9, name: 'unit', stage: 'test', status: 'failed' })],
+      trace: 'setting up\nboom: tests failed',
+    });
+  }
+
+  test('offers the action on the failed job row and in the drawer', async () => {
+    const host = configuredHost();
+    host.handler = failedRun();
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-job .gp-handoff')).not.toBeNull();
+
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer .gp-handoff')).not.toBeNull();
+  });
+
+  test('the drawer action also starts a session', async () => {
+    const host = configuredHost();
+    host.handler = failedRun();
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+
+    (root.querySelector('.gp-drawer .gp-handoff') as HTMLElement).click();
+    await flush();
+    expect(host.startSessions).toHaveLength(1);
+    expect(host.startSessions[0]?.id).toBe('job-9');
+  });
+
+  test('the row keyboard handler does not hijack the action button', async () => {
+    const host = configuredHost();
+    host.handler = failedRun();
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+
+    const action = root.querySelector('.gp-handoff') as HTMLElement;
+    action.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await flush();
+    expect(root.querySelector('.gp-drawer')).toBeNull();
+  });
+
+  test('starting a session seeds it from the job, opens it and does not open the drawer', async () => {
+    const host = configuredHost();
+    host.handler = failedRun();
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+
+    (root.querySelector('.gp-handoff') as HTMLElement).click();
+    await flush();
+
+    expect(host.startSessions).toHaveLength(1);
+    const request = host.startSessions[0];
+    expect(request?.providerId).toBe('gitlab-pipelines');
+    expect(request?.id).toBe('job-9');
+    expect(request?.navigation).toBe('open');
+    expect(request?.text).toContain('- Job: unit (test)');
+    expect(request?.text).toContain('boom: tests failed');
+    expect(root.querySelector('.gp-drawer')).toBeNull();
+  });
+
+  test('a skipped send is surfaced, not silent', async () => {
+    const host = configuredHost();
+    host.handler = failedRun();
+    host.startSessionResult = { sessionId: 'ses_1', sent: 'no-model' };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-handoff') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-notice')).not.toBeNull();
+    expect(text(root)).toContain('No model is selected');
+  });
+
+  test('a host error starting the session is surfaced', async () => {
+    const host = configuredHost();
+    host.handler = failedRun();
+    host.startSessionError = new Error('boom');
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-handoff') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('Could not start a session');
+  });
+
+  test('a failed log fetch blocks the handoff with a clear message', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'failed' })]) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify([job({ id: 9, status: 'failed' })]) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 500, body: '' };
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-handoff') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('Could not read the job log');
+    expect(host.startSessions).toHaveLength(0);
+  });
+
+  test('is disabled with an explanation when no project is open', async () => {
+    const host = new FakeHost();
+    host.handler = failedRun();
+    const { root } = await mount(
+      host,
+      new FakeTimers(),
+      readyContext({ directory: null, settings: { project: 'group/pinned' } }),
+    );
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+
+    const action = root.querySelector('.gp-handoff') as HTMLButtonElement;
+    expect(action).not.toBeNull();
+    expect(action.disabled).toBe(true);
+    expect(action.title).toContain('Open a project');
+
+    action.click();
+    await flush();
+    expect(host.startSessions).toHaveLength(0);
+  });
+
+  test('a job that did not fail offers nothing to fix', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [
+        job({ id: 9, status: 'success' }),
+        job({ id: 10, name: 'deploy', status: 'canceled' }),
+      ],
+      trace: 'ok',
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-handoff')).toBeNull();
   });
 });

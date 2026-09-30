@@ -4,6 +4,8 @@ import type {
   GuestProjectsSnapshot,
   GuestWorktreesSnapshot,
   HostReadyContext,
+  StartSessionRequest,
+  StartSessionResult,
 } from '@openchamber/sdk';
 
 /**
@@ -33,6 +35,8 @@ export type HostPort = {
   readFile(path: string): Promise<{ content: string }>;
   listProjects(): Promise<GuestProjectsSnapshot>;
   listWorktrees(projectId: string): Promise<GuestWorktreesSnapshot>;
+  /** The Panel's only outbound action: start a seeded OpenChamber session. */
+  startSession(request: StartSessionRequest): Promise<StartSessionResult>;
   openUrl(url: string): Promise<void>;
   onReady(listener: (context: HostReadyContext) => void): () => void;
   onConnection(listener: (connection: GuestConnection) => void): () => void;
@@ -60,6 +64,7 @@ export function createHostPort(): HostPort {
     readFile: (path) => host.readFile(path),
     listProjects: () => host.listProjects(),
     listWorktrees: (projectId) => host.listWorktrees(projectId),
+    startSession: (request) => host.startSession(request),
     openUrl: (url) => host.openUrl(url),
     onReady: (listener) => host.onReady(listener),
     onConnection: (listener) => host.onConnection(listener),

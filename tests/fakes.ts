@@ -6,8 +6,11 @@ import type {
   GuestWorktreesSnapshot,
   HostReadyContext,
   HostTheme,
+  StartSessionRequest,
+  StartSessionResult,
 } from '@openchamber/sdk';
 import type { HostPort, HostRequest, HostResponse } from '../panel/host-port';
+import type { Job, Pipeline } from '../panel/types';
 
 export type RequestHandler = (
   request: HostRequest,
@@ -22,6 +25,9 @@ export class FakeHost implements HostPort {
   requests: HostRequest[] = [];
   serviceRequests: HostRequest[] = [];
   openUrls: string[] = [];
+  startSessions: StartSessionRequest[] = [];
+  startSessionResult: StartSessionResult = { sessionId: 'ses_1', sent: 'sent', directory: '/repo' };
+  startSessionError: unknown = null;
   disposed = false;
   handler: RequestHandler | null = null;
   serviceHandler: RequestHandler | null = null;
@@ -81,6 +87,12 @@ export class FakeHost implements HostPort {
 
   async openUrl(url: string): Promise<void> {
     this.openUrls.push(url);
+  }
+
+  async startSession(request: StartSessionRequest): Promise<StartSessionResult> {
+    this.startSessions.push(request);
+    if (this.startSessionError) throw this.startSessionError;
+    return this.startSessionResult;
   }
 
   dispose(): void {
@@ -205,3 +217,39 @@ export const GIT_CONFIG = `[core]
 \turl = git@gitlab.com:group/project.git
 \tfetch = +refs/heads/*:refs/remotes/origin/*
 `;
+
+/** A Pipeline row's shape, with only the fields a test cares about overridden. */
+export function pipeline(overrides: Partial<Pipeline> = {}): Pipeline {
+  return {
+    id: 1,
+    iid: 1,
+    status: 'success',
+    source: 'push',
+    ref: 'main',
+    sha: 'abcdef1234567890',
+    web_url: 'https://gitlab.com/group/project/-/pipelines/1',
+    created_at: '2026-09-30T11:50:00Z',
+    updated_at: '2026-09-30T11:58:00Z',
+    started_at: '2026-09-30T11:50:00Z',
+    finished_at: '2026-09-30T11:52:00Z',
+    duration: 120,
+    ...overrides,
+  };
+}
+
+/** A Job row's shape, with only the fields a test cares about overridden. */
+export function job(overrides: Partial<Job> = {}): Job {
+  return {
+    id: 1,
+    name: 'build',
+    stage: 'build',
+    status: 'success',
+    allow_failure: false,
+    duration: 10,
+    created_at: '2026-09-30T11:50:00Z',
+    started_at: '2026-09-30T11:50:00Z',
+    finished_at: '2026-09-30T11:50:10Z',
+    web_url: 'https://gitlab.com/group/project/-/jobs/1',
+    ...overrides,
+  };
+}

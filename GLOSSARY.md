@@ -1,7 +1,8 @@
 # GitLab Pipelines extension
 
-An OpenChamber extension that shows GitLab CI/CD pipelines for a single project, read-only, over the
-GitLab REST API. Built on `@openchamber/sdk`.
+An OpenChamber extension that shows GitLab CI/CD pipelines for a single project over the GitLab REST
+API. Its access to GitLab is read-only; it may also act on the host by starting an agent session from
+a failed Job. Built on `@openchamber/sdk`.
 
 ## Language
 
@@ -68,3 +69,9 @@ _Avoid_: default instance, primary host
 The GitLab host the Panel resolves a project against: the built-in host by default, or the `host`
 setting when one is set. A project whose remote is on any other host is `host-mismatch`.
 _Avoid_: target host, base URL
+
+**Session handoff**:
+Starting a new OpenChamber session from a failed Job, seeded with that Job's identity, links and Trace
+tail so an agent can investigate the failure in the open project. The Extension's only outbound
+action; it never writes to GitLab.
+_Avoid_: hand-off, escalation, fix-it button

@@ -1,7 +1,7 @@
-import type { GuestConnection, HostReadyContext } from '@openchamber/sdk';
+import type { GuestConnection, HostReadyContext, StartSessionSent } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
 
-import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS, SERVICE_PATH } from './config';
+import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS, PANEL_ID, SERVICE_PATH } from './config';
 import { ago, duration, elapsed, logLines, shortSha, tailLines, toEpoch } from './format';
 import {
   fetchJobs,
@@ -11,6 +11,7 @@ import {
   type ClientFailure,
   type Requester,
 } from './gitlab-client';
+import { buildHandoff, isHandoffJob } from './handoff';
 import type { HostPort } from './host-port';
 import { nextPollDelay, shouldPoll } from './poll';
 import {
@@ -161,6 +162,9 @@ class PipelinesPanel implements PanelHandle {
   private openJob: OpenJob | null = null;
   private readonly traces = new Map<number, TraceState>();
   private traceLoadingId: number | null = null;
+  /** The Job whose handoff is in flight, and the last handoff failure to show. */
+  private handoffJobId: number | null = null;
+  private handoffError: string | null = null;
   private updatedAt: number | null = null;
   /** The Configured host the current data belongs to, for switch detection. */
   private lastHost: string | null = null;
@@ -502,12 +506,7 @@ class PipelinesPanel implements PanelHandle {
       // A failed fetch is not a missing log; keep the two apart.
       this.traces.set(jobId, { state: 'error', text: '', truncated: null });
     } else {
-      const text = result.data ?? '';
-      if (!text.trim()) {
-        this.traces.set(jobId, { state: 'missing', text: '', truncated: null });
-      } else {
-        this.traces.set(jobId, { state: 'ready', text, truncated: traceTruncation(text) });
-      }
+      this.traces.set(jobId, traceStateOf(result.data ?? ''));
     }
     this.render();
   }
@@ -537,6 +536,77 @@ class PipelinesPanel implements PanelHandle {
     this.openJob = null;
     this.followTail = true;
     this.drawerScrollTop = 0;
+    this.render();
+  }
+
+  // -- session handoff ------------------------------------------------------
+
+  /**
+   * A session needs an open project it can act in. Without a directory there is
+   * no checkout; without a resolved project there is no GitLab project to name.
+   */
+  private canHandoff(): boolean {
+    return this.directory != null && this.resolved != null;
+  }
+
+  /**
+   * Start a new session from a failed Job, seeded with its identity, links and
+   * Trace tail. The Panel's only outbound action; nothing is sent to GitLab.
+   */
+  private startHandoff(pipelineId: number, jobId: number): void {
+    if (!this.canHandoff() || this.handoffJobId != null) return;
+    const job = this.jobById(jobId);
+    if (!job || !isHandoffJob(job)) return;
+    const pipeline = this.pipelines.find((candidate) => candidate.id === pipelineId) ?? null;
+    this.handoffJobId = jobId;
+    this.handoffError = null;
+    this.render();
+    void this.runHandoff(pipeline, job);
+  }
+
+  private async runHandoff(pipeline: Pipeline | null, job: Job): Promise<void> {
+    const trace = await this.traceFor(job);
+    if (this.disposed) return;
+    if (trace == null) {
+      this.finishHandoff('Could not read the job log to hand off. The session was not started.');
+      return;
+    }
+    let sent: StartSessionSent;
+    try {
+      const result = await this.port.startSession(
+        buildHandoff({
+          providerId: PANEL_ID,
+          project: this.resolved?.project ?? '',
+          pipeline,
+          job,
+          trace,
+        }),
+      );
+      sent = result.sent;
+    } catch {
+      this.finishHandoff('Could not start a session for this job.');
+      return;
+    }
+    if (this.disposed) return;
+    this.finishHandoff(sent === 'sent' ? null : handoffFailure(sent));
+  }
+
+  /** The Job's Trace: the cached one, or a fresh fetch. null when it cannot be read. */
+  private async traceFor(job: Job): Promise<string | null> {
+    const cached = this.traces.get(job.id);
+    if (cached?.state === 'ready') return cached.text;
+    const project = this.resolved?.project;
+    if (!project) return null;
+    const result = await fetchTrace(this.requester(), project, job.id);
+    if (!result.ok) return null;
+    const text = result.data ?? '';
+    this.traces.set(job.id, traceStateOf(text));
+    return text;
+  }
+
+  private finishHandoff(error: string | null): void {
+    this.handoffJobId = null;
+    this.handoffError = error;
     this.render();
   }
 
@@ -693,6 +763,8 @@ class PipelinesPanel implements PanelHandle {
     this.root.append(progress);
 
     this.root.append(this.renderHeader());
+    const handoffNotice = this.renderHandoffNotice();
+    if (handoffNotice) this.root.append(handoffNotice);
 
     this.scrollEl = el('div', 'gp-scroll');
     const pad = el('div', 'gp-pad');
@@ -989,16 +1061,63 @@ class PipelinesPanel implements PanelHandle {
     );
     stage.append(head);
     for (const job of group.jobs) {
-      const row = el('button', 'gp-job');
-      row.type = 'button';
+      const row = el('div', 'gp-job');
+      row.tabIndex = 0;
+      row.setAttribute('role', 'button');
       if (this.openJob?.jobId === job.id) row.dataset.selected = 'true';
       row.setAttribute('aria-label', `${job.name}, ${jobStatusInfo(job).label}`);
       row.append(statusIcon(jobStatusInfo(job), 13), el('span', 'gp-job-name', job.name));
       row.append(this.jobMeta(job));
       row.addEventListener('click', () => this.openJobDrawer(pipelineId, job.id));
+      row.addEventListener('keydown', (event) => {
+        // Only when the row itself is focused: the nested action button owns its
+        // own Enter/Space, and this must not swallow it.
+        if (event.target !== row) return;
+        if (event.key === 'Enter' || event.key === ' ') {
+          event.preventDefault();
+          this.openJobDrawer(pipelineId, job.id);
+        }
+      });
+      if (isHandoffJob(job)) row.append(this.renderHandoffAction(job, pipelineId));
       stage.append(row);
     }
     return stage;
+  }
+
+  /** The "Start session" affordance for a failed Job, on its row or in the drawer. */
+  private renderHandoffAction(job: Job, pipelineId: number): HTMLElement {
+    const button = el('button', 'gp-handoff');
+    button.type = 'button';
+    const busy = this.handoffJobId === job.id;
+    const canHandoff = this.canHandoff();
+    button.disabled = !canHandoff || busy;
+    button.textContent = busy ? 'Starting…' : 'Start session';
+    button.title = canHandoff
+      ? 'Start a session for this failed job'
+      : this.directory == null
+        ? 'Open a project to start a session — a session needs a checkout to fix.'
+        : 'This project could not be resolved, so a session cannot be started.';
+    button.setAttribute('aria-label', `${button.textContent} — ${job.name}`);
+    if (canHandoff && !busy) {
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        this.startHandoff(pipelineId, job.id);
+      });
+    }
+    return button;
+  }
+
+  private renderHandoffNotice(): HTMLElement | null {
+    if (!this.handoffError) return null;
+    const notice = el('div', 'gp-notice');
+    notice.setAttribute('role', 'alert');
+    notice.append(el('span', 'gp-notice-text', this.handoffError));
+    const dismiss = el('button', 'gp-notice-close');
+    dismiss.type = 'button';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', () => this.finishHandoff(null));
+    notice.append(dismiss);
+    return notice;
   }
 
   private renderDrawer(reference: OpenJob): HTMLElement {
@@ -1022,6 +1141,7 @@ class PipelinesPanel implements PanelHandle {
       });
       head.append(link);
     }
+    if (job && isHandoffJob(job)) head.append(this.renderHandoffAction(job, reference.pipelineId));
     const close = el('button', 'gp-drawer-close');
     close.type = 'button';
     close.setAttribute('aria-label', 'Close log');
@@ -1155,6 +1275,13 @@ function traceTruncation(text: string): TraceTruncation {
   return null;
 }
 
+/** A successful trace fetch's cache entry: `ready` with the text, or `missing` when empty. */
+function traceStateOf(text: string): TraceState {
+  return text.trim()
+    ? { state: 'ready', text, truncated: traceTruncation(text) }
+    : { state: 'missing', text: '', truncated: null };
+}
+
 function truncationNotice(kind: Exclude<TraceTruncation, null>): HTMLElement {
   const notice = el('div', 'gp-drawer-notice');
   notice.textContent =
@@ -1162,6 +1289,13 @@ function truncationNotice(kind: Exclude<TraceTruncation, null>): HTMLElement {
       ? 'GitLab returned a capped log. View the full log in GitLab.'
       : `Older lines not shown (last ${LOG_MAX_LINES} lines). View the full log in GitLab.`;
   return notice;
+}
+
+/** Why a started session did not receive its seed message, in the user's words. */
+function handoffFailure(sent: StartSessionSent): string {
+  if (sent === 'no-model') return 'No model is selected in OpenChamber, so the session got no message.';
+  if (sent === 'skipped') return 'OpenChamber skipped the message. Open a project and try again.';
+  return 'OpenChamber could not start the session.';
 }
 
 function pipelineSubtitle(pipeline: Pipeline): string {
