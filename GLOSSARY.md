@@ -28,6 +28,11 @@ _Avoid_: build, run, workflow
 One unit of work within a pipeline, belonging to a stage, with its own status, runner, and log.
 _Avoid_: task, step, build
 
+**Trace**:
+A Job's complete log as GitLab returns it, fetched in a single request and bounded by the host's
+response cap. The Panel renders it in the log drawer, where its own line cap may shorten it further.
+_Avoid_: output, console, log tail (the tail is just the end of a Trace)
+
 **Stage**:
 A named grouping of jobs within a pipeline.
 _Avoid_: phase, group

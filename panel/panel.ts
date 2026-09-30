@@ -1,8 +1,8 @@
 import type { GuestConnection, HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
 
-import { API_ORIGIN, LOG_TAIL_LINES, LIVE_TICK_MS } from './config';
-import { ago, duration, elapsed, shortSha, tailLines, toEpoch } from './format';
+import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS } from './config';
+import { ago, duration, elapsed, logLines, shortSha, tailLines, toEpoch } from './format';
 import { fetchJobs, fetchPipelines, fetchTrace, type ClientFailure } from './gitlab-client';
 import type { HostPort } from './host-port';
 import { nextPollDelay, shouldPoll } from './poll';
@@ -55,7 +55,14 @@ type Problem = {
   detail?: string;
 };
 
-type TraceState = { state: 'ready' | 'missing' | 'error'; text: string };
+/** Why a log is shorter than the trace: our own line cap, or the host's body cap. */
+type TraceTruncation = 'cap' | 'host' | null;
+
+type TraceState = {
+  state: 'ready' | 'missing' | 'error';
+  text: string;
+  truncated: TraceTruncation;
+};
 
 type OpenJob = { pipelineId: number; jobId: number };
 
@@ -146,6 +153,10 @@ class PipelinesPanel implements PanelHandle {
   private pollStartedAt: number | null = null;
   private scrollTop = 0;
   private scrollEl: HTMLElement | null = null;
+  private drawerEl: HTMLElement | null = null;
+  private drawerScrollTop = 0;
+  /** Whether the log view should stick to the bottom as it updates. */
+  private followTail = true;
 
   private readonly handles: Array<{ dispose(): void }> = [];
   private unsubReady: (() => void) | null = null;
@@ -384,6 +395,8 @@ class PipelinesPanel implements PanelHandle {
 
   private openJobDrawer(pipelineId: number, jobId: number): void {
     this.openJob = { pipelineId, jobId };
+    this.followTail = true;
+    this.drawerScrollTop = 0;
     if (this.traces.has(jobId)) {
       this.render();
       return;
@@ -401,16 +414,43 @@ class PipelinesPanel implements PanelHandle {
     this.traceLoadingId = null;
     if (!result.ok) {
       // A failed fetch is not a missing log; keep the two apart.
-      this.traces.set(jobId, { state: 'error', text: '' });
+      this.traces.set(jobId, { state: 'error', text: '', truncated: null });
     } else {
       const text = result.data ?? '';
-      this.traces.set(jobId, text.trim() ? { state: 'ready', text } : { state: 'missing', text: '' });
+      if (!text.trim()) {
+        this.traces.set(jobId, { state: 'missing', text: '', truncated: null });
+      } else {
+        this.traces.set(jobId, { state: 'ready', text, truncated: traceTruncation(text) });
+      }
     }
     this.render();
   }
 
+  /**
+   * While the open Job is still active, refresh just its trace on the poll — the log is otherwise
+   * fetched once and cached, so a running Job would freeze at the moment it was opened.
+   */
+  private refreshOpenTrace(gen: number): void {
+    const reference = this.openJob;
+    if (!reference || this.traceLoadingId === reference.jobId) return;
+    const job = this.jobById(reference.jobId);
+    if (!job || !isActiveStatus(job.status)) return;
+    void this.loadTrace(gen, reference.jobId);
+  }
+
+  private jobById(jobId: number): Job | undefined {
+    for (const value of this.jobs.values()) {
+      if (!Array.isArray(value)) continue;
+      const match = value.find((job) => job.id === jobId);
+      if (match) return match;
+    }
+    return undefined;
+  }
+
   private closeDrawer(): void {
     this.openJob = null;
+    this.followTail = true;
+    this.drawerScrollTop = 0;
     this.render();
   }
 
@@ -447,6 +487,7 @@ class PipelinesPanel implements PanelHandle {
     if (this.disposed || !this.resolved) return;
     const gen = ++this.generation;
     await this.loadPipelines(gen, this.resolved);
+    if (gen === this.generation) this.refreshOpenTrace(gen);
   }
 
   private stopPollTimer(): void {
@@ -502,6 +543,7 @@ class PipelinesPanel implements PanelHandle {
     if (this.disposed) return;
     this.disposeHandles();
     if (this.scrollEl) this.scrollTop = this.scrollEl.scrollTop;
+    if (this.drawerEl) this.drawerScrollTop = this.drawerEl.scrollTop;
     clearNode(this.root);
     this.root.className = 'gp';
 
@@ -524,6 +566,9 @@ class PipelinesPanel implements PanelHandle {
     if (this.openJob) this.root.append(this.renderDrawer(this.openJob));
 
     if (this.scrollEl) this.scrollEl.scrollTop = this.scrollTop;
+    if (this.drawerEl) {
+      this.drawerEl.scrollTop = this.followTail ? this.drawerEl.scrollHeight : this.drawerScrollTop;
+    }
     this.updateLive();
     this.syncTicker();
   }
@@ -841,20 +886,28 @@ class PipelinesPanel implements PanelHandle {
 
     const entry = this.traces.get(reference.jobId);
     if (!entry) {
+      this.drawerEl = null;
       drawer.append(el('div', 'gp-drawer-empty', 'Loading log…'));
       return drawer;
     }
     if (entry.state === 'missing') {
+      this.drawerEl = null;
       drawer.append(el('div', 'gp-drawer-empty', 'No log output yet — the job has not started.'));
       return drawer;
     }
     if (entry.state === 'error') {
+      this.drawerEl = null;
       drawer.append(el('div', 'gp-drawer-empty', 'Could not load the log. Close and reopen to retry.'));
       return drawer;
     }
-    const lines = tailLines(entry.text, LOG_TAIL_LINES);
+    if (entry.truncated) drawer.append(truncationNotice(entry.truncated));
     const pre = el('pre', 'gp-drawer-body');
-    pre.textContent = lines.join('\n');
+    pre.textContent = tailLines(entry.text, LOG_MAX_LINES).join('\n');
+    pre.addEventListener('scroll', () => {
+      this.drawerScrollTop = pre.scrollTop;
+      this.followTail = isAtBottom(pre);
+    });
+    this.drawerEl = pre;
     drawer.append(pre);
     return drawer;
   }
@@ -881,6 +934,30 @@ function statusIcon(info: StatusInfo, size: number): HTMLElement {
   glyph.innerHTML = `<svg viewBox="0 0 24 24" width="${size}" height="${size}" aria-hidden="true" fill="currentColor">${GLYPHS[info.glyph] ?? GLYPHS.dot}</svg>`;
   wrap.append(glyph);
   return wrap;
+}
+
+/** Whether a scroll container is at (or near) its bottom edge. */
+export function isAtBottom(
+  metrics: { scrollTop: number; scrollHeight: number; clientHeight: number },
+  threshold = 24,
+): boolean {
+  return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
+}
+
+/** Why the shown log is shorter than the job's trace, if it is. */
+function traceTruncation(text: string): TraceTruncation {
+  if (text.length >= HOST_BODY_CAP) return 'host';
+  if (logLines(text).length > LOG_MAX_LINES) return 'cap';
+  return null;
+}
+
+function truncationNotice(kind: Exclude<TraceTruncation, null>): HTMLElement {
+  const notice = el('div', 'gp-drawer-notice');
+  notice.textContent =
+    kind === 'host'
+      ? 'GitLab returned a capped log. View the full log in GitLab.'
+      : `Older lines not shown (last ${LOG_MAX_LINES} lines). View the full log in GitLab.`;
+  return notice;
 }
 
 function pipelineSubtitle(pipeline: Pipeline): string {

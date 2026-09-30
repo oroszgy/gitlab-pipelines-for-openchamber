@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
+import { HOST_BODY_CAP, LOG_MAX_LINES } from '../panel/config';
 import type { HostRequest, HostResponse } from '../panel/host-port';
-import { mountPanel, type PanelHandle } from '../panel/panel';
+import { isAtBottom, mountPanel, type PanelHandle } from '../panel/panel';
 import type { Job, Pipeline } from '../panel/types';
 import { FakeHost, FakeTimers, GIT_CONFIG, flush, readyContext } from './fakes';
 
@@ -275,7 +276,7 @@ describe('expanding a pipeline', () => {
 });
 
 describe('the job log drawer', () => {
-  test('opens the last 40 lines wrapped, with a full-log link, and closes back', async () => {
+  test('opens the whole log wrapped, with a full-log link, and closes back', async () => {
     const host = configuredHost();
     const trace = Array.from({ length: 45 }, (_, index) => `line ${index + 1}`).join('\n');
     host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
@@ -288,14 +289,40 @@ describe('the job log drawer', () => {
     const drawer = root.querySelector('.gp-drawer');
     expect(drawer).not.toBeNull();
     const body = root.querySelector('.gp-drawer-body');
+    // Scrolling replaces the old 40-line peek, so lines beyond 40 are now present.
+    expect(body?.textContent).toContain('line 1\n');
     expect(body?.textContent).toContain('line 45');
-    expect(body?.textContent).not.toContain('line 5\n');
     expect(root.querySelector('.gp-drawer-link')?.textContent).toContain('View full log in GitLab');
 
     (root.querySelector('.gp-drawer-close') as HTMLElement).click();
     await flush();
     expect(root.querySelector('.gp-drawer')).toBeNull();
     expect(root.querySelector('.gp-row')).not.toBeNull();
+  });
+
+  test('a log over the line cap says older lines are not shown', async () => {
+    const host = configuredHost();
+    const trace = Array.from({ length: LOG_MAX_LINES + 5 }, (_, index) => `line ${index + 1}`).join('\n');
+    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-notice')?.textContent).toContain('Older lines not shown');
+    expect(root.querySelector('.gp-drawer-body')?.textContent).not.toContain('line 1\n');
+  });
+
+  test('a log at the host body cap says GitLab capped it', async () => {
+    const host = configuredHost();
+    const trace = 'x'.repeat(HOST_BODY_CAP);
+    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-notice')?.textContent).toContain('capped log');
   });
 
   test('closing the drawer restores the list scroll position', async () => {
@@ -349,6 +376,72 @@ describe('the job log drawer', () => {
     await flush();
     expect(text(root)).toContain('Could not load the log');
     expect(text(root)).not.toContain('No log output yet');
+  });
+});
+
+describe('live log while a job runs', () => {
+  test('refetches the open log while its job is active', async () => {
+    const host = configuredHost();
+    let trace = 'line 1';
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify([job({ id: 9, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 200, body: trace };
+      return { status: 404, body: '' };
+    };
+    const timers = new FakeTimers();
+    const { root } = await mount(host, timers);
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('line 1');
+
+    trace = 'line 1\nline 2';
+    timers.advance(5000);
+    await flush();
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toContain('line 2');
+  });
+
+  test('does not refetch a settled job’s log, even while the pipeline polls', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify([job({ id: 9, status: 'success' })]) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 200, body: 'line 1' };
+      return { status: 404, body: '' };
+    };
+    const timers = new FakeTimers();
+    const { root, panel } = await mount(host, timers);
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(panel.isPolling()).toBe(true);
+
+    const before = host.requests.filter((request) => request.path.endsWith('/trace')).length;
+    timers.advance(5000);
+    await flush();
+    const after = host.requests.filter((request) => request.path.endsWith('/trace')).length;
+    expect(after).toBe(before);
+  });
+});
+
+describe('isAtBottom', () => {
+  test('is true at the bottom and within the threshold', () => {
+    expect(isAtBottom({ scrollTop: 100, scrollHeight: 300, clientHeight: 200 })).toBe(true);
+    expect(isAtBottom({ scrollTop: 80, scrollHeight: 300, clientHeight: 200 })).toBe(true);
+  });
+  test('is false once scrolled further up', () => {
+    expect(isAtBottom({ scrollTop: 40, scrollHeight: 300, clientHeight: 200 })).toBe(false);
   });
 });
 

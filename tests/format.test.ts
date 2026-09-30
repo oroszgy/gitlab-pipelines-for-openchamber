@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test';
-import { ago, duration, elapsed, shortSha, tailLines, toEpoch } from '../panel/format';
+import { ago, duration, elapsed, logLines, shortSha, tailLines, toEpoch } from '../panel/format';
 
 describe('shortSha', () => {
   test('keeps seven characters', () => {
@@ -70,6 +70,15 @@ describe('ago', () => {
   test('days and months', () => {
     expect(ago(now - 86_400_000, now)).toBe('1d ago');
     expect(ago(now - 31 * 86_400_000, now)).toBe('1mo ago');
+  });
+});
+
+describe('logLines', () => {
+  test('splits on newlines and treats a trailing newline as a terminator', () => {
+    expect(logLines('a\nb\nc')).toEqual(['a', 'b', 'c']);
+    expect(logLines('a\nb\n')).toEqual(['a', 'b']);
+    expect(logLines('')).toEqual([]);
+    expect(logLines(null)).toEqual([]);
   });
 });
 

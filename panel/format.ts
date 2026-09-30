@@ -52,11 +52,15 @@ export function ago(epochMs: number, now: number = Date.now()): string {
   return `${mo}mo ago`;
 }
 
+/** A trace's content lines. A trailing newline is a terminator, not an extra line. */
+export function logLines(text: string | null | undefined): string[] {
+  if (text == null || text === '') return [];
+  const body = text.endsWith('\n') ? text.slice(0, -1) : text;
+  return body.split('\n');
+}
+
 /** The last `count` lines of a trace, joined back with their newlines. */
 export function tailLines(text: string | null | undefined, count: number): string[] {
-  if (text == null || text === '') return [];
   if (count <= 0) return [];
-  // GitLab traces end in a newline; that terminator is not an extra content line.
-  const body = text.endsWith('\n') ? text.slice(0, -1) : text;
-  return body.split('\n').slice(-count);
+  return logLines(text).slice(-count);
 }

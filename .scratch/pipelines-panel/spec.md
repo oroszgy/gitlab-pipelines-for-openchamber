@@ -1,6 +1,6 @@
 # Spec: GitLab Pipelines panel
 
-Status: implemented — see `.scratch/pipelines-panel/issues/01`–`08`.
+Status: implemented — see `.scratch/pipelines-panel/issues/01`–`09`.
 Feature: `pipelines-panel`
 
 ## Problem Statement
@@ -15,8 +15,8 @@ agent is iterating.
 
 A read-only **Pipelines Panel** in OpenChamber's right-hand rail. It works out which GitLab project
 the currently open project belongs to, shows that project's Pipelines for the current Ref (with a
-toggle to all refs), expands a Pipeline into its Jobs grouped by Stage, and shows the tail of a Job's
-log in a bottom drawer. Status stays live while anything is running; nothing is ever written back to
+toggle to all refs), expands a Pipeline into its Jobs grouped by Stage, and shows a Job's log in a
+bottom drawer. Status stays live while anything is running; nothing is ever written back to
 GitLab.
 
 ## User Stories
@@ -45,12 +45,12 @@ GitLab.
     Jobs and Stages, so that I can read the panel by shape and colour alone.
 12. As a developer, I want a Job whose failure is allowed to read as a warning rather than an error,
     so that I am not alarmed by a Pipeline that actually passed.
-13. As a developer, I want to open a Job's log tail in a bottom drawer, so that I can see why it
-    failed without losing my place in the list.
-14. As a developer, I want the log tail to wrap rather than scroll sideways, so that it stays
-    readable in a narrow rail.
+13. As a developer, I want to open a Job's log in a bottom drawer, so that I can see why it failed
+    without losing my place in the list.
+14. As a developer, I want the log to wrap rather than scroll sideways, so that it stays readable in
+    a narrow rail, and to scroll vertically through as much of it as I need.
 15. As a developer, I want a "view full log in GitLab" affordance pinned in the log, so that I can
-    get the whole thing when the tail is not enough.
+    get the whole thing when what is shown is not enough.
 16. As a developer, I want the log drawer to close back to the list, so that I can keep browsing.
 17. As a developer, I want a running Pipeline to show a live elapsed time, so that I can see it is
     still making progress.
@@ -140,15 +140,18 @@ the misleading `not-a-repo`, and the `project` override is the way out. See
 
 **Data.** Pipelines come from the project's pipelines endpoint, filtered by `ref` in Branch scope and
 ordered by most-recently-updated in All refs scope, with a modest page size. Expanding a Pipeline
-fetches its Jobs. Opening a Job fetches its trace, from which the tail is shown.
+fetches its Jobs. Opening a Job fetches its full **Trace** in one shot (the host gives no paging or
+headers), which the drawer shows in a bounded, scrollable form.
 
 **Panel behaviour.** Adaptive polling with a manual refresh, a stale-response guard so a slow reply
 cannot overwrite a newer one, and the timer cleared when the Panel is disposed. A manual refresh is
 always available. A Jobs or trace fetch that *fails* is reported as an error, kept distinct from a
 genuinely empty result (no Jobs, no log output): the two mean different things and must not be
-conflated. Beyond the connected/disconnected failures the Panel names four non-happy states —
-`no-project`, `not-a-repo`, `linked-worktree`, `host-mismatch` — plus `unauthorized`/`not-found` for
-a token or project GitLab cannot see.
+conflated. While the open Job is still active its Trace is refetched on the poll — the log is
+otherwise cached after one fetch, so a running Job would freeze at the moment it was opened. Beyond
+the connected/disconnected failures the Panel names four non-happy states — `no-project`,
+`not-a-repo`, `linked-worktree`, `host-mismatch` — plus `unauthorized`/`not-found` for a token or
+project GitLab cannot see.
 
 **Layout (settled by the prototype, `prototype/panel-ui`).** Variant A's accordion is the base, with
 Variant B's bottom drawer for the log:
@@ -158,9 +161,14 @@ Variant B's bottom drawer for the log:
 - Ref scope is a segmented **Branch / All refs** control in the header. Ref stays a *row field* —
   there is no ref grouping.
 - A Stage group is indented under its Pipeline with a `done/total` count, all Stages visible at once.
-- The log opens in a **bottom drawer** over the Panel, showing the **last 40 lines** wrapped
-  (`white-space: pre-wrap`, never a horizontal scroll axis), with "view full log in GitLab" pinned.
-  If the drawer proves too cramped at the narrowest width, a full-panel push view is the fallback.
+- The log opens in a **bottom drawer** over the Panel, showing the whole **Trace** wrapped
+  (`white-space: pre-wrap`, never a horizontal scroll axis) and **scrolling vertically**. Two bounds
+  can shorten it, and each says so in an explicit notice bar with the "view full log in GitLab" link:
+  the Panel's own safety cap of 20 000 lines ("older lines not shown") and the host's 256 000-char
+  response cap ("GitLab returned a capped log").
+- While the open Job is still active, its Trace refetches on the poll. The view **follows the tail**
+  (sticks to the bottom, within ~24px) unless the reader has scrolled up, in which case it holds
+  position until they return to the bottom.
 - Active state: one spinning ring on the running glyph (`info` tone), a live-ticking elapsed time,
   and an "updated Ns ago" indicator with a pulsing dot in the header; an indeterminate top bar only
   during first load.
@@ -191,12 +199,13 @@ Modules under test:
   Statuses share a label and glyph.
 - **stage-groups** — ordering, `done/total`, empty stages, skipped and manual Jobs.
 - **poll** — active vs settled status sets, and the stop condition.
-- **format** — short SHA, durations, relative ages at their boundaries, and the trailing-newline
-  terminator in the log tail.
+- **format** — short SHA, durations, relative ages at their boundaries, line splitting (a trailing
+  newline is a terminator, not a line) and the tail bound.
 - **panel** — driven through the fake host: a fake `.git/config`, fake worktree data and fake
   `request` responses; asserts the list, expansion, the log drawer, the non-happy states (including
   `linked-worktree`), that a failed Jobs/trace fetch reads as an error rather than an empty result,
-  and that polling continues only while something is running.
+  the truncation notices, live Trace refetch while a Job is active (and none once settled), the
+  follow/detach rule (`isAtBottom`), and that polling continues only while something is running.
 
 There is no prior art in the repo (it is greenfield); the prototype is a visual reference, not a
 test. The runner is `bun test`, with a DOM shim only for the panel tests.
