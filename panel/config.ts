@@ -7,7 +7,7 @@
  * `host-mismatch` rather than silently called. See ADR-0001.
  */
 export const PANEL_ID = 'gitlab-pipelines';
-export const API_ORIGIN = 'https://gitlab.com';
+export const API_ORIGIN = 'https://sdlc.webcloud.ec.europa.eu';
 
 /** Pipelines requested per page. Kept modest: `host.request` caps the body at 256 000 chars. */
 export const PER_PAGE = 20;

@@ -30,7 +30,7 @@
         "name": "GitLab",
         "description": "Reads CI/CD pipelines, jobs and logs from one GitLab project. Read-only.",
         "token": {
-          "apiOrigin": "https://gitlab.com",
+          "apiOrigin": "https://sdlc.webcloud.ec.europa.eu",
           "scheme": "bearer",
           "account": { "path": "/api/v4/user", "name": "username" }
         },

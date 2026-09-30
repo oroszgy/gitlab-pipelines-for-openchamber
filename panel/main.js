@@ -1,4 +1,4 @@
-(()=>{var AT="gitlab-pipelines",ET="https://gitlab.com",F0=20,C0=40,$0=5000,D0=1000;var C="openchamber.sdk",$=1;var wT=`
+(()=>{var AT="gitlab-pipelines",ET="https://sdlc.webcloud.ec.europa.eu",F0=20,C0=40,$0=5000,D0=1000;var C="openchamber.sdk",$=1;var wT=`
 :root {
   --oc-scrollbar-thumb: color-mix(in srgb, var(--oc-muted, currentColor) 40%, transparent);
   --oc-scrollbar-thumb-hover: color-mix(in srgb, var(--oc-muted, currentColor) 65%, transparent);
