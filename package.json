@@ -24,7 +24,7 @@
       "panel": {
         "id": "gitlab-pipelines",
         "name": "Pipelines",
-        "icon": "gitlab-line",
+        "icon": "icon.svg",
         "entry": "panel/index.html"
       },
       "capabilities": ["files", "sessions"],

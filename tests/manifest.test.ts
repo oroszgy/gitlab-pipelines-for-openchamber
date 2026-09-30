@@ -19,8 +19,15 @@ describe('package manifest', () => {
     const panel = parsed.manifest.contributes.panel;
     expect(panel.id).toBe(PANEL_ID);
     expect(panel.name).toBe('Pipelines');
-    expect(panel.icon).toBe('gitlab-line');
+    expect(panel.icon).toBe('icon.svg');
     expect(panel.entry).toBe('panel/index.html');
+  });
+
+  test('ships the panel icon as a package SVG', () => {
+    expect(existsSync(join(root, 'icon.svg'))).toBe(true);
+    const svg = readFileSync(join(root, 'icon.svg'), 'utf8');
+    expect(svg).toContain('<svg');
+    expect(svg).toContain('<path');
   });
 
   test('integrates with exactly the configured GitLab origin over a bearer token', () => {
