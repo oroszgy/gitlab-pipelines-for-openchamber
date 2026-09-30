@@ -58,3 +58,13 @@ A git checkout whose `.git` is a *file* pointing at the primary repository inste
 project from one — the host API exposes no remote — so it reports `linked-worktree` and the `project`
 override is the way to read its pipelines. Its Ref is still known from the host's worktree list.
 _Avoid_: secondary checkout, submodule (a different thing)
+
+**Built-in host**:
+The single GitLab origin baked into the Extension's manifest (`apiOrigin`). Requests to it go over the
+host's request bridge with the host-injected token, which never reaches the Panel.
+_Avoid_: default instance, primary host
+
+**Configured host**:
+The GitLab host the Panel resolves a project against: the built-in host by default, or the `host`
+setting when one is set. A project whose remote is on any other host is `host-mismatch`.
+_Avoid_: target host, base URL
