@@ -114,6 +114,16 @@ describe('project resolution in the header', () => {
   });
 });
 
+describe('the brand mark', () => {
+  test('uses the gitlab-line glyph', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({ pipelines: [pipeline()] });
+    const { root } = await mount(host, new FakeTimers());
+    const path = root.querySelector('.gp-brand-mark svg path');
+    expect(path?.getAttribute('d')?.startsWith('M5.54429')).toBe(true);
+  });
+});
+
 describe('pipeline list', () => {
   test('lists pipelines newest first with a two-line row', async () => {
     const host = configuredHost();

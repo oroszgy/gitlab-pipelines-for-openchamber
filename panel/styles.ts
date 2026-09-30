@@ -53,7 +53,7 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
 }
 .gp-head-row { display: flex; align-items: center; gap: 8px; }
 .gp-brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
-.gp-brand-mark { display: inline-flex; color: var(--oc-primary, #5b8def); }
+.gp-brand-mark { display: inline-flex; color: var(--oc-fg, CanvasText); }
 .gp-brand-title { letter-spacing: 0.01em; }
 .gp-spacer { flex: 1 1 auto; }
 
