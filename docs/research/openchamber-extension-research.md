@@ -88,12 +88,12 @@ From the shipped SDK (`@openchamber/sdk` v2.0.3, extracted from `resources/app.a
 `node_modules/@openchamber/sdk/`, which mirrors
 [github.com/openchamber/openchamber/tree/main/packages/sdk](https://github.com/openchamber/openchamber/tree/main/packages/sdk)):
 
-| Piece | What it is |
-| --- | --- |
-| `@openchamber/sdk` | Manifest parsing, the iframe `postMessage` protocol, and `connectHost()` |
-| `@openchamber/sdk/ui` | An optional plain-DOM UI kit (buttons, lists, fields, popups) that uses host theme tokens |
-| `@openchamber/sdk/schemas` | Zod schemas for the manifest and wire messages |
-| `openchamber-guest-bundle` | The SDK's bundler binary (`scripts/bundle-guest.ts`) |
+| Piece                      | What it is                                                                                |
+| -------------------------- | ----------------------------------------------------------------------------------------- |
+| `@openchamber/sdk`         | Manifest parsing, the iframe `postMessage` protocol, and `connectHost()`                  |
+| `@openchamber/sdk/ui`      | An optional plain-DOM UI kit (buttons, lists, fields, popups) that uses host theme tokens |
+| `@openchamber/sdk/schemas` | Zod schemas for the manifest and wire messages                                            |
+| `openchamber-guest-bundle` | The SDK's bundler binary (`scripts/bundle-guest.ts`)                                      |
 
 The docs describe the model:
 
@@ -138,7 +138,12 @@ and the [docs manifest table](https://docs.openchamber.dev/sdk/#manifest):
     "apiVersion": 1,
     "engines": { "openchamber": ">=1.24.0" },
     "contributes": {
-      "panel": { "id": "gitlab-pipelines", "name": "Pipelines", "icon": "git-merge-line", "entry": "panel/index.html" },
+      "panel": {
+        "id": "gitlab-pipelines",
+        "name": "Pipelines",
+        "icon": "git-merge-line",
+        "entry": "panel/index.html"
+      },
       "attach": false,
       "capabilities": ["sessions", "prompt"],
       "integration": {
@@ -172,6 +177,22 @@ Key manifest rules (all from the [manifest table](https://docs.openchamber.dev/s
   asking for messages adds `conversation`. The user approves the full list once at install.
 - Panel page + reading the open project/session need **no** capability
   ([docs, "What an extension may do"](https://docs.openchamber.dev/extensions/#what-an-extension-may-do)).
+
+### 2.3.1 Icon resolution (`panel.icon`)
+
+Verified against the installed app (`resources/app.asar` + `resources/web-dist`), not just the docs:
+
+- `panel.icon` accepts a Remixicon name **or** a package `.svg` path, and both parse cleanly
+  (`isPanelIcon` in `dist/manifest.js` only checks the name's _shape_). But the host only resolves a
+  **reduced Remixicon palette**, so a well-formed name outside it — `gitlab-fill`, `gitlab-line` —
+  renders **blank, with no error**. The host's own built-in GitLab panel uses `icon: 'window'`.
+- For a custom logo, ship a **package SVG** (`panel.icon: "icon.svg"`, file at the package root).
+  This is the only reliable route for a non-palette glyph.
+- The host renders that SVG as `<img class="dark:invert object-contain">`. So ship **one black**
+  glyph and let `dark:invert` turn it white on the dark theme. `fill="currentColor"` does **not**
+  work here: it is an `<img>`, outside the document, so `currentColor` resolves to black regardless
+  of theme. The app themes by a `.dark` class (not `prefers-color-scheme`), so an embedded media
+  query will not match either.
 
 ### 2.4 Host API used by a panel
 
@@ -322,7 +343,7 @@ GET /pipelines?created_after=...    # up to 100/page, keyset pagination via Link
 ### 3.2 Auth model
 
 - **Personal access token (recommended for a first version).** Create one at
-  *Edit profile → Access → Personal access tokens → Generate token → Legacy token*; pick scopes.
+  _Edit profile → Access → Personal access tokens → Generate token → Legacy token_; pick scopes.
   Pass it as `PRIVATE-TOKEN: <token>` (recommended) **or** as an OAuth-compliant header
   `Authorization: Bearer <token>` ([GitLab REST auth](https://docs.gitlab.com/api/rest/authentication/#personal-project-and-group-access-tokens);
   [Personal access tokens](https://docs.gitlab.com/user/profile/personal_access_tokens/)).
@@ -336,8 +357,8 @@ GET /pipelines?created_after=...    # up to 100/page, keyset pagination via Link
     `integration.token.scheme: "bearer"` works **without** a custom `PRIVATE-TOKEN` header. (With
     `scheme: "raw"` OpenChamber would send `Authorization: <token>` with no prefix, which GitLab does
     not document — avoid it.)
-- **OAuth 2.0**: GitLab is an OAuth provider; create an application under *Edit profile → Access →
-  Applications*, get a **Client ID** (and secret), pick scopes, and register a **Redirect URI**
+- **OAuth 2.0**: GitLab is an OAuth provider; create an application under _Edit profile → Access →
+  Applications_, get a **Client ID** (and secret), pick scopes, and register a **Redirect URI**
   ([GitLab OAuth provider](https://docs.gitlab.com/integration/oauth_provider/)). OAuth access tokens
   last **2 hours** and need the `refresh_token`
   ([OAuth provider § Access token expiration](https://docs.gitlab.com/integration/oauth_provider/#access-token-expiration)).
@@ -531,7 +552,7 @@ sections 1–7. Everything below was re-read from the shipped `@openchamber/sdk`
 `/tmp/opencode/sdk/`, and from the host-side implementation inside the installed AppImage's
 `resources/app.asar` (`@openchamber/web` 2.0.3, `server/lib/guests/*.js`). Where the public repo is the
 equivalent, the `packages/...` path is given. The live docs at docs.openchamber.dev describe a newer
-SDK and are used only to mark *future* capability, never as evidence for 2.0.3.
+SDK and are used only to mark _future_ capability, never as evidence for 2.0.3.
 
 Local source-root used below:
 
@@ -610,7 +631,7 @@ path is the loopback `OPENCHAMBER_SERVICE_TOKEN`, which is not the user's GitLab
 - `IntegrationHostProvider` is the closed union `'linear'` (`/tmp/opencode/sdk/manifest.ts:197`), and
   the host schema accepts only `provider: z.enum(['linear'])` (`/tmp/opencode/sdk/parse.ts:128-130`).
 - `resolveIntegrationApi` maps `host` to the **constant** `HOST_LINEAR_API_ORIGIN =
-  'https://api.linear.app'` (`/tmp/opencode/sdk/manifest.ts:213`, `:277-282`). The host-side token
+'https://api.linear.app'` (`/tmp/opencode/sdk/manifest.ts:213`, `:277-282`). The host-side token
   resolver is likewise Linear-only (`host-session.js:6-9`, `:63-73`; falls back to `getValidLinearAccessToken`).
 - Even under `host`, `request` still enforces the declared origin: `joinGuestRequestUrl` rejects any
   URL whose `url.origin !== apiOrigin` (`request.js:14-36`, check at `:24`), and `proxyGuestRequest`
@@ -625,13 +646,13 @@ origin. There is no way to make `host.request` target a custom/self-managed orig
 ### 8.4 (1d) Shipped 2.0.3 has no `origins` and no `fileEditors`. Confirmed.
 
 - `OpenChamberContributes` enumerates `panel, background, attach, page, statusSection, capabilities,
-  integration, service, filesystem, actions, commands, tools` — no `origins`, no `fileEditors`
+integration, service, filesystem, actions, commands, tools` — no `origins`, no `fileEditors`
   (`/tmp/opencode/sdk/manifest.ts:393-411`). The zod `contributesSchema` is the same list
   (`/tmp/opencode/sdk/parse.ts:260-284`).
 - A recursive search over every file under `/tmp/opencode/sdk/` for `origins|fileEditors` returns
   **zero matches** (SDK 2.0.3). Unknown top-level keys are silently dropped, not forwarded — zod
   objects here are non-strict and `GUEST_SERVICES.md:97` states "Extra keys still drop, not forward."
-- The live docs *do* describe both keys, which is the version skew the prior report flagged:
+- The live docs _do_ describe both keys, which is the version skew the prior report flagged:
   `origins` and `fileEditors` appear at https://docs.openchamber.dev/sdk/ ("Accounts and network" and
   "An editor for your file type"), and the capability table lists a fifth auto-granted capability
   `origins`. Neither exists in the shipped 2.0.3.
@@ -652,6 +673,7 @@ shipped docs define external network access as going through `host.request` on t
 non-default port: `isHttpsOrigin` requires `https:`, empty credentials, `pathname === '/'`, and
 `value === parsed.origin`, `/tmp/opencode/sdk/parse.ts:57-70`) and `scheme: "bearer"` (GitLab accepts
 `Authorization: Bearer <PAT>`, https://docs.gitlab.com/api/rest/authentication/#personal-project-and-group-access-tokens).
+
 - Token handling: best possible — the PAT is stored host-side (`guest-auth.json`, mode `0600`), injected
   by the host, and never reaches the page or any service (`request.js:46-61`, `oauth.js:183-188`).
 - CORS: irrelevant; the host fetches server-side with Node `fetch` (`request.js:54-60`).
@@ -664,6 +686,7 @@ non-default port: `isHttpsOrigin` requires `https:`, empty credentials, `pathnam
 Declare `contributes.service` (`entry` built JS, `runtime: "host"`, `/tmp/opencode/sdk/GUEST_SERVICES.md:41-95`);
 the panel sends the base URL and, if needed, the PAT to the service in the `serviceRequest` `query`/`body`
 (shape in §8.1), and the service does `fetch`/`https` to the chosen GitLab host.
+
 - Token handling: **worse than A.** The host-held token cannot reach the service (§8.1, §8.2), so the
   PAT must be supplied by the user to the panel — either as a plain `integration.settings` field
   (delivered to the page, §8.1) or via `host.storage`/the panel's own form — and then forwarded to the
@@ -690,7 +713,7 @@ request can pass preflight on a default instance — but I could not re-fetch th
 `config/initializers/cors.rb` (404 on the paths I tried), so treat the exact live CORS config as
 unverified.
 
-**Recommendation.** If the requirement is genuinely *one package, arbitrary self-managed hosts*, use
+**Recommendation.** If the requirement is genuinely _one package, arbitrary self-managed hosts_, use
 **Option B**: a `contributes.service` that owns the GitLab HTTP calls (no CORS, any host at runtime),
 with the base URL and PAT entered by the user (integration `settings` and/or the panel's own form).
 Do not rely on `integration.token` for the self-managed path, because its token is unreachable from the
@@ -738,6 +761,7 @@ safer alternative is a **static `integration.token.apiOrigin` + `host.request`**
 host-side but pins the package to one host.
 
 Residual unknowns:
+
 1. Whether/when `origins` ships in an OpenChamber build (live docs describe it; 2.0.3 does not have it).
 2. GitLab's current CORS configuration — the quoted `origins '*'` block is from GitLab issue #18494,
    and I could not re-fetch the current `config/initializers/cors.rb`, so any page-`fetch` plan should

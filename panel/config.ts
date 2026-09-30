@@ -5,15 +5,19 @@
  * in `package.json`: OpenChamber pins every `host.request` to that single
  * origin, so a project whose remote is on a different host is reported as
  * `host-mismatch` rather than silently called. See ADR-0001.
+ *
+ * The rail/settings icon ships as `icon.svg` (a package SVG), not a Remixicon
+ * name: a name outside the host's reduced palette renders blank. See
+ * `docs/research/openchamber-extension-research.md` §2.3.1.
  */
-export const PANEL_ID = 'gitlab-pipelines';
-export const API_ORIGIN = 'https://sdlc.webcloud.ec.europa.eu';
+export const PANEL_ID = "gitlab-pipelines";
+export const API_ORIGIN = "https://sdlc.webcloud.ec.europa.eu";
 
 /** Pipelines requested per page. Kept modest: `host.request` caps the body at 256 000 chars. */
 export const PER_PAGE = 20;
 
 /** The proxy service's one route. */
-export const SERVICE_PATH = '/proxy';
+export const SERVICE_PATH = "/proxy";
 
 /** Safety cap on lines rendered in the log drawer; the host also caps a response at 256 000 chars. */
 export const LOG_MAX_LINES = 20_000;
