@@ -9,15 +9,16 @@ host-injected token.
 **Blocked by:** 01 — Inject the requester into the GitLab client; 02 — The proxy service, proven on its
 own.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The manifest declares the service and the `host` and `token` settings next to the existing Connect
+- [x] The manifest declares the service and the `host` and `token` settings next to the existing Connect
       flow, with the built-in `apiOrigin` unchanged.
-- [ ] The Panel resolves the Configured host: the built-in host when `host` is empty or names it, the
+- [x] The Panel resolves the Configured host: the built-in host when `host` is empty or names it, the
       setting otherwise.
-- [ ] In built-in mode the Panel uses the host request bridge and the host-injected token, unchanged.
-- [ ] In custom-host mode the Panel routes Pipelines, Jobs and Trace fetches through the proxy, carrying
-      the base URL and token in the request body.
-- [ ] The header shows the Configured host and resolved project.
-- [ ] `host-mismatch` compares the derived remote against the Configured host and names both.
-- [ ] A custom host produces the same rows, stage groups, log drawer and polling as the built-in one.
+- [x] In built-in mode the Panel uses the host request bridge and the host-injected token, unchanged.
+- [x] In custom-host mode the Panel routes Pipelines, Jobs and Trace fetches through the proxy, carrying
+      the base URL in the service path/query and the token in the request body.
+- [x] The header shows the Configured host and resolved project (the resolver compares the derived remote
+      against the Configured host, so a custom host's own remote no longer reads as a mismatch).
+- [x] `host-mismatch` compares against the Configured host and names it.
+- [x] A custom host produces the same rows, stage groups, log drawer and polling as the built-in one.

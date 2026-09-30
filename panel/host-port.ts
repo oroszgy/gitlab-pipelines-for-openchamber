@@ -28,6 +28,8 @@ export type HostResponse = {
 
 export type HostPort = {
   request(input: HostRequest): Promise<HostResponse>;
+  /** The local proxy service, for a custom GitLab host. */
+  serviceRequest(input: HostRequest): Promise<HostResponse>;
   readFile(path: string): Promise<{ content: string }>;
   listProjects(): Promise<GuestProjectsSnapshot>;
   listWorktrees(projectId: string): Promise<GuestWorktreesSnapshot>;
@@ -43,6 +45,13 @@ export function createHostPort(): HostPort {
   return {
     request: (input) =>
       host.request({
+        method: input.method ?? 'GET',
+        path: input.path,
+        ...(input.query ? { query: input.query } : {}),
+        ...(input.body != null ? { body: input.body } : {}),
+      }),
+    serviceRequest: (input) =>
+      host.serviceRequest({
         method: input.method ?? 'GET',
         path: input.path,
         ...(input.query ? { query: input.query } : {}),

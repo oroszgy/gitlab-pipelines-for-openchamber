@@ -20,9 +20,11 @@ export class FakeHost implements HostPort {
   projects: GuestProject[] = [];
   worktrees: GuestWorktree[] = [];
   requests: HostRequest[] = [];
+  serviceRequests: HostRequest[] = [];
   openUrls: string[] = [];
   disposed = false;
   handler: RequestHandler | null = null;
+  serviceHandler: RequestHandler | null = null;
 
   private readonly readyListeners = new Set<(context: HostReadyContext) => void>();
   private readonly connectionListeners = new Set<(connection: GuestConnection) => void>();
@@ -49,6 +51,13 @@ export class FakeHost implements HostPort {
     const index = this.requests.length;
     this.requests.push(input);
     if (this.handler) return this.handler(input, index);
+    return { status: 200, body: '[]' };
+  }
+
+  async serviceRequest(input: HostRequest): Promise<HostResponse> {
+    const index = this.serviceRequests.length;
+    this.serviceRequests.push(input);
+    if (this.serviceHandler) return this.serviceHandler(input, index);
     return { status: 200, body: '[]' };
   }
 

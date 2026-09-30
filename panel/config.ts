@@ -12,6 +12,9 @@ export const API_ORIGIN = 'https://sdlc.webcloud.ec.europa.eu';
 /** Pipelines requested per page. Kept modest: `host.request` caps the body at 256 000 chars. */
 export const PER_PAGE = 20;
 
+/** The proxy service's one route. */
+export const SERVICE_PATH = '/proxy';
+
 /** Safety cap on lines rendered in the log drawer; the host also caps a response at 256 000 chars. */
 export const LOG_MAX_LINES = 20_000;
 

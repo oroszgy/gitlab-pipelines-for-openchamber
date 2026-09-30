@@ -82,8 +82,7 @@ async function mount(
 ): Promise<{ root: HTMLElement; panel: PanelHandle }> {
   const root = document.createElement('div');
   document.body.append(root);
-  const panel = mountPanel(root, host, { apiOrigin: HOST, timers });
-  host.emitReady(ready);
+  const panel = mountPanel(root, host, { apiOrigin: HOST, timers });  host.emitReady(ready);
   await flush();
   return { root, panel };
 }
@@ -516,6 +515,52 @@ describe('adaptive polling and freshness', () => {
     await flush();
     expect(text(root)).toContain('newer');
     expect(text(root)).not.toContain('older');
+  });
+});
+
+describe('custom host mode', () => {
+  function customHost(): FakeHost {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    return host;
+  }
+
+  test('routes GitLab fetches through the service and carries the token in the body', async () => {
+    const host = customHost();
+    host.serviceHandler = (request) => {
+      const payload = JSON.parse(request.body ?? '{}') as { path?: string };
+      if (payload.path?.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify({ status: 200, body: JSON.stringify([pipeline()]) }) };
+      }
+      return { status: 200, body: JSON.stringify({ status: 404, body: '' }) };
+    };
+    const root = document.createElement('div');
+    document.body.append(root);
+    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
+    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
+    await flush();
+
+    expect(host.requests).toHaveLength(0);
+    expect(host.serviceRequests.length).toBeGreaterThan(0);
+    const first = host.serviceRequests[0];
+    expect(first?.path).toBe('/proxy');
+    expect(first?.query?.baseUrl).toBe('gitlab.example.com');
+    const body = JSON.parse(first?.body ?? '{}') as { token?: string; path?: string };
+    expect(body.token).toBe('pat');
+    expect(body.path).toContain('/pipelines');
+    expect(text(root)).toContain('Passed');
+    panel.dispose();
+  });
+
+  test('keeps using the host bridge for the built-in host', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({ pipelines: [pipeline()] });
+    await mount(host, new FakeTimers(), readyContext({ settings: { host: 'gitlab.com' } }));
+    expect(host.serviceRequests).toHaveLength(0);
+    expect(host.requests.length).toBeGreaterThan(0);
   });
 });
 

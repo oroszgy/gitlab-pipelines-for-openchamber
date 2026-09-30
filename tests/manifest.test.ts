@@ -28,7 +28,20 @@ describe('package manifest', () => {
     const integration = parsed.manifest.contributes.integration;
     expect(integration?.token?.apiOrigin).toBe(API_ORIGIN);
     expect(integration?.token?.scheme).toBe('bearer');
-    expect(integration?.settings?.map((field) => field.id)).toContain('project');
+    const settings = integration?.settings?.map((field) => field.id) ?? [];
+    expect(settings).toContain('project');
+    expect(settings).toContain('host');
+    expect(settings).toContain('token');
+  });
+
+  test('ships the local proxy service for custom hosts', () => {    if (!parsed.ok) throw new Error('manifest did not parse');
+    const service = parsed.manifest.contributes.service;
+    expect(service?.runtime).toBe('host');
+    expect(service?.entry).toBe('service/main.js');
+    // The proxy is a narrow HTTPS proxy: no exec and no socket permissions.
+    expect(service?.permissions?.exec).toBeUndefined();
+    expect(service?.permissions?.sockets).toBeUndefined();
+    expect(existsSync(join(root, 'service/main.js'))).toBe(true);
   });
 
   test('asks for files and sessions (network comes with the integration)', () => {

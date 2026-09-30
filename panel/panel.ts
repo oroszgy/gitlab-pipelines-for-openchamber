@@ -1,9 +1,16 @@
 import type { GuestConnection, HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
 
-import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS } from './config';
+import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS, SERVICE_PATH } from './config';
 import { ago, duration, elapsed, logLines, shortSha, tailLines, toEpoch } from './format';
-import { fetchJobs, fetchPipelines, fetchTrace, fromHostPort, type ClientFailure } from './gitlab-client';
+import {
+  fetchJobs,
+  fetchPipelines,
+  fetchTrace,
+  fromHostPort,
+  type ClientFailure,
+  type Requester,
+} from './gitlab-client';
 import type { HostPort } from './host-port';
 import { nextPollDelay, shouldPoll } from './poll';
 import {
@@ -131,6 +138,8 @@ class PipelinesPanel implements PanelHandle {
 
   private directory: string | null = null;
   private settingsProject = '';
+  private settingsHost = '';
+  private settingsToken = '';
   private started = false;
   private disposed = false;
 
@@ -181,9 +190,18 @@ class PipelinesPanel implements PanelHandle {
   private handleReady(ctx: HostReadyContext): void {
     applyHostReady(ctx, document.documentElement);
     const project = ctx.settings?.project ?? '';
-    const changed = ctx.directory !== this.directory || project !== this.settingsProject || !this.started;
+    const host = ctx.settings?.host ?? '';
+    const token = ctx.settings?.token ?? '';
+    const changed =
+      ctx.directory !== this.directory ||
+      project !== this.settingsProject ||
+      host !== this.settingsHost ||
+      token !== this.settingsToken ||
+      !this.started;
     this.directory = ctx.directory;
     this.settingsProject = project;
+    this.settingsHost = host;
+    this.settingsToken = token;
     if (changed) {
       this.started = true;
       this.refresh();
@@ -193,6 +211,9 @@ class PipelinesPanel implements PanelHandle {
   }
 
   private handleConnection(connection: GuestConnection): void {
+    // Only the built-in path uses the host-injected token; a custom host
+    // authenticates with the `token` setting through the service.
+    if (this.isCustomHost()) return;
     if (!connection.connected) {
       this.problem = disconnectedProblem(this.configuredHost());
       this.phase = 'problem';
@@ -305,7 +326,9 @@ class PipelinesPanel implements PanelHandle {
 
     return resolveProject({
       directory,
-      apiOrigin: this.options.apiOrigin,
+      // Resolve against the Configured host, not the baked one, or a custom
+      // host's own remote reads as a mismatch (ADR-0002).
+      apiOrigin: this.isCustomHost() ? `https://${this.settingHost()}` : this.options.apiOrigin,
       projectOverride: override,
       gitConfig,
       gitFile,
@@ -319,7 +342,7 @@ class PipelinesPanel implements PanelHandle {
     resolution: Extract<ProjectResolution, { ok: true }>,
   ): Promise<void> {
     const scope: Scope = resolution.ref ? this.scope : 'all';
-    const result = await fetchPipelines(fromHostPort(this.port), resolution.project, {
+    const result = await fetchPipelines(this.requester(), resolution.project, {
       scope,
       ref: resolution.ref,
     });
@@ -380,7 +403,7 @@ class PipelinesPanel implements PanelHandle {
       this.jobs.set(pipelineId, 'loading');
       this.render();
     }
-    const result = await fetchJobs(fromHostPort(this.port), project, pipelineId);
+    const result = await fetchJobs(this.requester(), project, pipelineId);
     if (this.disposed || gen !== this.generation) return;
     if (result.ok) {
       this.jobs.set(pipelineId, result.data);
@@ -409,7 +432,7 @@ class PipelinesPanel implements PanelHandle {
   private async loadTrace(gen: number, jobId: number): Promise<void> {
     const project = this.resolved?.project;
     if (!project) return;
-    const result = await fetchTrace(fromHostPort(this.port), project, jobId);
+    const result = await fetchTrace(this.requester(), project, jobId);
     if (this.disposed || gen !== this.generation) return;
     this.traceLoadingId = null;
     if (!result.ok) {
@@ -531,8 +554,54 @@ class PipelinesPanel implements PanelHandle {
 
   // -- rendering ------------------------------------------------------------
 
+  // -- transport mode -------------------------------------------------------
+
+  /**
+   * A **Configured host** is either the **Built-in host** (empty setting, or one
+   * naming the built-in host) or a custom GitLab from the `host` setting. See
+   * ADR-0002.
+   */
   private configuredHost(): string {
     return hostOfOrigin(this.options.apiOrigin);
+  }
+
+  private settingHost(): string {
+    return normalizeHostSetting(this.settingsHost);
+  }
+
+  private isCustomHost(): boolean {
+    const host = this.settingHost();
+    return host !== '' && host !== this.configuredHost();
+  }
+
+  /**
+   * The one call every GitLab fetch makes. Built-in mode uses the host request
+   * bridge (host-injected token); custom-host mode goes through the proxy
+   * service, carrying the base URL and the `token` setting in the service
+   * request's path and body.
+   */
+  private requester(): Requester {
+    if (this.isCustomHost()) {
+      const baseUrl = this.settingHost();
+      const token = this.settingsToken.trim();
+      return async (request) => {
+        // Base URL and token travel as query and body, never in the path.
+        const response = await this.port.serviceRequest({
+          method: request.method ?? 'GET',
+          path: SERVICE_PATH,
+          query: { baseUrl },
+          body: JSON.stringify({
+            baseUrl,
+            token,
+            method: request.method ?? 'GET',
+            path: request.path,
+            query: request.query ?? {},
+          }),
+        });
+        return proxyResponse(response);
+      };
+    }
+    return fromHostPort(this.port);
   }
 
   private disposeHandles(): void {
@@ -942,6 +1011,28 @@ export function isAtBottom(
   threshold = 24,
 ): boolean {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
+}
+
+/**
+ * Normalize the `host` setting to a host (with port): accepts a bare host or a
+ * full `https://` origin, and drops a trailing slash. Returns `''` when unset.
+ */
+export function normalizeHostSetting(value: string): string {
+  const raw = value.trim();
+  if (!raw) return '';
+  if (raw.includes('://')) return hostOfOrigin(raw);
+  return raw.replace(/\/+$/, '');
+}
+
+/** The proxy answers with its own envelope; turn it back into a host response. */
+function proxyResponse(response: { status: number; body: string }): { status: number; body: string } {
+  try {
+    const parsed = JSON.parse(response.body) as { status?: number; body?: string; error?: string };
+    if (typeof parsed.status === 'number') return { status: parsed.status, body: parsed.body ?? '' };
+  } catch {
+    // Fall through to the raw response shape.
+  }
+  return { status: response.status, body: response.body };
 }
 
 /** Why the shown log is shorter than the job's trace, if it is. */

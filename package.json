@@ -28,6 +28,10 @@
         "entry": "panel/index.html"
       },
       "capabilities": ["files", "sessions"],
+      "service": {
+        "entry": "service/main.js",
+        "runtime": "host"
+      },
       "integration": {
         "name": "GitLab",
         "description": "Reads CI/CD pipelines, jobs and logs from one GitLab project. Read-only.",
@@ -37,7 +41,9 @@
           "account": { "path": "/api/v4/user", "name": "username" }
         },
         "settings": [
-          { "id": "project", "label": "GitLab project path or ID (optional)" }
+          { "id": "project", "label": "GitLab project path or ID (optional)" },
+          { "id": "host", "label": "GitLab host (optional)" },
+          { "id": "token", "label": "Access token" }
         ]
       }
     }
