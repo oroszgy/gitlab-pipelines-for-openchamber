@@ -4,3 +4,6 @@ node_modules/
 
 # Transient handoff documents (not project artifacts)
 .scratch/handoffs/
+
+# OpenChamber browser-tool scratch output
+.openchamber/
