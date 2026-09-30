@@ -6,12 +6,14 @@ works. A reader can see at a glance which mode the Panel is in.
 
 **Blocked by:** 03 — A custom host, end to end.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Changing `host` (or clearing it) re-resolves and refetches without a reload.
-- [ ] Pipelines, Jobs and cached Traces from the previous host are cleared, so no stale foreign data is
-      shown as current.
-- [ ] The built-in Connect flow is inert while a custom host is set, so it never asks for a token that
-      will not be used.
-- [ ] The header distinguishes the built-in mode from a custom host.
-- [ ] Switching back to the built-in host restores the secure path without needing an extra token.
+- [x] Changing `host` (or clearing it) re-resolves and refetches without a reload.
+- [x] Pipelines, Jobs and cached Traces from the previous host are cleared before re-resolving, so no
+      stale foreign data is shown as current (Jobs are keyed by pipeline id, not unique across hosts).
+- [x] The built-in Connect flow is inert while a custom host is set: the connection event is ignored in
+      custom mode, so no host-injected token is required or asked for.
+- [x] The header and footer distinguish a custom host (a "Custom host" tag and the host named in the
+      footer) from the built-in mode.
+- [x] Switching a remote on the built-in host back to the built-in path restores it without an extra
+      token; a remote that does not match the built-in host reports the mismatch rather than stale rows.

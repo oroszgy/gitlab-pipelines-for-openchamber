@@ -564,6 +564,95 @@ describe('custom host mode', () => {
   });
 });
 
+describe('switching hosts', () => {
+  function customHost(): FakeHost {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    return host;
+  }
+
+  test('clearing the host returns to the built-in path with no foreign data', async () => {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    host.handler = handlerFor({ pipelines: [pipeline({ id: 1, ref: 'builtin' })] });
+    host.serviceHandler = () => ({
+      status: 200,
+      body: JSON.stringify({ status: 200, body: JSON.stringify([pipeline({ id: 9, ref: 'custom' })]) }),
+    });
+
+    const root = document.createElement('div');
+    document.body.append(root);
+    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
+    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
+    await flush();
+    expect(text(root)).toContain('custom');
+
+    // Clearing the setting returns to the built-in host — here the remote is on
+    // the custom host, so the built-in path reports the mismatch and clears data.
+    host.emitReady(readyContext({ settings: {} }));
+    await flush();
+
+    expect(text(root)).not.toContain('custom');
+    expect(text(root)).toContain('Different GitLab host');
+    expect(root.querySelector('.gp-row')).toBeNull();
+    panel.dispose();
+  });
+
+  test('a switch drops cached jobs from the previous host', async () => {
+    const host = customHost();
+    host.serviceHandler = (request) => {
+      const body = JSON.parse(request.body ?? '{}') as { path?: string };
+      if (body.path?.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify({ status: 200, body: JSON.stringify([pipeline({ id: 7 })]) }) };
+      }
+      if (body.path?.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify({ status: 200, body: JSON.stringify([job({ id: 3, name: 'old-job' })]) }) };
+      }
+      return { status: 200, body: JSON.stringify({ status: 404, body: '' }) };
+    };
+    const root = document.createElement('div');
+    document.body.append(root);
+    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
+    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
+    await flush();
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('old-job');
+
+    host.emitReady(readyContext({ settings: {} }));
+    await flush();
+    expect(text(root)).not.toContain('old-job');
+    panel.dispose();
+  });
+
+  test('the header names a custom host', async () => {
+    const host = customHost();
+    host.serviceHandler = () => ({ status: 200, body: JSON.stringify({ status: 200, body: '[]' }) });
+    const root = document.createElement('div');
+    document.body.append(root);
+    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
+    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
+    await flush();
+    expect(root.querySelector('.gp-foot-host')?.textContent).toContain('gitlab.example.com');
+    expect(root.querySelector('.gp-host-tag')?.textContent).toBe('Custom host');
+    panel.dispose();
+  });
+
+  test('the built-in mode shows no custom marker', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({ pipelines: [pipeline()] });
+    const { root } = await mount(host, new FakeTimers());
+    expect(root.querySelector('.gp-foot-host')).toBeNull();
+    expect(root.querySelector('.gp-host-tag')).toBeNull();
+  });
+});
+
 describe('project override setting', () => {
   test('a pinned project is used instead of the derived one', async () => {
     const host = new FakeHost();

@@ -260,9 +260,10 @@ class PipelinesPanel implements PanelHandle {
 
   private async runRefresh(gen: number): Promise<void> {
     this.error = null;
+    this.forgetHostData();
     const override = this.settingsProject.trim();
     if (!this.directory && !override) {
-      this.problem = problemFor({ ok: false, failure: 'no-project' }, this.configuredHost());
+      this.problem = problemFor({ ok: false, failure: 'no-project' }, this.effectiveHost());
       this.phase = 'problem';
       this.resolved = null;
       this.stopAllTimers();
@@ -275,7 +276,7 @@ class PipelinesPanel implements PanelHandle {
     const resolution = await this.deriveProject();
     if (this.disposed || gen !== this.generation) return;
     if (!resolution.ok) {
-      this.problem = problemFor(resolution, this.configuredHost());
+      this.problem = problemFor(resolution, this.effectiveHost());
       this.phase = 'problem';
       this.resolved = null;
       this.stopAllTimers();
@@ -285,6 +286,21 @@ class PipelinesPanel implements PanelHandle {
     this.problem = null;
     this.resolved = resolution;
     await this.loadPipelines(gen, resolution);
+  }
+
+  /**
+   * Drop everything resolved from the previous Configured host before resolving
+   * again, so a host switch never shows another host's Pipelines, Jobs or Traces
+   * as current. Cached Jobs are keyed by pipeline id, which is not unique across
+   * hosts.
+   */
+  private forgetHostData(): void {
+    this.pipelines = [];
+    this.jobs.clear();
+    this.traces.clear();
+    this.openJob = null;
+    this.expandedId = null;
+    this.updatedAt = null;
   }
 
   private async deriveProject(): Promise<ProjectResolution> {
@@ -574,6 +590,11 @@ class PipelinesPanel implements PanelHandle {
     return host !== '' && host !== this.configuredHost();
   }
 
+  /** The GitLab the Panel is actually talking to, built-in or custom. */
+  private effectiveHost(): string {
+    return this.isCustomHost() ? this.settingHost() : this.configuredHost();
+  }
+
   /**
    * The one call every GitLab fetch makes. Built-in mode uses the host request
    * bridge (host-injected token); custom-host mode goes through the proxy
@@ -687,13 +708,19 @@ class PipelinesPanel implements PanelHandle {
     head.append(row);
 
     const projectPath = el('div', 'gp-project');
+    if (this.isCustomHost()) {
+      const tag = el('span', 'gp-host-tag', 'Custom host');
+      tag.dataset.mode = 'custom';
+      projectPath.append(tag);
+    }
     const pathText = el('span', 'gp-project-path');
     if (this.resolved) {
       pathText.textContent = `${this.resolved.host}/${this.resolved.project}`;
     } else {
-      projectPath.hidden = true;
+      pathText.hidden = true;
     }
     projectPath.append(pathText);
+    if (!this.resolved && !this.isCustomHost()) projectPath.hidden = true;
     head.append(projectPath);
 
     head.append(this.renderScope());
@@ -984,6 +1011,11 @@ class PipelinesPanel implements PanelHandle {
   private renderFooter(): HTMLElement {
     const foot = el('div', 'gp-foot');
     foot.append(el('span', '', 'Read-only'));
+    if (this.isCustomHost()) {
+      // Beside the built-in Connect flow, name the mode so it is clear which
+      // credential the Panel is using.
+      foot.append(el('span', 'gp-foot-host', `Custom host: ${this.effectiveHost()}`));
+    }
     return foot;
   }
 }
