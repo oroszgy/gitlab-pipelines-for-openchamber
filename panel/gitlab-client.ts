@@ -7,6 +7,7 @@ export type ClientFailure =
   | { kind: 'disconnected' }
   | { kind: 'unauthorized' }
   | { kind: 'not-found' }
+  | { kind: 'service' }
   | { kind: 'http'; status: number }
   | { kind: 'network' };
 
@@ -82,6 +83,28 @@ export function isDisconnectedError(error: unknown): boolean {
   );
 }
 
+/** A host error code, when the error carries one. */
+export function hostErrorCode(error: unknown): string | null {
+  if (typeof error !== 'object' || error === null) return null;
+  const code = (error as { code?: unknown }).code;
+  return typeof code === 'string' ? code : null;
+}
+
+/**
+ * Map a host error to a typed failure. The service errors matter only on the
+ * custom-host path: `NO_SERVICE` (not declared, not granted, not started) and
+ * `SERVICE_FAILED` (crashed) mean the proxy is unusable; everything else is a
+ * plain transport failure.
+ */
+export function clientFailureFromError(error: unknown): ClientFailure {
+  const code = hostErrorCode(error);
+  if (code === 'DISCONNECTED') return { kind: 'disconnected' };
+  if (code === 'NO_SERVICE' || code === 'SERVICE_FAILED' || code === 'NOT_GRANTED') {
+    return { kind: 'service' };
+  }
+  return { kind: 'network' };
+}
+
 type CallResult = { ok: true; status: number; body: string } | { ok: false; failure: ClientFailure };
 
 async function call(requester: Requester, request: HostRequest): Promise<CallResult> {
@@ -89,7 +112,7 @@ async function call(requester: Requester, request: HostRequest): Promise<CallRes
   try {
     response = await requester(request);
   } catch (error) {
-    return { ok: false, failure: isDisconnectedError(error) ? { kind: 'disconnected' } : { kind: 'network' } };
+    return { ok: false, failure: clientFailureFromError(error) };
   }
   const failure = mapHttpStatus(response.status);
   if (failure) return { ok: false, failure };

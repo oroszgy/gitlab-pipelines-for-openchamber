@@ -653,6 +653,81 @@ describe('switching hosts', () => {
   });
 });
 
+describe('custom host failures and grants', () => {
+  function customHost(): FakeHost {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    return host;
+  }
+
+  async function mountWith(host: FakeHost, settings: Record<string, string>) {
+    const root = document.createElement('div');
+    document.body.append(root);
+    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
+    host.emitReady(readyContext({ settings }));
+    await flush();
+    return { root, panel };
+  }
+
+  test('a malformed host is a typed failure, not a fallback', async () => {
+    const host = customHost();
+    const { root, panel } = await mountWith(host, { host: 'not a host!!', token: 'pat' });
+    expect(text(root)).toContain('Invalid GitLab host');
+    expect(host.requests).toHaveLength(0);
+    expect(host.serviceRequests).toHaveLength(0);
+    panel.dispose();
+  });
+
+  test('a custom host with no token has its own state', async () => {
+    const host = customHost();
+    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com' });
+    expect(text(root)).toContain('No token for this host');
+    expect(text(root)).not.toContain('GitLab not connected');
+    expect(host.serviceRequests).toHaveLength(0);
+    panel.dispose();
+  });
+
+  test('an ungranted service is a service state pointing at Settings', async () => {
+    const host = customHost();
+    host.serviceHandler = () => {
+      const error = new Error('no service') as Error & { code: string };
+      error.code = 'NO_SERVICE';
+      throw error;
+    };
+    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com', token: 'pat' });
+    expect(text(root)).toContain('Proxy service unavailable');
+    expect(text(root)).toContain('Extensions');
+    panel.dispose();
+  });
+
+  test('a failed proxy request is an error, not an empty list', async () => {
+    const host = customHost();
+    host.serviceHandler = () => {
+      throw new Error('REQUEST_FAILED');
+    };
+    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com', token: 'pat' });
+    expect(text(root)).toContain('Could not reach GitLab');
+    expect(text(root)).not.toContain('No pipelines');
+    panel.dispose();
+  });
+
+  test('the built-in path is unaffected with no service grant', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({ pipelines: [pipeline()] });
+    host.serviceHandler = () => {
+      const error = new Error('no service') as Error & { code: string };
+      error.code = 'NO_SERVICE';
+      throw error;
+    };
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Passed');
+    expect(host.serviceRequests).toHaveLength(0);
+  });
+});
+
 describe('project override setting', () => {
   test('a pinned project is used instead of the derived one', async () => {
     const host = new FakeHost();

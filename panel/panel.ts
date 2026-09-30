@@ -55,7 +55,14 @@ export type PanelHandle = {
 };
 
 type Problem = {
-  kind: ProjectFailureKind | 'disconnected' | 'unauthorized' | 'not-found';
+  kind:
+    | ProjectFailureKind
+    | 'disconnected'
+    | 'unauthorized'
+    | 'not-found'
+    | 'custom-host'
+    | 'custom-token'
+    | 'service';
   title: string;
   body: string;
   hint?: string;
@@ -260,6 +267,18 @@ class PipelinesPanel implements PanelHandle {
 
   private async runRefresh(gen: number): Promise<void> {
     this.error = null;
+    // A malformed setting, or a custom host with no token, never falls through to
+    // a fetch (and never silently falls back to the built-in host).
+    const badHost = this.hostSettingProblem();
+    if (badHost) {
+      this.problem = badHost;
+      this.phase = 'problem';
+      this.resolved = null;
+      this.forgetHostData();
+      this.stopAllTimers();
+      this.render();
+      return;
+    }
     this.forgetHostData();
     const override = this.settingsProject.trim();
     if (!this.directory && !override) {
@@ -286,6 +305,21 @@ class PipelinesPanel implements PanelHandle {
     this.problem = null;
     this.resolved = resolution;
     await this.loadPipelines(gen, resolution);
+  }
+
+  /**
+   * The typed failure for the `host`/`token` settings, or null when they are
+   * usable. A malformed host is never treated as "use the built-in host".
+   */
+  private hostSettingProblem(): Problem | null {
+    const raw = this.settingsHost.trim();
+    if (raw === '') return null;
+
+    const custom = normalizeHostSetting(raw);
+    if (!isValidHost(custom)) return customHostProblem(raw);
+    if (custom === this.configuredHost()) return null; // same-host shortcut: built-in path
+    if (this.settingsToken.trim() === '') return customTokenProblem(custom);
+    return null;
   }
 
   /**
@@ -379,8 +413,13 @@ class PipelinesPanel implements PanelHandle {
   }
 
   private handleFailure(failure: ClientFailure): void {
-    if (failure.kind === 'disconnected' || failure.kind === 'unauthorized' || failure.kind === 'not-found') {
-      this.problem = failureProblem(failure, this.configuredHost());
+    if (
+      failure.kind === 'disconnected' ||
+      failure.kind === 'unauthorized' ||
+      failure.kind === 'not-found' ||
+      failure.kind === 'service'
+    ) {
+      this.problem = failureProblem(failure, this.effectiveHost());
       this.phase = 'problem';
       this.resolved = null;
       this.stopAllTimers();
@@ -1056,6 +1095,11 @@ export function normalizeHostSetting(value: string): string {
   return raw.replace(/\/+$/, '');
 }
 
+/** A host with an optional port and nothing else — no scheme, path or spaces. */
+export function isValidHost(host: string): boolean {
+  return /^[a-z0-9.-]+(:\d+)?$/i.test(host);
+}
+
 /** The proxy answers with its own envelope; turn it back into a host response. */
 function proxyResponse(response: { status: number; body: string }): { status: number; body: string } {
   try {
@@ -1141,8 +1185,8 @@ function disconnectedProblem(configuredHost: string): Problem {
   };
 }
 
-function failureProblem(failure: ClientFailure, configuredHost: string): Problem {
-  if (failure.kind === 'disconnected') return disconnectedProblem(configuredHost);
+function failureProblem(failure: ClientFailure, effectiveHost: string): Problem {
+  if (failure.kind === 'disconnected') return disconnectedProblem(effectiveHost);
   if (failure.kind === 'unauthorized') {
     return {
       kind: 'unauthorized',
@@ -1150,10 +1194,38 @@ function failureProblem(failure: ClientFailure, configuredHost: string): Problem
       body: 'The stored token cannot read this project. A personal access token with the read_api scope is required.',
     };
   }
+  if (failure.kind === 'service') {
+    return {
+      kind: 'service',
+      title: 'Proxy service unavailable',
+      body: 'The local proxy that reaches a custom GitLab host is not running. It may not be granted yet, or it failed to start.',
+      hint: 'Open Settings → Extensions and allow this extension’s service, then refresh.',
+    };
+  }
   return {
     kind: 'not-found',
     title: 'Project not found',
     body: 'GitLab could not find this project, or the token cannot see it.',
+  };
+}
+
+/** A custom host is set but its `token` setting is empty. */
+function customTokenProblem(host: string): Problem {
+  return {
+    kind: 'custom-token',
+    title: 'No token for this host',
+    body: `The Panel reaches ${host} through the proxy service and needs a personal access token for it.`,
+    hint: 'Set the “Access token” setting to a personal access token with the read_api scope.',
+  };
+}
+
+/** The `host` setting is set but is not a usable host. */
+function customHostProblem(value: string): Problem {
+  return {
+    kind: 'custom-host',
+    title: 'Invalid GitLab host',
+    body: `“${value}” is not a usable host. Enter a bare host like gitlab.example.com, or a full https:// origin.`,
+    hint: 'Fix the “GitLab host” setting, or clear it to use the built-in instance.',
   };
 }
 

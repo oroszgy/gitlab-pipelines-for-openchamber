@@ -7,15 +7,15 @@ error, never as a project that simply has no Pipelines.
 
 **Blocked by:** 03 — A custom host, end to end.
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] A malformed `host` is a typed failure naming what is wrong, not a silent fallback to the built-in
-      host.
-- [ ] A custom host with no `token` has its own state, distinct from a missing connection on the
-      built-in path.
-- [ ] A missing service grant and a failed service are distinguishable states pointing at Settings →
-      Extensions.
-- [ ] A proxy request failure surfaces as the existing network error, never as an empty list.
-- [ ] Each state offers the settings-based way out where one exists, consistent with the existing
-      failure states.
-- [ ] The built-in path is unaffected when no service grant exists.
+- [x] A malformed `host` is a typed failure ("Invalid GitLab host") naming what is wrong; it never
+      silently falls back to the built-in host, and no request is made.
+- [x] A custom host with no `token` has its own state ("No token for this host"), distinct from a
+      missing connection on the built-in path.
+- [x] A missing service grant or failed service (`NO_SERVICE`, `SERVICE_FAILED`, `NOT_GRANTED`) is a
+      typed `service` state pointing at Settings → Extensions.
+- [x] A proxy request failure maps to the existing network error ("Could not reach GitLab"), never to an
+      empty list.
+- [x] Each state offers the settings-based way out, consistent with the existing failure states.
+- [x] The built-in path is unaffected when no service grant exists.
