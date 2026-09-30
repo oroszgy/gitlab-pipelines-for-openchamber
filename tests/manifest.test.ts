@@ -19,7 +19,7 @@ describe('package manifest', () => {
     const panel = parsed.manifest.contributes.panel;
     expect(panel.id).toBe(PANEL_ID);
     expect(panel.name).toBe('Pipelines');
-    expect(panel.icon).toBe('git-merge-line');
+    expect(panel.icon).toBe('gitlab-fill');
     expect(panel.entry).toBe('panel/index.html');
   });
 

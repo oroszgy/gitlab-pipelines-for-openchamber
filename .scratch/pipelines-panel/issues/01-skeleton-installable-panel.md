@@ -11,7 +11,7 @@ to a classic IIFE ahead of time, and a test harness runs green against a fake ho
 **Status:** done
 
 - [x] Installing the folder in OpenChamber shows a **Pipelines** Panel in the rail with the
-      `git-merge-line` icon.
+      `gitlab-fill` icon.
 - [x] The Panel mounts once and renders the ready context — the open project's directory, or a clear
       empty state when none is open.
 - [x] Source is TypeScript bundled by `openchamber-guest-bundle` into a classic IIFE at build time;

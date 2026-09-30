@@ -22,7 +22,7 @@
       "panel": {
         "id": "gitlab-pipelines",
         "name": "Pipelines",
-        "icon": "git-merge-line",
+        "icon": "gitlab-fill",
         "entry": "panel/index.html"
       },
       "capabilities": ["files", "sessions"],

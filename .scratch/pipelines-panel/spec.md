@@ -93,7 +93,7 @@ TypeScript bundled with the SDK's own `openchamber-guest-bundle` via bun. This r
 itself — manifest and `panel/` at the root, docs alongside.
 
 **Identity.** Panel id `gitlab-pipelines`, rail label **Pipelines**, built-in Remixicon
-`git-merge-line`.
+`gitlab-fill`.
 
 **Integration.** An `integration.token` whose `apiOrigin` is baked to the single GitLab host
 (self-managed or `gitlab.com`) and whose `scheme` is `bearer`; the user supplies a personal access
