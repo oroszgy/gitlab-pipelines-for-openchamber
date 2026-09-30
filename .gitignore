@@ -1,3 +1,6 @@
 node_modules/
 *.log
 .DS_Store
+
+# Transient handoff documents (not project artifacts)
+.scratch/handoffs/
