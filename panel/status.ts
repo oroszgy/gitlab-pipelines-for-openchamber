@@ -4,7 +4,7 @@
  */
 
 export type Tone = 'neutral' | 'primary' | 'success' | 'warning' | 'error' | 'info';
-export type Glyph = 'check' | 'cross' | 'clock' | 'circle' | 'loader' | 'hourglass' | 'slash' | 'skip' | 'play' | 'dot';
+export type Glyph = 'check' | 'cross' | 'clock' | 'calendar' | 'circle' | 'loader' | 'hourglass' | 'pause' | 'slash' | 'skip' | 'play' | 'dot';
 
 export type StatusInfo = {
   label: string;
@@ -23,9 +23,9 @@ const TABLE: Record<string, StatusInfo> = {
   pending: { label: 'Pending', tone: 'warning', glyph: 'clock' },
   created: { label: 'Created', tone: 'neutral', glyph: 'circle' },
   preparing: { label: 'Preparing', tone: 'warning', glyph: 'loader' },
-  scheduled: { label: 'Scheduled', tone: 'neutral', glyph: 'clock' },
-  waiting_for_resource: { label: 'Waiting', tone: 'neutral', glyph: 'hourglass' },
-  waiting_for_callback: { label: 'Waiting', tone: 'neutral', glyph: 'hourglass' },
+  scheduled: { label: 'Scheduled', tone: 'neutral', glyph: 'calendar' },
+  waiting_for_resource: { label: 'Waiting for resource', tone: 'neutral', glyph: 'pause' },
+  waiting_for_callback: { label: 'Waiting for callback', tone: 'neutral', glyph: 'hourglass' },
   canceling: { label: 'Canceling', tone: 'warning', glyph: 'loader' },
   canceled: { label: 'Canceled', tone: 'neutral', glyph: 'slash' },
   skipped: { label: 'Skipped', tone: 'neutral', glyph: 'skip', muted: true },

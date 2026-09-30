@@ -3,6 +3,7 @@ import {
   cleanProjectPath,
   deriveRef,
   hostOfOrigin,
+  isLinkedWorktree,
   parseHeadRef,
   parseRemoteUrl,
   pickRemote,
@@ -192,5 +193,50 @@ describe('resolveProject', () => {
     ];
     const result = resolveProject({ directory: '/repo', apiOrigin, gitConfig, head: null, worktrees });
     expect(result.ok && result.ref).toBe('main');
+  });
+
+  test('a linked worktree reports its own failure, with the ref it could find', () => {
+    const worktrees = [
+      { directory: '/repo', name: 'feature', branch: 'feature/x', status: 'ready' as const },
+    ];
+    expect(
+      resolveProject({
+        directory: '/repo',
+        apiOrigin,
+        gitConfig: null,
+        gitFile: 'gitdir: /main/.git/worktrees/repo\n',
+        worktrees,
+      }),
+    ).toEqual({ ok: false, failure: 'linked-worktree', detectedRef: 'feature/x' });
+  });
+
+  test('a gitdir pointer without a known ref still reports a linked worktree', () => {
+    expect(
+      resolveProject({
+        directory: '/repo',
+        apiOrigin,
+        gitConfig: null,
+        gitFile: 'gitdir: /main/.git/worktrees/repo\n',
+      }),
+    ).toEqual({ ok: false, failure: 'linked-worktree', detectedRef: null });
+  });
+
+  test('an unreadable config with no gitdir pointer is still not-a-repo', () => {
+    expect(
+      resolveProject({ directory: '/repo', apiOrigin, gitConfig: null, gitFile: null }),
+    ).toEqual({ ok: false, failure: 'not-a-repo' });
+  });
+});
+
+describe('isLinkedWorktree', () => {
+  test('detects the gitdir pointer line', () => {
+    expect(isLinkedWorktree('gitdir: /main/.git/worktrees/repo\n')).toBe(true);
+    expect(isLinkedWorktree('  gitdir: /main/.git/worktrees/repo')).toBe(true);
+  });
+  test('is false for a directory listing, a config file or nothing', () => {
+    expect(isLinkedWorktree('ref: refs/heads/main\n')).toBe(false);
+    expect(isLinkedWorktree('[core]\n\tbare = false\n')).toBe(false);
+    expect(isLinkedWorktree(null)).toBe(false);
+    expect(isLinkedWorktree('')).toBe(false);
   });
 });

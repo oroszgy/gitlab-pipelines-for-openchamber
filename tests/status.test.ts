@@ -9,9 +9,9 @@ describe('statusInfo', () => {
     ['pending', 'Pending', 'warning', 'clock'],
     ['created', 'Created', 'neutral', 'circle'],
     ['preparing', 'Preparing', 'warning', 'loader'],
-    ['scheduled', 'Scheduled', 'neutral', 'clock'],
-    ['waiting_for_resource', 'Waiting', 'neutral', 'hourglass'],
-    ['waiting_for_callback', 'Waiting', 'neutral', 'hourglass'],
+    ['scheduled', 'Scheduled', 'neutral', 'calendar'],
+    ['waiting_for_resource', 'Waiting for resource', 'neutral', 'pause'],
+    ['waiting_for_callback', 'Waiting for callback', 'neutral', 'hourglass'],
     ['canceling', 'Canceling', 'warning', 'loader'],
     ['canceled', 'Canceled', 'neutral', 'slash'],
     ['skipped', 'Skipped', 'neutral', 'skip'],
@@ -26,6 +26,16 @@ describe('statusInfo', () => {
 
   test('falls back for an unknown status', () => {
     expect(statusInfo('something_new')).toEqual({ label: 'Unknown', tone: 'neutral', glyph: 'dot' });
+  });
+
+  test('every known status is distinguishable by label and glyph', () => {
+    const seen = new Map<string, string>();
+    for (const [status] of cases) {
+      const info = statusInfo(status);
+      const key = `${info.label}\u0000${info.glyph}`;
+      expect(seen.has(key)).toBe(false);
+      seen.set(key, status);
+    }
   });
 
   test('only the running glyph animates', () => {

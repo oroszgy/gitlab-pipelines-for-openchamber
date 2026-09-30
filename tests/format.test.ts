@@ -85,7 +85,14 @@ describe('tailLines', () => {
     expect(tailLines(null, 40)).toEqual([]);
     expect(tailLines('a\nb', 0)).toEqual([]);
   });
-  test('counts a trailing newline as a final empty line', () => {
-    expect(tailLines('a\n', 1)).toEqual(['']);
+  test('a trailing newline is a terminator, not an extra content line', () => {
+    expect(tailLines('a\n', 1)).toEqual(['a']);
+  });
+  test('a 40-line log ending in a newline keeps 40 content lines', () => {
+    const log = `${Array.from({ length: 40 }, (_, index) => `line ${index + 1}`).join('\n')}\n`;
+    const tail = tailLines(log, 40);
+    expect(tail).toHaveLength(40);
+    expect(tail[0]).toBe('line 1');
+    expect(tail[39]).toBe('line 40');
   });
 });

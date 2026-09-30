@@ -46,3 +46,10 @@ A GitLab instance hosted on its own domain rather than on `gitlab.com`. Because 
 `apiOrigin` is a static manifest field, supporting one is a deliberate design decision, not a config
 detail.
 _Avoid_: on-prem, private
+
+**Linked worktree**:
+A git checkout whose `.git` is a *file* pointing at the primary repository instead of a directory, so
+`.git/config` and `.git/HEAD` cannot be read from the open project. The Panel cannot derive a GitLab
+project from one — the host API exposes no remote — so it reports `linked-worktree` and the `project`
+override is the way to read its pipelines. Its Ref is still known from the host's worktree list.
+_Avoid_: secondary checkout, submodule (a different thing)

@@ -1,6 +1,6 @@
 # Spec: GitLab Pipelines panel
 
-Status: ready-for-agent
+Status: implemented — see `.scratch/pipelines-panel/issues/01`–`08`.
 Feature: `pipelines-panel`
 
 ## Problem Statement
@@ -79,8 +79,9 @@ GitLab.
     panel is not mistaken for a result.
 30. As a developer, I want a Pipeline or Job I select to be linkable back to GitLab, so that I can
     hand off to the full UI when I need more.
-31. As a developer working in a git worktree, I want the Panel to find my current Ref anyway, so that
-    it works in the way OpenChamber sessions commonly run.
+31. As a developer working in a git worktree, I want the Panel to find my current Ref anyway — and to
+    tell me plainly when a linked worktree hides the remote — so that it works in the way OpenChamber
+    sessions commonly run and the one case needing the override is obvious.
 32. As a developer, I want the Panel to keep working if I switch the open project, so that it follows
     my context.
 
@@ -101,9 +102,9 @@ why one host is baked in. Capabilities: `files` and `sessions` (plus the implici
 optional `project` setting overrides the derived project.
 
 **One seam: the host port.** Every dependency on OpenChamber is expressed as a narrow interface —
-ready context, `request` to the configured origin, reading a project file, listing worktrees,
-opening a URL. The real adapter wraps `connectHost()`; tests substitute a fake. All logic sits behind
-it as pure modules:
+ready context and connection changes, `request` to the configured origin, reading a project file,
+listing projects, listing worktrees, opening a URL, dispose. The real adapter wraps `connectHost()`;
+tests substitute a fake. All logic sits behind it as pure modules:
 
 - **project-resolver** — ready context + raw file contents + worktrees → `{ host, projectPath, ref }`
   or a typed failure: `no-project`, `not-a-repo`, `host-mismatch`. Owns remote-URL parsing for the
@@ -116,18 +117,26 @@ it as pure modules:
 - **stage-groups** — a flat Job list → ordered Stage groups with `done/total` counts.
 - **poll** — the current Statuses plus elapsed time (clock injected) → the next delay or stop. This
   is the adaptive rule: poll while anything is `pending`, `running`, `created`, `preparing`,
-  `canceling` or `waiting_for_*`; stop otherwise.
+  `canceling` or `waiting_for_*`; stop otherwise. The interval backs off (×2 after 2 minutes of
+  continuous activity, ×3 after 10) so an all-night run is not polled at full rate.
 - **format** — short SHA, duration, relative age.
 - **panel** — the only module that touches the DOM. Consumes the port and the modules above, mounts
   into the rail, renders rows, stage groups and the log drawer, and owns the Branch / All refs
   toggle, the refresh control and the stale-response guard.
 
-**Project resolution.** Take the open project's `directory` from the ready context. Read
-`.git/config` to find the remote URL and parse out the host and project path; if that host is not the
-configured `apiOrigin`, resolve to `host-mismatch`. Determine the current Ref from the host worktree
-list (matching `directory`), falling back to reading `.git/HEAD` — required because in a linked
-worktree `.git` is a file and the HEAD read fails. A configured `project` setting short-circuits all
-of this.
+**Project resolution.** Take the open project's `directory` from the ready context. Read `.git/config`
+to find the remote URL and parse out the host and project path; if that host is not the configured
+`apiOrigin`, resolve to `host-mismatch`. Determine the current Ref from the host worktree list
+(matching `directory`), falling back to reading `.git/HEAD`. A configured `project` setting
+short-circuits all of this.
+
+`.git` may itself be a **file** — a linked worktree, which is how OpenChamber sessions commonly run —
+in which case `.git/config` and `.git/HEAD` are unreadable because the pointer target normally lies
+outside the open project. The host API exposes **no** git remote (and no project id/remote in the
+ready context), so the remote cannot be recovered in this case; the Ref still comes from the worktree
+list. This is reported as its own `linked-worktree` failure — naming the Ref it did find — rather than
+the misleading `not-a-repo`, and the `project` override is the way out. See
+`docs/research/openchamber-project-context-research.md` §3–§4, §7.
 
 **Data.** Pipelines come from the project's pipelines endpoint, filtered by `ref` in Branch scope and
 ordered by most-recently-updated in All refs scope, with a modest page size. Expanding a Pipeline
@@ -135,7 +144,11 @@ fetches its Jobs. Opening a Job fetches its trace, from which the tail is shown.
 
 **Panel behaviour.** Adaptive polling with a manual refresh, a stale-response guard so a slow reply
 cannot overwrite a newer one, and the timer cleared when the Panel is disposed. A manual refresh is
-always available.
+always available. A Jobs or trace fetch that *fails* is reported as an error, kept distinct from a
+genuinely empty result (no Jobs, no log output): the two mean different things and must not be
+conflated. Beyond the connected/disconnected failures the Panel names four non-happy states —
+`no-project`, `not-a-repo`, `linked-worktree`, `host-mismatch` — plus `unauthorized`/`not-found` for
+a token or project GitLab cannot see.
 
 **Layout (settled by the prototype, `prototype/panel-ui`).** Variant A's accordion is the base, with
 Variant B's bottom drawer for the log:
@@ -159,7 +172,9 @@ Variant B's bottom drawer for the log:
 **Status → colour.** One shared map across Pipelines, Jobs and Stages, covering `success`, `failed`,
 `failed + allow_failure` (reads as a warning, "failed (allowed)"), `running`, `pending`, `preparing`,
 `canceling`, `created`, `scheduled`, `waiting_for_resource`, `waiting_for_callback`, `canceled`,
-`skipped` and `manual`. Only the running glyph animates.
+`skipped` and `manual`. Every Status has a unique **label and glyph** pair, its own tone where the
+distinction earns one, and only the running glyph animates. (`preparing` and `canceling` deliberately
+share the loader glyph and warning tone; their labels keep them apart.)
 
 ## Testing Decisions
 
@@ -170,15 +185,18 @@ through the fake host port, asserting on the rendered DOM.
 Modules under test:
 
 - **project-resolver** — every remote-URL form, subgroups, trailing `.git`, worktree and HEAD
-  fallback, and each typed failure.
+  fallback, linked-worktree detection, and each typed failure.
 - **gitlab-client** — path and query construction for each scope, and error mapping.
-- **status** — every Status, including `failed` with and without `allow_failure`.
+- **status** — every Status, including `failed` with and without `allow_failure`, and that no two
+  Statuses share a label and glyph.
 - **stage-groups** — ordering, `done/total`, empty stages, skipped and manual Jobs.
 - **poll** — active vs settled status sets, and the stop condition.
-- **format** — short SHA, durations, relative ages at their boundaries.
+- **format** — short SHA, durations, relative ages at their boundaries, and the trailing-newline
+  terminator in the log tail.
 - **panel** — driven through the fake host: a fake `.git/config`, fake worktree data and fake
-  `request` responses; asserts the list, expansion, the log drawer, the five non-happy states, and
-  that polling continues only while something is running.
+  `request` responses; asserts the list, expansion, the log drawer, the non-happy states (including
+  `linked-worktree`), that a failed Jobs/trace fetch reads as an error rather than an empty result,
+  and that polling continues only while something is running.
 
 There is no prior art in the repo (it is greenfield); the prototype is a visual reference, not a
 test. The runner is `bun test`, with a DOM shim only for the panel tests.

@@ -8,14 +8,14 @@ to a classic IIFE ahead of time, and a test harness runs green against a fake ho
 
 **Blocked by:** None (can start immediately).
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] Installing the folder in OpenChamber shows a **Pipelines** Panel in the rail with the
+- [x] Installing the folder in OpenChamber shows a **Pipelines** Panel in the rail with the
       `git-merge-line` icon.
-- [ ] The Panel mounts once and renders the ready context — the open project's directory, or a clear
+- [x] The Panel mounts once and renders the ready context — the open project's directory, or a clear
       empty state when none is open.
-- [ ] Source is TypeScript bundled by `openchamber-guest-bundle` into a classic IIFE at build time;
+- [x] Source is TypeScript bundled by `openchamber-guest-bundle` into a classic IIFE at build time;
       nothing is compiled at install.
-- [ ] The host port seam exists: a narrow interface for the ready context and the operations the
+- [x] The host port seam exists: a narrow interface for the ready context and the operations the
       Panel needs, a real adapter over `connectHost()`, and a fake the tests use.
-- [ ] `bun test` runs and passes against the fake.
+- [x] `bun test` runs and passes against the fake.

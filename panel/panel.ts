@@ -1,7 +1,7 @@
 import type { GuestConnection, HostReadyContext } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
 
-import { API_ORIGIN, LOG_TAIL_LINES, LIVE_TICK_MS, PANEL_ID } from './config';
+import { API_ORIGIN, LOG_TAIL_LINES, LIVE_TICK_MS } from './config';
 import { ago, duration, elapsed, shortSha, tailLines, toEpoch } from './format';
 import { fetchJobs, fetchPipelines, fetchTrace, type ClientFailure } from './gitlab-client';
 import type { HostPort } from './host-port';
@@ -37,7 +37,6 @@ export const defaultTimers: Timers = {
 
 export type PanelOptions = {
   apiOrigin: string;
-  panelId: string;
   timers?: Timers;
 };
 
@@ -56,7 +55,7 @@ type Problem = {
   detail?: string;
 };
 
-type TraceState = { state: 'ready' | 'missing'; text: string };
+type TraceState = { state: 'ready' | 'missing' | 'error'; text: string };
 
 type OpenJob = { pipelineId: number; jobId: number };
 
@@ -69,11 +68,15 @@ const GLYPHS: Record<string, string> = {
   cross: '<path d="M18.4 7.0l-1.4-1.4L12 10.6 7.0 5.6 5.6 7.0l4.9 5-4.9 5 1.4 1.4 5-4.9 5 4.9 1.4-1.4-4.9-5z"/>',
   clock:
     '<circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M12 7.2v5.1l3.1 2.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>',
+  calendar:
+    '<rect x="4.5" y="5.5" width="15" height="14" rx="2" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M4.5 9.5h15M8.5 3.5v4M15.5 3.5v4" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
   circle: '<circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.8"/>',
   loader:
     '<circle cx="12" cy="12" r="8.2" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-dasharray="13 40"/>',
   hourglass:
     '<path d="M7 4h10v2l-3.7 4.6L17 15v2H7v-2l3.7-4.4L7 6z" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>',
+  pause:
+    '<rect x="7" y="5.5" width="3.4" height="13" rx="1"/><rect x="13.6" y="5.5" width="3.4" height="13" rx="1"/>',
   slash:
     '<circle cx="12" cy="12" r="8.4" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M6.9 6.9 17.1 17.1" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/>',
   skip: '<path d="M6 5.4l9.2 6.6L6 18.6z"/><rect x="16.4" y="5.4" width="2.6" height="13.2" rx="0.6"/>',
@@ -131,7 +134,7 @@ class PipelinesPanel implements PanelHandle {
   private error: string | null = null;
   private pipelines: Pipeline[] = [];
   private expandedId: number | null = null;
-  private readonly jobs = new Map<number, Job[] | 'loading'>();
+  private readonly jobs = new Map<number, Job[] | 'loading' | 'error'>();
   private openJob: OpenJob | null = null;
   private readonly traces = new Map<number, TraceState>();
   private traceLoadingId: number | null = null;
@@ -257,6 +260,7 @@ class PipelinesPanel implements PanelHandle {
     const directory = this.directory;
 
     let gitConfig: string | null = null;
+    let gitFile: string | null = null;
     let head: string | null = null;
     let worktrees: ResolveInput['worktrees'] = null;
 
@@ -265,6 +269,14 @@ class PipelinesPanel implements PanelHandle {
         gitConfig = (await this.port.readFile('.git/config')).content;
       } catch {
         gitConfig = null;
+      }
+      // In a linked worktree `.git` is a file, which is why the config read above fails.
+      if (gitConfig == null) {
+        try {
+          gitFile = (await this.port.readFile('.git')).content;
+        } catch {
+          gitFile = null;
+        }
       }
       try {
         head = (await this.port.readFile('.git/HEAD')).content;
@@ -285,6 +297,7 @@ class PipelinesPanel implements PanelHandle {
       apiOrigin: this.options.apiOrigin,
       projectOverride: override,
       gitConfig,
+      gitFile,
       head,
       worktrees,
     });
@@ -358,7 +371,14 @@ class PipelinesPanel implements PanelHandle {
     }
     const result = await fetchJobs(this.port, project, pipelineId);
     if (this.disposed || gen !== this.generation) return;
-    this.jobs.set(pipelineId, result.ok ? result.data : []);
+    if (result.ok) {
+      this.jobs.set(pipelineId, result.data);
+    } else if (silent) {
+      // A background refresh must not discard jobs already on screen.
+    } else {
+      // A failed fetch is not an absence of jobs; say so rather than showing none.
+      this.jobs.set(pipelineId, 'error');
+    }
     if (this.expandedId === pipelineId) this.render();
   }
 
@@ -379,8 +399,13 @@ class PipelinesPanel implements PanelHandle {
     const result = await fetchTrace(this.port, project, jobId);
     if (this.disposed || gen !== this.generation) return;
     this.traceLoadingId = null;
-    const text = result.ok ? (result.data ?? '') : '';
-    this.traces.set(jobId, text.trim() ? { state: 'ready', text } : { state: 'missing', text: '' });
+    if (!result.ok) {
+      // A failed fetch is not a missing log; keep the two apart.
+      this.traces.set(jobId, { state: 'error', text: '' });
+    } else {
+      const text = result.data ?? '';
+      this.traces.set(jobId, text.trim() ? { state: 'ready', text } : { state: 'missing', text: '' });
+    }
     this.render();
   }
 
@@ -708,6 +733,8 @@ class PipelinesPanel implements PanelHandle {
       const value = this.jobs.get(pipeline.id);
       if (value === undefined || value === 'loading') {
         jobsWrap.append(el('div', 'gp-row-sub', 'Loading jobs…'));
+      } else if (value === 'error') {
+        jobsWrap.append(el('div', 'gp-row-sub', 'Could not load jobs. Collapse and reopen to retry.'));
       } else if (value.length === 0) {
         jobsWrap.append(el('div', 'gp-row-sub', 'No jobs reported yet.'));
       } else {
@@ -821,6 +848,10 @@ class PipelinesPanel implements PanelHandle {
       drawer.append(el('div', 'gp-drawer-empty', 'No log output yet — the job has not started.'));
       return drawer;
     }
+    if (entry.state === 'error') {
+      drawer.append(el('div', 'gp-drawer-empty', 'Could not load the log. Close and reopen to retry.'));
+      return drawer;
+    }
     const lines = tailLines(entry.text, LOG_TAIL_LINES);
     const pre = el('pre', 'gp-drawer-body');
     pre.textContent = lines.join('\n');
@@ -857,7 +888,9 @@ function pipelineSubtitle(pipeline: Pipeline): string {
   if (pipeline.merge_request?.iid != null) bits.push(`!${pipeline.merge_request.iid}`);
   else if (pipeline.tag) bits.push('tag');
   else if (pipeline.name) bits.push(pipeline.name);
-  else if (pipeline.source && pipeline.source !== 'push') bits.push(pipeline.source.replace(/_/g, ' '));
+  // The source is always worth a slot (merge-request events, schedules, web, …);
+  // a plain `push` is the unremarkable default.
+  if (pipeline.source && pipeline.source !== 'push') bits.push(pipeline.source.replace(/_/g, ' '));
   return bits.join(' · ');
 }
 
@@ -877,6 +910,16 @@ function problemFor(resolution: Extract<ProjectResolution, { ok: false }>, confi
         body: 'This project has no readable .git remote, so there is no GitLab project to derive.',
         hint: 'Or set the “Project” setting to a GitLab project path.',
       };
+    case 'linked-worktree': {
+      const problem: Problem = {
+        kind: 'linked-worktree',
+        title: 'Linked worktree',
+        body: 'This project is a linked git worktree, so its .git points outside it and the remote cannot be read. There is no host API for the remote in this case.',
+        hint: 'Set the “Project” setting to this worktree’s GitLab project path to read its pipelines.',
+      };
+      if (resolution.detectedRef) problem.detail = `Current ref: ${resolution.detectedRef}`;
+      return problem;
+    }
     case 'host-mismatch':
       return {
         kind: 'host-mismatch',
@@ -922,6 +965,5 @@ export function mountPanel(root: HTMLElement, port: HostPort, options: PanelOpti
   return new PipelinesPanel(root, port, {
     ...options,
     apiOrigin: options.apiOrigin || API_ORIGIN,
-    panelId: options.panelId || PANEL_ID,
   }).start();
 }

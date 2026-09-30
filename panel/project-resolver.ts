@@ -6,7 +6,7 @@ export type Remote = {
   path: string;
 };
 
-export type ProjectFailureKind = 'no-project' | 'not-a-repo' | 'host-mismatch';
+export type ProjectFailureKind = 'no-project' | 'not-a-repo' | 'linked-worktree' | 'host-mismatch';
 
 export type ProjectResolution =
   | {
@@ -24,6 +24,8 @@ export type ProjectResolution =
       failure: ProjectFailureKind;
       detectedHost?: string;
       detectedPath?: string;
+      /** The current Ref, when it could be determined even though the project could not. */
+      detectedRef?: string | null;
     };
 
 export type ResolveInput = {
@@ -35,6 +37,11 @@ export type ResolveInput = {
   projectOverride?: string;
   /** Contents of `.git/config`, or null when it could not be read. */
   gitConfig?: string | null;
+  /**
+   * Contents of `.git` when it is a *file* (a linked worktree, where it reads
+   * `gitdir: …`), or null when it is a directory or could not be read.
+   */
+  gitFile?: string | null;
   /** Contents of `.git/HEAD`, or null when it could not be read. */
   head?: string | null;
   /** The host's worktree list for the project, or null when unavailable. */
@@ -148,6 +155,15 @@ export function samePath(a: string | null | undefined, b: string | null | undefi
   return a.replace(/\/+$/, '') === b.replace(/\/+$/, '');
 }
 
+/**
+ * Whether `.git` is a linked-worktree pointer file rather than a directory.
+ * Git writes a single `gitdir: <path>` line, where `<path>` is normally outside
+ * the open project, so neither `.git/config` nor `.git/HEAD` is readable.
+ */
+export function isLinkedWorktree(gitFile: string | null | undefined): boolean {
+  return gitFile != null && /^\s*gitdir:\s*\S+/.test(gitFile);
+}
+
 /** The current Ref: the worktree list first, HEAD only as a fallback. */
 export function deriveRef(
   directory: string | null,
@@ -166,7 +182,7 @@ export function deriveRef(
  * failure. Pure: every file and worktree read is passed in.
  *
  * A `project` setting short-circuits Git entirely, which is the escape hatch
- * for `no-project`, `not-a-repo` and `host-mismatch`.
+ * for `no-project`, `not-a-repo`, `linked-worktree` and `host-mismatch`.
  */
 export function resolveProject(input: ResolveInput): ProjectResolution {
   const host = hostOfOrigin(input.apiOrigin);
@@ -190,6 +206,16 @@ export function resolveProject(input: ResolveInput): ProjectResolution {
 
   const picked = input.gitConfig ? pickRemote(input.gitConfig) : null;
   if (!picked) {
+    // A linked worktree has `.git` as a file pointing outside the project, so
+    // there is no readable remote to derive the project from. Report that
+    // distinctly: `not-a-repo` would be a lie, and the Ref may still be known.
+    if (isLinkedWorktree(input.gitFile)) {
+      return {
+        ok: false,
+        failure: 'linked-worktree',
+        detectedRef: deriveRef(input.directory, input.head, input.worktrees),
+      };
+    }
     return { ok: false, failure: 'not-a-repo' };
   }
 

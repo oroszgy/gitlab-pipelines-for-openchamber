@@ -81,7 +81,7 @@ async function mount(
 ): Promise<{ root: HTMLElement; panel: PanelHandle }> {
   const root = document.createElement('div');
   document.body.append(root);
-  const panel = mountPanel(root, host, { apiOrigin: HOST, panelId: 'gitlab-pipelines', timers });
+  const panel = mountPanel(root, host, { apiOrigin: HOST, timers });
   host.emitReady(ready);
   await flush();
   return { root, panel };
@@ -132,6 +132,20 @@ describe('project resolution in the header', () => {
     expect(root.querySelector('.gp-project')?.hasAttribute('hidden')).toBe(true);
     expect(text(root)).not.toContain('gitlab.com/group');
   });
+
+  test('a linked worktree is its own state, not "not a repo"', async () => {
+    const host = configuredHost();
+    host.files.delete('.git/config');
+    host.files.delete('.git/HEAD');
+    host.files.set('.git', 'gitdir: /primary/.git/worktrees/wt\n');
+    host.worktrees = [{ directory: '/repo', name: 'wt', branch: 'feature/x', status: 'ready' }];
+    host.handler = handlerFor({});
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Linked worktree');
+    expect(text(root)).toContain('Current ref: feature/x');
+    expect(text(root)).not.toContain('Not a Git repository');
+    expect(text(root)).toContain('Project');
+  });
 });
 
 describe('pipeline list', () => {
@@ -158,6 +172,15 @@ describe('pipeline list', () => {
     host.handler = handlerFor({ pipelines: [pipeline({ merge_request: { iid: 5 } })] });
     const { root } = await mount(host, new FakeTimers());
     expect(root.querySelector('.gp-row-sub')?.textContent).toContain('!5');
+  });
+
+  test('keeps the source on the second line even when the pipeline has a name', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({ pipelines: [pipeline({ name: 'nightly', source: 'schedule' })] });
+    const { root } = await mount(host, new FakeTimers());
+    const subtitle = root.querySelector('.gp-row-sub')?.textContent ?? '';
+    expect(subtitle).toContain('nightly');
+    expect(subtitle).toContain('schedule');
   });
 
   test('no pipelines for the ref is an empty state, not an error', async () => {
@@ -233,6 +256,22 @@ describe('expanding a pipeline', () => {
     await flush();
     expect(host.openUrls).toContain('https://gitlab.com/group/project/-/pipelines/7');
   });
+
+  test('a failed jobs fetch is an error, not an empty list', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      }
+      if (request.path.endsWith('/jobs')) return { status: 500, body: '' };
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('Could not load jobs');
+    expect(text(root)).not.toContain('No jobs reported yet');
+  });
 });
 
 describe('the job log drawer', () => {
@@ -289,6 +328,27 @@ describe('the job log drawer', () => {
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
     expect(text(root)).toContain('No log output yet');
+  });
+
+  test('a failed log fetch is an error, not "no output"', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify([job({ id: 9 })]) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 500, body: '' };
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('Could not load the log');
+    expect(text(root)).not.toContain('No log output yet');
   });
 });
 

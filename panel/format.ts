@@ -55,7 +55,8 @@ export function ago(epochMs: number, now: number = Date.now()): string {
 /** The last `count` lines of a trace, joined back with their newlines. */
 export function tailLines(text: string | null | undefined, count: number): string[] {
   if (text == null || text === '') return [];
-  const lines = text.split('\n');
   if (count <= 0) return [];
-  return lines.slice(-count);
+  // GitLab traces end in a newline; that terminator is not an extra content line.
+  const body = text.endsWith('\n') ? text.slice(0, -1) : text;
+  return body.split('\n').slice(-count);
 }
