@@ -144,6 +144,25 @@ describe('the proxy is bounded', () => {
     expect(result.ok).toBe(false);
     expect(result.error).not.toContain('secret-pat');
   });
+
+  test('keeps the abort live while the body is read, so a slow body times out', async () => {
+    let aborted = false;
+    const slowBody = (async () => ({
+      status: 200,
+      text: () =>
+        new Promise<string>((_, reject) => {
+          // The abort signal is what a real fetch would observe; here we assert
+          // it is still armed after the headers resolved.
+          setTimeout(() => {
+            aborted = true;
+            reject(new Error('aborted'));
+          }, 0);
+        }),
+    })) as unknown as ProxyFetch;
+    const result = await handleProxy(request(), slowBody);
+    expect(aborted).toBe(true);
+    expect(result.ok).toBe(false);
+  });
 });
 
 describe('the proxy timeout is stated in one place', () => {

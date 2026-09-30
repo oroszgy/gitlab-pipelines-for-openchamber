@@ -547,7 +547,7 @@ describe('custom host mode', () => {
     expect(host.serviceRequests.length).toBeGreaterThan(0);
     const first = host.serviceRequests[0];
     expect(first?.path).toBe('/proxy');
-    expect(first?.query?.baseUrl).toBe('gitlab.example.com');
+    expect(first?.query?.baseUrl).toBe('https://gitlab.example.com');
     const body = JSON.parse(first?.body ?? '{}') as { token?: string; path?: string };
     expect(body.token).toBe('pat');
     expect(body.path).toContain('/pipelines');
@@ -681,6 +681,24 @@ describe('custom host failures and grants', () => {
     panel.dispose();
   });
 
+  test('a non-https host is refused rather than silently upgraded', async () => {
+    const host = customHost();
+    const { root, panel } = await mountWith(host, { host: 'http://gitlab.example.com', token: 'pat' });
+    expect(text(root)).toContain('Invalid GitLab host');
+    expect(host.serviceRequests).toHaveLength(0);
+    panel.dispose();
+  });
+
+  test('a host with embedded credentials or a path is refused', async () => {
+    const host = customHost();
+    const credentialed = await mountWith(host, { host: 'https://u:p@gitlab.example.com', token: 'pat' });
+    expect(text(credentialed.root)).toContain('Invalid GitLab host');
+    credentialed.panel.dispose();
+    const pathed = await mountWith(host, { host: 'https://gitlab.example.com/gitlab', token: 'pat' });
+    expect(text(pathed.root)).toContain('Invalid GitLab host');
+    pathed.panel.dispose();
+  });
+
   test('a custom host with no token has its own state', async () => {
     const host = customHost();
     const { root, panel } = await mountWith(host, { host: 'gitlab.example.com' });
@@ -714,6 +732,16 @@ describe('custom host failures and grants', () => {
     panel.dispose();
   });
 
+  test('a 502 envelope from the proxy shell is a network error, not an HTTP one', async () => {
+    const host = customHost();
+    // The shell answers a handler failure with 502 and an `error` envelope.
+    host.serviceHandler = () => ({ status: 502, body: JSON.stringify({ error: 'Could not reach https://gitlab.example.com: boom' }) });
+    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com', token: 'pat' });
+    expect(text(root)).toContain('Could not reach GitLab');
+    expect(text(root)).not.toContain('unexpected response');
+    panel.dispose();
+  });
+
   test('the built-in path is unaffected with no service grant', async () => {
     const host = configuredHost();
     host.handler = handlerFor({ pipelines: [pipeline()] });
@@ -725,6 +753,23 @@ describe('custom host failures and grants', () => {
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Passed');
     expect(host.serviceRequests).toHaveLength(0);
+  });
+
+  test('an ordinary refresh keeps the list and the open log', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace: 'line 1' });
+    const { root, panel } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer')).not.toBeNull();
+
+    panel.refresh();
+    await flush();
+    // The same Configured host: a refresh must not close the drawer or drop rows.
+    expect(root.querySelector('.gp-drawer')).not.toBeNull();
+    expect(root.querySelectorAll('.gp-row').length).toBe(1);
   });
 });
 

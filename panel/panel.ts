@@ -162,6 +162,8 @@ class PipelinesPanel implements PanelHandle {
   private readonly traces = new Map<number, TraceState>();
   private traceLoadingId: number | null = null;
   private updatedAt: number | null = null;
+  /** The Configured host the current data belongs to, for switch detection. */
+  private lastHost: string | null = null;
 
   private generation = 0;
   private pollTimer: number | null = null;
@@ -279,7 +281,13 @@ class PipelinesPanel implements PanelHandle {
       this.render();
       return;
     }
-    this.forgetHostData();
+    // Drop the previous host's data only when the Configured host actually
+    // changed, so an ordinary refresh keeps the list, expansion and open log.
+    const target = this.effectiveHost();
+    if (target !== this.lastHost) {
+      this.forgetHostData();
+      this.lastHost = target;
+    }
     const override = this.settingsProject.trim();
     if (!this.directory && !override) {
       this.problem = problemFor({ ok: false, failure: 'no-project' }, this.effectiveHost());
@@ -309,16 +317,16 @@ class PipelinesPanel implements PanelHandle {
 
   /**
    * The typed failure for the `host`/`token` settings, or null when they are
-   * usable. A malformed host is never treated as "use the built-in host".
+   * usable. A setting that cannot be a base URL is a hard failure, never a
+   * silent fallback to the built-in host (US29).
    */
   private hostSettingProblem(): Problem | null {
     const raw = this.settingsHost.trim();
     if (raw === '') return null;
-
-    const custom = normalizeHostSetting(raw);
-    if (!isValidHost(custom)) return customHostProblem(raw);
-    if (custom === this.configuredHost()) return null; // same-host shortcut: built-in path
-    if (this.settingsToken.trim() === '') return customTokenProblem(custom);
+    const base = resolveCustomBase(raw);
+    if (base == null) return customHostProblem(raw);
+    if (hostOfBase(base) === this.configuredHost()) return null; // same-host shortcut: built-in path
+    if (this.settingsToken.trim() === '') return customTokenProblem(hostOfBase(base));
     return null;
   }
 
@@ -378,7 +386,7 @@ class PipelinesPanel implements PanelHandle {
       directory,
       // Resolve against the Configured host, not the baked one, or a custom
       // host's own remote reads as a mismatch (ADR-0002).
-      apiOrigin: this.isCustomHost() ? `https://${this.settingHost()}` : this.options.apiOrigin,
+      apiOrigin: this.isCustomHost() ? (this.customBase() ?? this.options.apiOrigin) : this.options.apiOrigin,
       projectOverride: override,
       gitConfig,
       gitFile,
@@ -620,38 +628,42 @@ class PipelinesPanel implements PanelHandle {
     return hostOfOrigin(this.options.apiOrigin);
   }
 
-  private settingHost(): string {
-    return normalizeHostSetting(this.settingsHost);
+  /** The base URL for a custom host, or null when the setting is unusable. */
+  private customBase(): string | null {
+    return resolveCustomBase(this.settingsHost);
   }
 
+  /** Whether a custom host is set and usable: a valid base that is not the built-in host. */
   private isCustomHost(): boolean {
-    const host = this.settingHost();
-    return host !== '' && host !== this.configuredHost();
+    const base = this.customBase();
+    if (base == null) return false;
+    return hostOfBase(base) !== this.configuredHost();
   }
 
   /** The GitLab the Panel is actually talking to, built-in or custom. */
   private effectiveHost(): string {
-    return this.isCustomHost() ? this.settingHost() : this.configuredHost();
+    const base = this.customBase();
+    return base != null && this.isCustomHost() ? hostOfBase(base) : this.configuredHost();
   }
 
   /**
    * The one call every GitLab fetch makes. Built-in mode uses the host request
    * bridge (host-injected token); custom-host mode goes through the proxy
    * service, carrying the base URL and the `token` setting in the service
-   * request's path and body.
+   * request's body. (Only the base URL rides in the query, for the service's
+   * logs; the token never leaves the body.)
    */
   private requester(): Requester {
-    if (this.isCustomHost()) {
-      const baseUrl = this.settingHost();
+    const base = this.isCustomHost() ? this.customBase() : null;
+    if (base != null) {
       const token = this.settingsToken.trim();
       return async (request) => {
-        // Base URL and token travel as query and body, never in the path.
         const response = await this.port.serviceRequest({
           method: request.method ?? 'GET',
           path: SERVICE_PATH,
-          query: { baseUrl },
+          query: { baseUrl: base },
           body: JSON.stringify({
-            baseUrl,
+            baseUrl: base,
             token,
             method: request.method ?? 'GET',
             path: request.path,
@@ -1085,19 +1097,37 @@ export function isAtBottom(
 }
 
 /**
- * Normalize the `host` setting to a host (with port): accepts a bare host or a
- * full `https://` origin, and drops a trailing slash. Returns `''` when unset.
+ * Resolve the `host` setting to a base URL, or null when it is not usable.
+ * `https://` is accepted; a bare host is taken as https; any other scheme, an
+ * embedded credential or a path is a hard no — never a silent coercion, so a
+ * typo cannot send the token anywhere unintended (US11/US29).
+ *
+ * Returns the base URL (scheme + host + optional port), e.g. `https://gitlab.example.com`.
  */
-export function normalizeHostSetting(value: string): string {
+export function resolveCustomBase(value: string): string | null {
   const raw = value.trim();
-  if (!raw) return '';
-  if (raw.includes('://')) return hostOfOrigin(raw);
-  return raw.replace(/\/+$/, '');
+  if (!raw) return null;
+  if (raw.includes('://')) {
+    const scheme = raw.slice(0, raw.indexOf('://')).toLowerCase();
+    if (scheme !== 'https') return null;
+    let url: URL;
+    try {
+      url = new URL(raw);
+    } catch {
+      return null;
+    }
+    if (url.username || url.password) return null;
+    if (url.pathname !== '/' && url.pathname !== '') return null;
+    if (url.search || url.hash) return null;
+    return url.origin;
+  }
+  if (!/^[a-z0-9.-]+(:\d+)?$/i.test(raw)) return null;
+  return `https://${raw}`;
 }
 
-/** A host with an optional port and nothing else — no scheme, path or spaces. */
-export function isValidHost(host: string): boolean {
-  return /^[a-z0-9.-]+(:\d+)?$/i.test(host);
+/** The host (with port) of a base URL, for display and comparison. */
+export function hostOfBase(base: string): string {
+  return base.replace(/^https:\/\//, '').replace(/\/+$/, '');
 }
 
 /** The proxy answers with its own envelope; turn it back into a host response. */
@@ -1105,8 +1135,15 @@ function proxyResponse(response: { status: number; body: string }): { status: nu
   try {
     const parsed = JSON.parse(response.body) as { status?: number; body?: string; error?: string };
     if (typeof parsed.status === 'number') return { status: parsed.status, body: parsed.body ?? '' };
-  } catch {
-    // Fall through to the raw response shape.
+    // The shell answers a proxy failure with a 502 envelope carrying `error`.
+    // Raise it so the client maps it to a network failure, not an HTTP one.
+    if (parsed.error) throw new Error(parsed.error);
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      // Not our envelope; fall through to the raw response shape.
+    } else {
+      throw error;
+    }
   }
   return { status: response.status, body: response.body };
 }

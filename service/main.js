@@ -55,6 +55,7 @@ async function handleProxy(request, fetchImpl) {
   const controller = new AbortController;
   const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   let response;
+  let text;
   try {
     response = await fetchImpl(url, {
       method: request.method,
@@ -65,14 +66,13 @@ async function handleProxy(request, fetchImpl) {
   } catch (error) {
     const message = error instanceof Error ? error.message : "request failed";
     return { ok: false, error: redact(`Could not reach ${origin}: ${message}`, request.token) };
-  } finally {
-    clearTimeout(timer);
   }
-  let text;
   try {
     text = await response.text();
   } catch {
     return { ok: false, error: "The GitLab host returned no readable body." };
+  } finally {
+    clearTimeout(timer);
   }
   const truncated = text.length > PROXY_BODY_MAX;
   const body = truncated ? text.slice(0, PROXY_BODY_MAX) : text;

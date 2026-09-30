@@ -91,7 +91,10 @@ export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch):
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   let response;
+  let text: string;
   try {
+    // The abort stays live until the whole body is read, so a slow body cannot
+    // hang the request after its headers arrive (US13).
     response = await fetchImpl(url, {
       method: request.method,
       headers,
@@ -101,15 +104,14 @@ export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch):
   } catch (error) {
     const message = error instanceof Error ? error.message : 'request failed';
     return { ok: false, error: redact(`Could not reach ${origin}: ${message}`, request.token) };
-  } finally {
-    clearTimeout(timer);
   }
 
-  let text: string;
   try {
     text = await response.text();
   } catch {
     return { ok: false, error: 'The GitLab host returned no readable body.' };
+  } finally {
+    clearTimeout(timer);
   }
 
   const truncated = text.length > PROXY_BODY_MAX;
