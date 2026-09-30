@@ -1,5 +1,5 @@
 import { PER_PAGE } from './config';
-import type { HostPort, HostRequest } from './host-port';
+import type { HostPort, HostRequest, HostResponse } from './host-port';
 import type { Job, Pipeline, Scope } from './types';
 
 /** A typed failure, mapped from an HTTP status or a host error. */
@@ -9,6 +9,21 @@ export type ClientFailure =
   | { kind: 'not-found' }
   | { kind: 'http'; status: number }
   | { kind: 'network' };
+
+/**
+ * The one call a GitLab fetch makes. In built-in mode this is the host request
+ * bridge; in custom-host mode it is the proxy service. Kept narrow so the client
+ * never sees the transport, only "send this and give me a status and a body".
+ */
+export type Requester = (request: HostRequest) => Promise<HostResponse>;
+
+/**
+ * Wrap a host port as a `Requester`. Host ports are objects, so a bare method
+ * reference would lose its `this`; this keeps the call bound.
+ */
+export function fromHostPort(port: HostPort): Requester {
+  return (request) => port.request(request);
+}
 
 export type ClientResult<T> = { ok: true; data: T } | { ok: false; failure: ClientFailure };
 
@@ -69,10 +84,10 @@ export function isDisconnectedError(error: unknown): boolean {
 
 type CallResult = { ok: true; status: number; body: string } | { ok: false; failure: ClientFailure };
 
-async function call(port: HostPort, request: HostRequest): Promise<CallResult> {
+async function call(requester: Requester, request: HostRequest): Promise<CallResult> {
   let response;
   try {
-    response = await port.request(request);
+    response = await requester(request);
   } catch (error) {
     return { ok: false, failure: isDisconnectedError(error) ? { kind: 'disconnected' } : { kind: 'network' } };
   }
@@ -90,34 +105,34 @@ function parseJson<T>(body: string, status: number): ClientResult<T> {
 }
 
 export async function fetchPipelines(
-  port: HostPort,
+  requester: Requester,
   project: string,
   options: { scope: Scope; ref?: string | null; perPage?: number },
 ): Promise<ClientResult<Pipeline[]>> {
   const request = pipelinesRequest(project, options);
-  const result = await call(port, { method: 'GET', ...request });
+  const result = await call(requester, { method: 'GET', ...request });
   if (!result.ok) return result;
   return parseJson<Pipeline[]>(result.body, result.status);
 }
 
 export async function fetchJobs(
-  port: HostPort,
+  requester: Requester,
   project: string,
   pipelineId: number,
 ): Promise<ClientResult<Job[]>> {
   const request = jobsRequest(project, pipelineId);
-  const result = await call(port, { method: 'GET', ...request });
+  const result = await call(requester, { method: 'GET', ...request });
   if (!result.ok) return result;
   return parseJson<Job[]>(result.body, result.status);
 }
 
 export async function fetchTrace(
-  port: HostPort,
+  requester: Requester,
   project: string,
   jobId: number,
 ): Promise<ClientResult<string>> {
   const request = traceRequest(project, jobId);
-  const result = await call(port, { method: 'GET', ...request });
+  const result = await call(requester, { method: 'GET', ...request });
   if (!result.ok) {
     // A job with no trace answers 404; treat that as an empty log, not an error.
     if (result.failure.kind === 'not-found') return { ok: true, data: '' };

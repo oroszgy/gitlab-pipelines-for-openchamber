@@ -3,7 +3,7 @@ import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber
 
 import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS } from './config';
 import { ago, duration, elapsed, logLines, shortSha, tailLines, toEpoch } from './format';
-import { fetchJobs, fetchPipelines, fetchTrace, type ClientFailure } from './gitlab-client';
+import { fetchJobs, fetchPipelines, fetchTrace, fromHostPort, type ClientFailure } from './gitlab-client';
 import type { HostPort } from './host-port';
 import { nextPollDelay, shouldPoll } from './poll';
 import {
@@ -319,7 +319,7 @@ class PipelinesPanel implements PanelHandle {
     resolution: Extract<ProjectResolution, { ok: true }>,
   ): Promise<void> {
     const scope: Scope = resolution.ref ? this.scope : 'all';
-    const result = await fetchPipelines(this.port, resolution.project, {
+    const result = await fetchPipelines(fromHostPort(this.port), resolution.project, {
       scope,
       ref: resolution.ref,
     });
@@ -380,7 +380,7 @@ class PipelinesPanel implements PanelHandle {
       this.jobs.set(pipelineId, 'loading');
       this.render();
     }
-    const result = await fetchJobs(this.port, project, pipelineId);
+    const result = await fetchJobs(fromHostPort(this.port), project, pipelineId);
     if (this.disposed || gen !== this.generation) return;
     if (result.ok) {
       this.jobs.set(pipelineId, result.data);
@@ -409,7 +409,7 @@ class PipelinesPanel implements PanelHandle {
   private async loadTrace(gen: number, jobId: number): Promise<void> {
     const project = this.resolved?.project;
     if (!project) return;
-    const result = await fetchTrace(this.port, project, jobId);
+    const result = await fetchTrace(fromHostPort(this.port), project, jobId);
     if (this.disposed || gen !== this.generation) return;
     this.traceLoadingId = null;
     if (!result.ok) {

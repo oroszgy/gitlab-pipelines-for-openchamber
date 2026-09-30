@@ -3,12 +3,14 @@ import {
   fetchJobs,
   fetchPipelines,
   fetchTrace,
+  fromHostPort,
   isDisconnectedError,
   jobsRequest,
   mapHttpStatus,
   pipelinesRequest,
   projectBase,
   traceRequest,
+  type Requester,
 } from '../panel/gitlab-client';
 import { FakeHost } from './fakes';
 
@@ -73,48 +75,64 @@ describe('isDisconnectedError', () => {
   });
 });
 
-describe('fetchPipelines over the port', () => {
-  test('parses a JSON body', async () => {
+describe('fetchPipelines over a requester', () => {
+  const requester =
+    (handler: (request: Parameters<Requester>[0]) => { status: number; body: string }): Requester =>
+    async (request) => handler(request);
+
+  test('passes its request through to the requester unchanged', async () => {
+    // The client must not reach into the transport: the requester sees the built path and query.
     const host = new FakeHost();
-    host.handler = () => ({ status: 200, body: JSON.stringify([{ id: 1, status: 'success' }]) });
-    const result = await fetchPipelines(host, 'g/p', { scope: 'all' });
+    host.handler = () => ({ status: 200, body: '[]' });
+    await fetchPipelines(fromHostPort(host), 'g/p', { scope: 'branch', ref: 'feature/x' });
+    expect(host.requests[0]).toEqual({
+      method: 'GET',
+      path: '/api/v4/projects/g%2Fp/pipelines',
+      query: { per_page: '20', ref: 'feature/x' },
+    });
+  });
+
+  test('parses a JSON body', async () => {
+    const result = await fetchPipelines(
+      requester(() => ({ status: 200, body: JSON.stringify([{ id: 1, status: 'success' }]) })),
+      'g/p',
+      { scope: 'all' },
+    );
     if (!result.ok) throw new Error('expected success');
     expect(result.data).toMatchObject([{ id: 1, status: 'success' }]);
   });
 
   test('maps an unauthorised status', async () => {
-    const host = new FakeHost();
-    host.handler = () => ({ status: 403, body: '{}' });
-    const result = await fetchPipelines(host, 'g/p', { scope: 'all' });
+    const result = await fetchPipelines(requester(() => ({ status: 403, body: '{}' })), 'g/p', {
+      scope: 'all',
+    });
     expect(result).toEqual({ ok: false, failure: { kind: 'unauthorized' } });
   });
 
   test('maps a disconnected host error', async () => {
-    const host = new FakeHost();
-    host.handler = () => {
+    const disconnected: Requester = () => {
       const error = new Error('disconnected') as Error & { code: string };
       error.code = 'DISCONNECTED';
       throw error;
     };
-    const result = await fetchPipelines(host, 'g/p', { scope: 'all' });
+    const result = await fetchPipelines(disconnected, 'g/p', { scope: 'all' });
     expect(result).toEqual({ ok: false, failure: { kind: 'disconnected' } });
   });
 
   test('maps an unexpected transport failure to network', async () => {
-    const host = new FakeHost();
-    host.handler = () => {
+    const failing: Requester = () => {
       throw new Error('socket hang up');
     };
-    expect(await fetchPipelines(host, 'g/p', { scope: 'all' })).toEqual({
+    expect(await fetchPipelines(failing, 'g/p', { scope: 'all' })).toEqual({
       ok: false,
       failure: { kind: 'network' },
     });
   });
 
   test('maps an unparseable success body', async () => {
-    const host = new FakeHost();
-    host.handler = () => ({ status: 200, body: 'not json' });
-    expect(await fetchPipelines(host, 'g/p', { scope: 'all' })).toEqual({
+    expect(await fetchPipelines(requester(() => ({ status: 200, body: 'not json' })), 'g/p', {
+      scope: 'all',
+    })).toEqual({
       ok: false,
       failure: { kind: 'http', status: 200 },
     });
@@ -122,23 +140,31 @@ describe('fetchPipelines over the port', () => {
 });
 
 describe('fetchJobs and fetchTrace', () => {
+  const requester =
+    (handler: (request: Parameters<Requester>[0]) => { status: number; body: string }): Requester =>
+    async (request) => handler(request);
+
   test('fetchJobs parses an array', async () => {
-    const host = new FakeHost();
-    host.handler = () => ({ status: 200, body: JSON.stringify([{ id: 7, stage: 'test' }]) });
-    const result = await fetchJobs(host, 'g/p', 1);
+    const result = await fetchJobs(
+      requester(() => ({ status: 200, body: JSON.stringify([{ id: 7, stage: 'test' }]) })),
+      'g/p',
+      1,
+    );
     if (!result.ok) throw new Error('expected success');
     expect(result.data).toMatchObject([{ id: 7, stage: 'test' }]);
   });
 
   test('a missing trace is an empty log, not an error', async () => {
-    const host = new FakeHost();
-    host.handler = () => ({ status: 404, body: '' });
-    expect(await fetchTrace(host, 'g/p', 9)).toEqual({ ok: true, data: '' });
+    const result = await fetchTrace(requester(() => ({ status: 404, body: '' })), 'g/p', 9);
+    expect(result).toEqual({ ok: true, data: '' });
   });
 
   test('a trace body is returned as text', async () => {
-    const host = new FakeHost();
-    host.handler = () => ({ status: 200, body: 'line one\nline two\n' });
-    expect(await fetchTrace(host, 'g/p', 9)).toEqual({ ok: true, data: 'line one\nline two\n' });
+    const result = await fetchTrace(
+      requester(() => ({ status: 200, body: 'line one\nline two\n' })),
+      'g/p',
+      9,
+    );
+    expect(result).toEqual({ ok: true, data: 'line one\nline two\n' });
   });
 });
