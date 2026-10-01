@@ -5,6 +5,17 @@ import { parseManifestJson } from '@openchamber/sdk/schemas';
 import { API_ORIGIN, PANEL_ID } from '../panel/config';
 
 const root = join(import.meta.dir, '..');
+
+/**
+ * A built bundle, proven present with an actionable message. The bundles are
+ * gitignored, so a fresh checkout has none until `bun run build` (which
+ * `bun run check` runs) creates them.
+ */
+function requireBuiltBundle(relativePath: string): void {
+  if (existsSync(join(root, relativePath))) return;
+  throw new Error(`${relativePath} is missing — run \`bun run build\` (or \`bun run check\`) first.`);
+}
+
 const raw = readFileSync(join(root, 'package.json'), 'utf8');
 const parsed = parseManifestJson(raw);
 
@@ -48,7 +59,7 @@ describe('package manifest', () => {
     // The proxy is a narrow HTTPS proxy: no exec and no socket permissions.
     expect(service?.permissions?.exec).toBeUndefined();
     expect(service?.permissions?.sockets).toBeUndefined();
-    expect(existsSync(join(root, 'service/main.js'))).toBe(true);
+    requireBuiltBundle('service/main.js');
   });
 
   test('asks for files and sessions (network comes with the integration)', () => {
@@ -62,6 +73,6 @@ describe('package manifest', () => {
     expect(existsSync(join(root, 'panel/index.html'))).toBe(true);
     const html = readFileSync(join(root, 'panel/index.html'), 'utf8');
     expect(html).toContain('<script src="./main.js"></script>');
-    expect(existsSync(join(root, 'panel/main.js'))).toBe(true);
+    requireBuiltBundle('panel/main.js');
   });
 });

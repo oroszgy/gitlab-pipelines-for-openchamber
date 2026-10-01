@@ -12,6 +12,13 @@ Issues and specs for this repo live as markdown files in `.scratch/`.
 - Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
 - Comments and conversation history append to the bottom of the file under a `## Comments` heading
 
+## The spec is authoritative
+
+A ticket's checklist is a summary, not the whole contract. When a ticket and its `spec.md` disagree,
+the **spec wins**: read the spec's Problem, Solution and Implementation Decisions before building a
+ticket, and treat a detail the checklist omits as still in scope. A ticket that drops a spec detail is
+a bug in the ticket, not a licence to drop it.
+
 ## When a skill says "publish to the issue tracker"
 
 Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).
