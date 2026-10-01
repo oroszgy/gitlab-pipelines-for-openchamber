@@ -61,6 +61,21 @@ function pipelineRequests(host: FakeHost): HostRequest[] {
   return host.requests.filter((request) => request.path.endsWith('/pipelines'));
 }
 
+function movedTo(url: string): string {
+  return `This resource has been moved permanently to ${url}`;
+}
+
+/** Every pipelines call redirects to the next project id, for the hop-cap tests. */
+function redirectChainHandler(): (request: HostRequest) => HostResponse {
+  return (request) => {
+    const match = /\/api\/v4\/projects\/([^/]+)\/pipelines$/.exec(request.path);
+    if (!match) return { status: 404, body: '' };
+    const current = match[1];
+    const next = current === 'group%2Fproject' ? '1' : String(Number(current) + 1);
+    return { status: 301, body: movedTo(`https://gitlab.com/api/v4/projects/${next}`) };
+  };
+}
+
 describe('project resolution in the header', () => {
   test('shows the resolved host, project path and current ref', async () => {
     const host = configuredHost();
@@ -930,5 +945,205 @@ describe('session handoff', () => {
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
     expect(root.querySelector('.gp-handoff')).toBeNull();
+  });
+});
+
+describe('a moved project', () => {
+  const TARGET = 'https://gitlab.com/api/v4/projects/81';
+
+  // The old path redirects to the project id; the id serves pipelines.
+  function moveHandler(onNew?: () => HostResponse) {
+    return (request: HostRequest): HostResponse => {
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines') {
+        return { status: 301, body: movedTo(TARGET) };
+      }
+      if (request.path === '/api/v4/projects/81/pipelines') {
+        return onNew?.() ?? { status: 200, body: JSON.stringify([pipeline({ id: 5 })]) };
+      }
+      return { status: 404, body: '' };
+    };
+  }
+
+  test('follows a move and shows the pipelines under the project id', async () => {
+    const host = configuredHost();
+    host.handler = moveHandler();
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Passed');
+    expect(text(root)).toContain('gitlab.com/81');
+    expect(pipelineRequests(host).map((request) => request.path)).toEqual([
+      '/api/v4/projects/group%2Fproject/pipelines',
+      '/api/v4/projects/81/pipelines',
+    ]);
+  });
+
+  test('a refresh reuses the healed target without following the move again', async () => {
+    const host = configuredHost();
+    host.handler = moveHandler();
+    const { root, panel } = await mount(host, new FakeTimers());
+    panel.refresh();
+    await flush();
+    const followedOld = pipelineRequests(host).filter((request) =>
+      request.path.includes('group%2Fproject'),
+    );
+    expect(followedOld).toHaveLength(1);
+    expect(text(root)).toContain('Passed');
+  });
+
+  test('a chain of redirects past the cap stops and shows a state, not a spin', async () => {
+    const host = configuredHost();
+    host.handler = redirectChainHandler();
+    const { root } = await mount(host, new FakeTimers());
+    expect(pipelineRequests(host)).toHaveLength(6);
+    expect(root.querySelector('.gp-row')).toBeNull();
+    expect(root.querySelector('.gp-state')).not.toBeNull();
+  });
+
+  test('a target on another host is not followed', async () => {
+    const host = configuredHost();
+    host.handler = () => ({
+      status: 301,
+      body: movedTo('https://evil.example.com/api/v4/projects/81'),
+    });
+    const { root } = await mount(host, new FakeTimers());
+    expect(host.requests.some((request) => request.path === '/api/v4/projects/81/pipelines')).toBe(
+      false,
+    );
+    expect(root.querySelector('.gp-row')).toBeNull();
+  });
+
+  test('a healed target does not carry over to a different project', async () => {
+    const host = configuredHost();
+    host.handler = moveHandler();
+    const { panel } = await mount(host, new FakeTimers());
+    host.handler = (request: HostRequest): HostResponse =>
+      request.path === '/api/v4/projects/other%2Fproj/pipelines'
+        ? { status: 200, body: JSON.stringify([pipeline({ id: 9 })]) }
+        : { status: 404, body: '' };
+    host.emitReady(readyContext({ settings: { project: 'other/proj' } }));
+    await flush();
+    expect(pipelineRequests(host).at(-1)?.path).toBe('/api/v4/projects/other%2Fproj/pipelines');
+    panel.dispose();
+  });
+
+  test('a host switch forgets a healed target', async () => {
+    const host = configuredHost();
+    host.handler = moveHandler();
+    const { panel } = await mount(host, new FakeTimers());
+    host.emitReady(
+      readyContext({
+        settings: { host: 'gitlab.example.com', token: 'pat', project: 'group/project' },
+      }),
+    );
+    await flush();
+    // The custom-host transport carries the GitLab path in the body, not the URL.
+    const forwarded = JSON.parse(host.serviceRequests[0]?.body ?? '{}') as { path?: string };
+    expect(forwarded.path).toBe('/api/v4/projects/group%2Fproject/pipelines');
+    panel.dispose();
+  });
+});
+
+describe('a move that cannot be healed', () => {
+
+  test('a redirect that is not a move is reported as a redirect, not a move', async () => {
+    const host = configuredHost();
+    host.handler = () => ({ status: 302, body: '<html>Sign in</html>' });
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('GitLab redirected this request');
+    expect(text(root)).not.toContain('Project moved');
+  });
+
+  test('a move that runs past the cap is a moved project, naming the target', async () => {
+    const host = configuredHost();
+    host.handler = redirectChainHandler();
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Project moved');
+    expect(text(root)).toContain('https://gitlab.com/api/v4/projects/6');
+    expect(text(root)).not.toContain('unexpected response');
+  });
+
+  test('a move to another host is a moved project, naming the target', async () => {
+    const host = configuredHost();
+    host.handler = () => ({
+      status: 301,
+      body: movedTo('https://evil.example.com/api/v4/projects/81'),
+    });
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Project moved');
+    expect(text(root)).toContain('evil.example.com');
+  });
+
+  test('the moved state opens the old path in GitLab, which redirects the browser', async () => {
+    const host = configuredHost();
+    host.handler = () => ({
+      status: 301,
+      body: movedTo('https://evil.example.com/api/v4/projects/81'),
+    });
+    const { root } = await mount(host, new FakeTimers());
+    const action = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Open in GitLab',
+    );
+    expect(action).toBeDefined();
+    action?.click();
+    await flush();
+    expect(host.openUrls).toEqual(['https://gitlab.com/group/project']);
+  });
+
+  test('the redirect state also offers opening the old path', async () => {
+    const host = configuredHost();
+    host.handler = () => ({ status: 302, body: '<html>Sign in</html>' });
+    const { root } = await mount(host, new FakeTimers());
+    const action = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Open in GitLab',
+    );
+    expect(action).toBeDefined();
+    action?.click();
+    await flush();
+    expect(host.openUrls).toEqual(['https://gitlab.com/group/project']);
+  });
+});
+
+describe('the heal notice', () => {
+
+  function healedHost(): FakeHost {
+    const host = configuredHost();
+    host.handler = (request: HostRequest): HostResponse => {
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines') {
+        return {
+          status: 301,
+          body: movedTo('https://gitlab.com/api/v4/projects/81'),
+        };
+      }
+      if (request.path === '/api/v4/projects/81/pipelines') {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 5 })]) };
+      }
+      return { status: 404, body: '' };
+    };
+    return host;
+  }
+
+  test('a heal shows a one-time notice naming the old path and the target', async () => {
+    const { root } = await mount(healedHost(), new FakeTimers());
+    expect(text(root)).toContain('Showing gitlab.com/group/project as gitlab.com/81');
+  });
+
+  test('the notice is dismissed and stays gone across a refresh', async () => {
+    const host = healedHost();
+    const { root, panel } = await mount(host, new FakeTimers());
+    const dismiss = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Dismiss',
+    );
+    expect(dismiss).toBeDefined();
+    dismiss?.click();
+    expect(text(root)).not.toContain('Showing');
+    panel.refresh();
+    await flush();
+    expect(text(root)).not.toContain('Showing');
+  });
+
+  test('no heal means no notice', async () => {
+    const host = configuredHost();
+    host.handler = handlerFor({ pipelines: [pipeline()] });
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).not.toContain('Showing');
   });
 });

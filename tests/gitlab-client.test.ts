@@ -7,6 +7,7 @@ import {
   isDisconnectedError,
   jobsRequest,
   mapHttpStatus,
+  parseMoveTarget,
   pipelinesRequest,
   projectBase,
   traceRequest,
@@ -64,6 +65,37 @@ describe('mapHttpStatus', () => {
   });
   test('anything else is a generic http failure', () => {
     expect(mapHttpStatus(500)).toEqual({ kind: 'http', status: 500 });
+  });
+  test('the redirect statuses are redirects, not generic failures', () => {
+    for (const status of [301, 302, 303, 307, 308]) {
+      expect(mapHttpStatus(status)).toEqual({ kind: 'redirect', target: null });
+    }
+  });
+  test('300 and 304 are not redirects', () => {
+    expect(mapHttpStatus(300)).toEqual({ kind: 'http', status: 300 });
+    expect(mapHttpStatus(304)).toEqual({ kind: 'http', status: 304 });
+  });
+});
+
+describe('parseMoveTarget', () => {
+  const movedTo = (url: string) => `This resource has been moved permanently to ${url}`;
+
+  test('reads the target URL out of the documented sentence', () => {
+    expect(
+      parseMoveTarget(movedTo('https://gitlab.example.com/api/v4/projects/81')),
+    ).toBe('https://gitlab.example.com/api/v4/projects/81');
+  });
+
+  test('tolerates an http target and surrounding noise', () => {
+    expect(
+      parseMoveTarget(`\n ${movedTo('http://gitlab.example.com/api/v4/projects/group%2Fproject')}\n`),
+    ).toBe('http://gitlab.example.com/api/v4/projects/group%2Fproject');
+  });
+
+  test('a body that is not the documented move yields null', () => {
+    expect(parseMoveTarget('<html>Sign in</html>')).toBeNull();
+    expect(parseMoveTarget('')).toBeNull();
+    expect(parseMoveTarget('This resource has been moved permanently to ')).toBeNull();
   });
 });
 
@@ -136,6 +168,32 @@ describe('fetchPipelines over a requester', () => {
       ok: false,
       failure: { kind: 'http', status: 200 },
     });
+  });
+
+  test('every redirect status carries the target parsed from its body', async () => {
+    const body =
+      'This resource has been moved permanently to https://gitlab.example.com/api/v4/projects/81';
+    for (const status of [301, 302, 303, 307, 308]) {
+      const result = await fetchPipelines(requester(() => ({ status, body })), 'g/p', {
+        scope: 'all',
+      });
+      expect(result).toEqual({
+        ok: false,
+        failure: {
+          kind: 'redirect',
+          target: 'https://gitlab.example.com/api/v4/projects/81',
+        },
+      });
+    }
+  });
+
+  test('a redirect with an unrecognised body carries no target', async () => {
+    const result = await fetchPipelines(
+      requester(() => ({ status: 302, body: '<html>Sign in</html>' })),
+      'g/p',
+      { scope: 'all' },
+    );
+    expect(result).toEqual({ ok: false, failure: { kind: 'redirect', target: null } });
   });
 });
 

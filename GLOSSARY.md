@@ -70,6 +70,17 @@ The GitLab host the Panel resolves a project against: the built-in host by defau
 setting when one is set. A project whose remote is on any other host is `host-mismatch`.
 _Avoid_: target host, base URL
 
+**Moved project**:
+A GitLab project whose location has changed — renamed, or transferred to another namespace — so the
+path the Panel holds for it no longer resolves. GitLab does not serve the old path; it names the
+project's new location, and the project keeps its identity across the move.
+_Avoid_: renamed project, redirected project (a move may change only the namespace, not the name)
+
+**Project id**:
+GitLab's numeric identifier for a project. It is stable: a rename or transfer does not change it, so
+it is the identity that survives a move.
+_Avoid_: numeric id, internal id
+
 **Session handoff**:
 Starting a new OpenChamber session from a failed Job, seeded with that Job's identity, links and Trace
 tail so an agent can investigate the failure in the open project. The Extension's only outbound

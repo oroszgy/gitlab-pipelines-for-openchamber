@@ -8,6 +8,8 @@ export type ClientFailure =
   | { kind: 'unauthorized' }
   | { kind: 'not-found' }
   | { kind: 'service' }
+  /** A redirect; `target` is the moved project's URL, or null when the body is not a recognisable move. */
+  | { kind: 'redirect'; target: string | null }
   | { kind: 'http'; status: number }
   | { kind: 'network' };
 
@@ -67,11 +69,38 @@ export function traceRequest(project: string, jobId: number): BuiltRequest {
   return { path: `${projectBase(project)}/jobs/${jobId}/trace`, query: {} };
 }
 
+/**
+ * The redirect statuses GitLab answers a Moved project with. `300` (Multiple
+ * Choices) and `304` (Not Modified) are not redirects to a new resource, so
+ * they stay ordinary failures.
+ */
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+/**
+ * GitLab's documented move response — `This resource has been moved permanently
+ * to <url>`. Returns the target URL, or null when the body is not that message.
+ * The strictness is deliberate: it is the only reason to trust a redirect as a
+ * move, and an unrelated redirect must not be mistaken for one.
+ */
+export function parseMoveTarget(body: string): string | null {
+  const match = /This resource has been moved permanently to\s+(\S+)/.exec(body);
+  const raw = match?.[1];
+  if (!raw) return null;
+  try {
+    const url = new URL(raw);
+    if (url.protocol !== 'https:' && url.protocol !== 'http:') return null;
+    return url.toString();
+  } catch {
+    return null;
+  }
+}
+
 /** HTTP status → typed failure, or null for a success. */
 export function mapHttpStatus(status: number): ClientFailure | null {
   if (status >= 200 && status < 300) return null;
   if (status === 401 || status === 403) return { kind: 'unauthorized' };
   if (status === 404) return { kind: 'not-found' };
+  if (REDIRECT_STATUSES.has(status)) return { kind: 'redirect', target: null };
   return { kind: 'http', status };
 }
 
@@ -115,7 +144,13 @@ async function call(requester: Requester, request: HostRequest): Promise<CallRes
     return { ok: false, failure: clientFailureFromError(error) };
   }
   const failure = mapHttpStatus(response.status);
-  if (failure) return { ok: false, failure };
+  if (failure) {
+    // The status alone cannot say where a redirect points; only the body can.
+    if (failure.kind === 'redirect') {
+      return { ok: false, failure: { kind: 'redirect', target: parseMoveTarget(response.body) } };
+    }
+    return { ok: false, failure };
+  }
   return { ok: true, status: response.status, body: response.body };
 }
 

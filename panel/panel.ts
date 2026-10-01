@@ -63,12 +63,19 @@ type Problem = {
     | 'not-found'
     | 'custom-host'
     | 'custom-token'
-    | 'service';
+    | 'service'
+    | 'moved'
+    | 'redirected';
   title: string;
   body: string;
   hint?: string;
   detail?: string;
+  /** An optional outbound action, e.g. opening the project in GitLab. */
+  action?: { label: string; url: string };
 };
+
+/** Redirects followed in one refresh before a move chain is treated as runaway. */
+const MAX_REDIRECT_HOPS = 5;
 
 /** Why a log is shorter than the trace: our own line cap, or the host's body cap. */
 type TraceTruncation = 'cap' | 'host' | null;
@@ -169,6 +176,16 @@ class PipelinesPanel implements PanelHandle {
   private updatedAt: number | null = null;
   /** The Configured host the current data belongs to, for switch detection. */
   private lastHost: string | null = null;
+  /** Healed targets, keyed by the derived project path they were reached from. */
+  private readonly healed = new Map<string, string>();
+  /** The derived project for the current refresh, before any heal. */
+  private derivedProject: string | null = null;
+  /** Redirects followed in the current refresh. */
+  private redirectHops = 0;
+  /** A heal notice, promoted to `healNotice` only once the heal succeeds. */
+  private pendingHealNotice: { from: string; to: string } | null = null;
+  /** The one-time heal notice, until dismissed. */
+  private healNotice: { from: string; to: string } | null = null;
 
   private generation = 0;
   private pollTimer: number | null = null;
@@ -316,8 +333,10 @@ class PipelinesPanel implements PanelHandle {
       return;
     }
     this.problem = null;
-    this.resolved = resolution;
-    await this.loadPipelines(gen, resolution);
+    this.derivedProject = resolution.project;
+    this.redirectHops = 0;
+    this.resolved = this.applyHealedProject(resolution);
+    await this.loadPipelines(gen, this.resolved);
   }
 
   /**
@@ -348,6 +367,11 @@ class PipelinesPanel implements PanelHandle {
     this.openJob = null;
     this.expandedId = null;
     this.updatedAt = null;
+    this.healed.clear();
+    this.derivedProject = null;
+    this.redirectHops = 0;
+    this.pendingHealNotice = null;
+    this.healNotice = null;
   }
 
   private async deriveProject(): Promise<ProjectResolution> {
@@ -411,6 +435,12 @@ class PipelinesPanel implements PanelHandle {
     });
     if (this.disposed || gen !== this.generation) return;
     if (!result.ok) {
+      if (
+        result.failure.kind === 'redirect' &&
+        this.healRedirect(gen, resolution, result.failure.target)
+      ) {
+        return;
+      }
       this.handleFailure(result.failure);
       return;
     }
@@ -418,6 +448,7 @@ class PipelinesPanel implements PanelHandle {
     this.updatedAt = this.timers.now();
     this.phase = 'ready';
     this.error = null;
+    this.promoteHealNotice();
     if (this.expandedId != null) {
       void this.loadJobs(gen, this.expandedId, this.jobs.has(this.expandedId));
     }
@@ -439,6 +470,17 @@ class PipelinesPanel implements PanelHandle {
       this.render();
       return;
     }
+    if (failure.kind === 'redirect') {
+      // A redirect that was not healed: an unrecognised move, a chain that ran
+      // away, or a target on another host. Explain it rather than show a status.
+      this.pendingHealNotice = null;
+      if (this.derivedProject) this.healed.delete(this.derivedProject);
+      this.problem = this.redirectProblem(failure.target);
+      this.phase = 'problem';
+      this.stopAllTimers();
+      this.render();
+      return;
+    }
     this.error =
       failure.kind === 'network'
         ? 'Could not reach GitLab. Check the connection and try again.'
@@ -446,6 +488,60 @@ class PipelinesPanel implements PanelHandle {
     this.render();
     if (this.hasActive()) this.schedulePoll();
     else this.stopAllTimers();
+  }
+
+  /** The resolved project with a cached healed target applied, when there is one for this path. */
+  private applyHealedProject(
+    resolution: Extract<ProjectResolution, { ok: true }>,
+  ): Extract<ProjectResolution, { ok: true }> {
+    const healed = this.healed.get(resolution.project);
+    return healed ? { ...resolution, project: healed } : resolution;
+  }
+
+  /**
+   * Follow a redirect to the project it names, when the target is on the
+   * effective host and the chain is still short. Returns whether the caller
+   * should stop because a retry was issued; false hands the failure on.
+   */
+  private healRedirect(
+    gen: number,
+    resolution: Extract<ProjectResolution, { ok: true }>,
+    target: string | null,
+  ): boolean {
+    if (target == null || this.redirectHops >= MAX_REDIRECT_HOPS) return false;
+    const project = projectFromRedirectTarget(target, this.effectiveHost());
+    if (project == null) return false;
+    this.redirectHops += 1;
+    const from = this.derivedProject ?? resolution.project;
+    this.healed.set(from, project);
+    // The notice is only shown once the heal lands; see `promoteHealNotice`.
+    this.pendingHealNotice = { from, to: project };
+    this.resolved = { ...resolution, project };
+    void this.loadPipelines(gen, this.resolved);
+    return true;
+  }
+
+  /** A heal is only announced once its retry returned pipelines. */
+  private promoteHealNotice(): void {
+    if (!this.pendingHealNotice) return;
+    this.healNotice = this.pendingHealNotice;
+    this.pendingHealNotice = null;
+  }
+
+  /**
+   * The state for a redirect the Panel could not heal. A parsed target means a
+   * move it could not follow (a runaway chain, or another host); a null target
+   * means the redirect was not a recognisable move at all.
+   */
+  private redirectProblem(target: string | null): Problem {
+    const from = this.derivedProject ?? this.resolved?.project ?? '';
+    const url = from ? `${this.webOrigin()}/${from}` : null;
+    return target ? movedProblem(target, url) : redirectedProblem(url);
+  }
+
+  /** The origin a project's web page lives on, for opening a link in GitLab. */
+  private webOrigin(): string {
+    return this.customBase() ?? this.options.apiOrigin.replace(/\/+$/, '');
   }
 
   private togglePipeline(id: number): void {
@@ -643,6 +739,7 @@ class PipelinesPanel implements PanelHandle {
   private async pollOnce(): Promise<void> {
     if (this.disposed || !this.resolved) return;
     const gen = ++this.generation;
+    this.redirectHops = 0;
     await this.loadPipelines(gen, this.resolved);
     if (gen === this.generation) this.refreshOpenTrace(gen);
   }
@@ -766,6 +863,8 @@ class PipelinesPanel implements PanelHandle {
     this.root.append(this.renderHeader());
     const handoffNotice = this.renderHandoffNotice();
     if (handoffNotice) this.root.append(handoffNotice);
+    const healNotice = this.renderHealNotice();
+    if (healNotice) this.root.append(healNotice);
 
     this.scrollEl = el('div', 'gp-scroll');
     const pad = el('div', 'gp-pad');
@@ -917,6 +1016,19 @@ class PipelinesPanel implements PanelHandle {
     if (problem.detail) state.append(el('p', 'gp-state-detail', problem.detail));
     if (problem.hint) state.append(el('p', 'gp-state-hint', problem.hint));
     const actions = el('div', 'gp-state-actions');
+    if (problem.action) {
+      const openRoot = el('div');
+      const { label, url } = problem.action;
+      this.handles.push(
+        mountButton(openRoot, {
+          label,
+          variant: 'default',
+          size: 'sm',
+          onClick: () => void this.port.openUrl(url),
+        }),
+      );
+      actions.append(openRoot);
+    }
     const retry = el('div');
     this.handles.push(
       mountButton(retry, { label: 'Refresh', variant: 'outline', size: 'sm', onClick: () => this.refresh() }),
@@ -1108,6 +1220,25 @@ class PipelinesPanel implements PanelHandle {
     return button;
   }
 
+  /** The one-time notice after a heal, naming the old path and the target. */
+  private renderHealNotice(): HTMLElement | null {
+    if (!this.healNotice) return null;
+    const host = this.effectiveHost();
+    const { from, to } = this.healNotice;
+    const notice = el('div', 'gp-notice');
+    notice.setAttribute('role', 'status');
+    notice.append(el('span', 'gp-notice-text', `Showing ${host}/${from} as ${host}/${to}.`));
+    const dismiss = el('button', 'gp-notice-close');
+    dismiss.type = 'button';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', () => {
+      this.healNotice = null;
+      this.render();
+    });
+    notice.append(dismiss);
+    return notice;
+  }
+
   private renderHandoffNotice(): HTMLElement | null {
     if (!this.handoffError) return null;
     const notice = el('div', 'gp-notice');
@@ -1246,6 +1377,29 @@ export function resolveCustomBase(value: string): string | null {
   return `https://${raw}`;
 }
 
+/**
+ * The project reference named by a redirect target URL, when that URL is on the
+ * effective host — a project id, or an encoded path. A target on another host is
+ * refused: following it would name a different instance's project.
+ */
+function projectFromRedirectTarget(target: string, host: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch {
+    return null;
+  }
+  if (url.host !== host) return null;
+  const match = /^\/api\/v4\/projects\/(.+?)\/?$/.exec(url.pathname);
+  const reference = match?.[1];
+  if (!reference) return null;
+  try {
+    return decodeURIComponent(reference);
+  } catch {
+    return null;
+  }
+}
+
 /** The host (with port) of a base URL, for display and comparison. */
 export function hostOfBase(base: string): string {
   return base.replace(/^https:\/\//, '').replace(/\/+$/, '');
@@ -1354,6 +1508,28 @@ function disconnectedProblem(configuredHost: string): Problem {
     kind: 'disconnected',
     title: 'GitLab not connected',
     body: `No personal access token is stored for ${configuredHost}. Connect one to read pipelines.`,
+  };
+}
+
+/** A Moved project the Panel could not follow, with a link to its old path. */
+function movedProblem(target: string, url: string | null): Problem {
+  return {
+    kind: 'moved',
+    title: 'Project moved',
+    body: `This project's path no longer resolves; GitLab has moved it to ${target}.`,
+    hint: 'Update the git remote or the Project setting, then refresh.',
+    ...(url ? { action: { label: 'Open in GitLab', url } } : {}),
+  };
+}
+
+/** A redirect that is not a recognisable move. */
+function redirectedProblem(url: string | null): Problem {
+  return {
+    kind: 'redirected',
+    title: 'GitLab redirected this request',
+    body: 'GitLab answered with a redirect this extension could not follow. The project may have moved, or the session may have expired.',
+    hint: 'Check the GitLab host and the Project setting, then refresh.',
+    ...(url ? { action: { label: 'Open in GitLab', url } } : {}),
   };
 }
 
