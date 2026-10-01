@@ -1,5 +1,7 @@
 ## Agent skills
 
+Important: ALWAYS use OpenCode's question tool to ask questions!
+
 ### Issue tracker
 
 Issues live as markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
