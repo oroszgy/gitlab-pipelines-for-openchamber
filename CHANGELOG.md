@@ -7,6 +7,15 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-10-01
+
+### Changed
+
+- The Panel's typography now follows OpenChamber's own scale (14px primary, 13px prose, 12px
+  meta and monospace) instead of rendering one to two sizes smaller — its base was ~11.4px and
+  its fine print ~9.6px. It reads as part of the UI rather than a small insert; the Trace log,
+  SHAs and stage labels were the most affected.
+
 ## [0.5.0] - 2026-10-01
 
 ### Added

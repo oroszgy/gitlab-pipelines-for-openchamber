@@ -2,12 +2,20 @@
  * Panel CSS. Composed from the host's `--oc-*` tokens only — no literal
  * colours — so it reads correctly in both OpenChamber themes.
  *
+ * Sizes follow OpenChamber's own type scale rather than the browser default:
+ * 14px primary, 13px prose, 12px dense chrome and mono. `applyHostTheme` pins
+ * the guest root at 0.875rem, which would make every `rem` render at 87.5% of
+ * those values, so the root is restored to 16px here first.
+ *
  * The Pipeline row cannot be expressed by the UI kit's `mountList` row at
  * 320px, so it is composed here from kit primitives and these tokens. Keep the
  * `.gp-row*` markup and these rules together.
  */
 export const PANEL_CSS = `
 html, body { margin: 0; height: 100%; color-scheme: light dark; }
+/* The host writes 0.875rem onto the iframe root inline; !important beats it so
+   rem units equal the pixel tiers OpenChamber's own UI uses. */
+html { font-size: 16px !important; }
 *, *::before, *::after { box-sizing: border-box; }
 
 .gp {
@@ -19,8 +27,8 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   color: var(--oc-fg, CanvasText);
   background: var(--oc-bg, Canvas);
   font-family: var(--oc-font, system-ui, sans-serif);
-  font-size: 0.8125rem;
-  line-height: 1.4;
+  font-size: 0.875rem;
+  line-height: 1.45;
 }
 .gp button { font: inherit; color: inherit; }
 
@@ -52,7 +60,7 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
 }
 .gp-head-row { display: flex; align-items: center; gap: 8px; }
-.gp-brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 600; }
+.gp-brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
 .gp-brand-mark { display: inline-flex; color: var(--oc-fg, CanvasText); }
 .gp-brand-title { letter-spacing: 0.01em; }
 .gp-spacer { flex: 1 1 auto; }
@@ -68,10 +76,10 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 26px; height: 26px;
+  width: 28px; height: 28px;
   padding: 0;
   border: 1px solid transparent;
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
   background: transparent;
   color: var(--oc-muted, GrayText);
   cursor: pointer;
@@ -83,7 +91,7 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
 .gp-project-path {
   color: var(--oc-muted, GrayText);
   font-family: var(--oc-mono, ui-monospace, monospace);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -96,7 +104,7 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   min-width: 0;
   color: var(--oc-muted, GrayText);
   font-family: var(--oc-mono, ui-monospace, monospace);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -109,7 +117,7 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
 
 .gp-item {
   border: 1px solid transparent;
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
 }
 .gp-item[data-open='true'] { border-color: var(--oc-border, rgba(127, 127, 127, 0.35)); background: var(--oc-subtle, transparent); }
 
@@ -120,7 +128,7 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   width: 100%;
   padding: 7px 8px;
   border: 0;
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
   background: transparent;
   text-align: left;
   cursor: pointer;
@@ -137,13 +145,13 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
-  font-weight: 600;
+  font-weight: 500;
 }
 .gp-sha {
   flex: 0 0 auto;
   color: var(--oc-muted, GrayText);
   font-family: var(--oc-mono, ui-monospace, monospace);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
 }
 .gp-row-meta { flex: 0 0 auto; color: var(--oc-muted, GrayText); font-size: 0.75rem; white-space: nowrap; }
 .gp-row-sub {
@@ -168,13 +176,13 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
 
 .gp-jobs { display: flex; flex-direction: column; gap: 6px; padding: 2px 8px 8px 22px; }
 .gp-jobs-body { display: flex; flex-direction: column; gap: 6px; }
-.gp-jobs-link { align-self: flex-start; color: var(--oc-primary-text, #9db8f5); text-decoration: none; font-size: 0.6875rem; }
+.gp-jobs-link { align-self: flex-start; color: var(--oc-primary-text, #9db8f5); text-decoration: none; font-size: 0.75rem; }
 .gp-jobs-link:hover { text-decoration: underline; }
 
 .gp-downstream-badge {
   flex: 0 0 auto;
   color: var(--oc-muted, GrayText);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   white-space: nowrap;
 }
 
@@ -188,27 +196,30 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   padding: 6px 8px;
   border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
   border-left: 2px solid var(--oc-primary, #5b8def);
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
   background: var(--oc-muted-surface, var(--oc-subtle, transparent));
 }
-.gp-downstream-label { font-weight: 600; font-size: 0.75rem; }
+.gp-downstream-label { font-weight: 500; font-size: 0.75rem; }
 .gp-downstream-meta { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.gp-downstream-iid { flex: 0 0 auto; color: var(--oc-muted, GrayText); font-size: 0.6875rem; }
+.gp-downstream-iid { flex: 0 0 auto; color: var(--oc-muted, GrayText); font-size: 0.75rem; }
 .gp-downstream-open {
   align-self: flex-start;
-  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 8px;
   border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
   background: transparent;
   color: var(--oc-primary-text, #9db8f5);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   white-space: nowrap;
   cursor: pointer;
 }
 .gp-downstream-open:hover:not([disabled]) { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); }
 .gp-downstream-open[disabled] { color: var(--oc-muted, GrayText); opacity: 0.6; cursor: default; }
 .gp-stage { display: flex; flex-direction: column; gap: 1px; }
-.gp-stage-head { display: flex; align-items: center; gap: 6px; color: var(--oc-muted, GrayText); font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.05em; }
+.gp-stage-head { display: flex; align-items: center; gap: 6px; color: var(--oc-muted, GrayText); font-size: 0.75rem; }
 .gp-stage-name { flex: 0 0 auto; }
 .gp-stage-count { flex: 0 0 auto; font-variant-numeric: tabular-nums; }
 .gp-stage-line { flex: 1 1 auto; height: 1px; background: var(--oc-border, rgba(127, 127, 127, 0.35)); }
@@ -220,24 +231,27 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   width: 100%;
   padding: 4px 6px;
   border: 0;
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
   background: transparent;
   text-align: left;
   cursor: pointer;
 }
 .gp-job:hover { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); }
 .gp-job[data-selected='true'] { background: var(--oc-selection, rgba(91, 141, 239, 0.25)); color: var(--oc-selection-fg, var(--oc-fg, CanvasText)); }
-.gp-job-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.gp-job-meta { flex: 0 0 auto; color: var(--oc-muted, GrayText); font-size: 0.6875rem; font-variant-numeric: tabular-nums; }
+.gp-job-name { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 500; }
+.gp-job-meta { flex: 0 0 auto; color: var(--oc-muted, GrayText); font-size: 0.75rem; font-variant-numeric: tabular-nums; }
 
 .gp-handoff {
   flex: 0 0 auto;
-  padding: 2px 7px;
+  display: inline-flex;
+  align-items: center;
+  height: 24px;
+  padding: 0 8px;
   border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
   background: transparent;
   color: var(--oc-primary-text, #9db8f5);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   white-space: nowrap;
   cursor: pointer;
 }
@@ -253,26 +267,30 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
   background: var(--oc-muted-surface, var(--oc-subtle, transparent));
   color: var(--oc-error-text, #c04040);
-  font-size: 0.6875rem;
+  font-size: 0.8125rem;
 }
 .gp-notice-text { flex: 1 1 auto; }
 .gp-notice-close {
   flex: 0 0 auto;
-  padding: 2px 6px;
+  padding: 3px 8px;
   border: 1px solid transparent;
-  border-radius: var(--oc-radius, 6px);
+  border-radius: var(--oc-radius, 9px);
   background: transparent;
   color: var(--oc-muted, GrayText);
+  font-size: 0.75rem;
   cursor: pointer;
 }
 .gp-notice-close:hover { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); color: var(--oc-fg, CanvasText); }
 
 .gp-state { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px 14px; text-align: center; }
-.gp-state-title { margin: 0; font-size: 0.9375rem; font-weight: 600; }
-.gp-state-body { margin: 0; color: var(--oc-muted, GrayText); font-size: 0.75rem; max-width: 34ch; }
-.gp-state-hint { margin: 0; color: var(--oc-muted, GrayText); font-size: 0.6875rem; max-width: 34ch; }
-.gp-state-detail { margin: 0; font-family: var(--oc-mono, ui-monospace, monospace); font-size: 0.6875rem; color: var(--oc-muted, GrayText); word-break: break-all; }
+.gp-state-title { margin: 0; font-size: 0.875rem; font-weight: 600; }
+.gp-state-body { margin: 0; color: var(--oc-muted, GrayText); font-size: 0.8125rem; max-width: 34ch; }
+.gp-state-hint { margin: 0; color: var(--oc-muted, GrayText); font-size: 0.75rem; max-width: 34ch; }
+.gp-state-detail { margin: 0; font-family: var(--oc-mono, ui-monospace, monospace); font-size: 0.75rem; color: var(--oc-muted, GrayText); word-break: break-all; }
 .gp-state-actions { display: flex; gap: 6px; margin-top: 2px; }
+/* The kit's empty state is the other half of the same screen; keep its title on
+   the 14px scale the hand-rolled states use. */
+.gp .oc-sdk-empty-title { font-size: 0.875rem; }
 
 .gp-drawer {
   position: absolute;
@@ -286,13 +304,13 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
 }
 .gp-drawer-head { display: flex; align-items: center; gap: 8px; padding: 8px 10px; border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); }
-.gp-drawer-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 0.75rem; }
+.gp-drawer-title { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; font-size: 0.8125rem; }
 .gp-drawer-link { color: var(--oc-primary-text, #9db8f5); text-decoration: none; font-size: 0.75rem; white-space: nowrap; }
 .gp-drawer-link:hover { text-decoration: underline; }
 .gp-drawer-close {
   display: inline-flex; align-items: center; justify-content: center;
   width: 24px; height: 24px; padding: 0;
-  border: 1px solid transparent; border-radius: var(--oc-radius, 6px);
+  border: 1px solid transparent; border-radius: var(--oc-radius, 9px);
   background: transparent; color: var(--oc-muted, GrayText); cursor: pointer;
 }
 .gp-drawer-close:hover { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); color: var(--oc-fg, CanvasText); }
@@ -304,14 +322,14 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
   overflow-wrap: anywhere;
   word-break: break-word;
   font-family: var(--oc-mono, ui-monospace, monospace);
-  font-size: 0.6875rem;
+  font-size: 0.75rem;
   line-height: 1.5;
   color: var(--oc-fg, CanvasText);
 }
 .gp-drawer-empty { padding: 14px 10px; color: var(--oc-muted, GrayText); font-size: 0.75rem; text-align: center; }
-.gp-drawer-notice { flex: 0 0 auto; padding: 6px 10px; border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-warning-text, #e0b567); font-size: 0.6875rem; }
+.gp-drawer-notice { flex: 0 0 auto; padding: 6px 10px; border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-warning-text, #e0b567); font-size: 0.75rem; }
 
-.gp-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-muted, GrayText); font-size: 0.6875rem; }
+.gp-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-muted, GrayText); font-size: 0.75rem; }
 
 .gp-skel { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }
 .gp-skel-row { display: flex; gap: 8px; }
