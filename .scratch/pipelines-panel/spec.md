@@ -216,8 +216,10 @@ test. The runner is `bun test`, with a DOM shim only for the panel tests.
 - Any write action: retry, cancel, play a manual Job, trigger a Pipeline.
 - More than one GitLab host, or an arbitrary host chosen at runtime — that needs the service
   transport ADR-0001 rejects.
-- A cross-project view of Pipelines.
-- Nested or child Pipeline rendering, and retried-Job grouping.
+- A project-wide cross-project view of Pipelines. (Following a Pipeline's own Trigger jobs into their
+  Downstream pipelines is now specified in `.scratch/downstream-pipelines/spec.md`, ADR-0004.)
+- Nested or child Pipeline rendering, and retried-Job grouping. (Nested rendering is now specified in
+  `.scratch/downstream-pipelines/spec.md`; retried-Job grouping remains out of scope.)
 - GraphQL; authentication beyond a personal access token (no OAuth).
 - Push or streaming updates; polling is the model.
 - Localisation, mobile layout, and settings beyond the single project override.
