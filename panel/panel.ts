@@ -1,7 +1,7 @@
 import type { GuestConnection, HostReadyContext, StartSessionSent } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
 
-import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS, PANEL_ID, SERVICE_PATH } from './config';
+import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS, PANEL_ID, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH } from './config';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
   canExpand,
@@ -27,8 +27,10 @@ import type { HostPort } from './host-port';
 import { nextPollDelay, shouldPoll } from './poll';
 import {
   hostOfOrigin,
+  isLinkedWorktree,
   resolveProject,
   samePath,
+  worktreePrimaryDirectory,
   type ProjectFailureKind,
   type ProjectResolution,
   type ResolveInput,
@@ -427,6 +429,8 @@ class PipelinesPanel implements PanelHandle {
     let gitFile: string | null = null;
     let head: string | null = null;
     let worktrees: ResolveInput['worktrees'] = null;
+    /** The primary checkout a Linked worktree's `.git` pointer names. */
+    let worktreeRoot: string | null = null;
 
     if (directory) {
       try {
@@ -442,14 +446,27 @@ class PipelinesPanel implements PanelHandle {
           gitFile = null;
         }
       }
+      // A Linked worktree's remote lives in the primary repository, outside the
+      // open project, which the panel's own file capability cannot reach. Its
+      // `.git` pointer still names that primary checkout, so the Ref's worktree
+      // list can be found locally; the service is only needed for the remote
+      // (ADR-0005). Without it the `linked-worktree` failure still stands.
+      if (gitConfig == null && isLinkedWorktree(gitFile)) {
+        worktreeRoot = worktreePrimaryDirectory(gitFile);
+        gitConfig = await this.readWorktreeConfig(directory);
+      }
       try {
         head = (await this.port.readFile('.git/HEAD')).content;
       } catch {
         head = null;
       }
       try {
+        // Worktrees are listed per project, and a Linked worktree's directory is
+        // not the registered project's — match the primary checkout the `.git`
+        // pointer names, so the Ref still comes from this worktree's own entry.
+        const projectDirectory = worktreeRoot ?? directory;
         const projects = await this.port.listProjects();
-        const match = projects.projects.find((project) => samePath(project.directory, directory));
+        const match = projects.projects.find((project) => samePath(project.directory, projectDirectory));
         if (match) worktrees = (await this.port.listWorktrees(match.id)).worktrees;
       } catch {
         worktrees = null;
@@ -467,6 +484,27 @@ class PipelinesPanel implements PanelHandle {
       head,
       worktrees,
     });
+  }
+
+  /**
+   * The primary repository's config for a Linked worktree, from the host-runtime
+   * service, which may read outside the open project. Null when the service is
+   * not granted, fails, or answers without a config — the `linked-worktree`
+   * failure then stands. See ADR-0005.
+   */
+  private async readWorktreeConfig(directory: string): Promise<string | null> {
+    try {
+      const response = await this.port.serviceRequest({
+        method: 'POST',
+        path: SERVICE_GIT_CONFIG_PATH,
+        body: JSON.stringify({ directory }),
+      });
+      if (response.status < 200 || response.status >= 300) return null;
+      const parsed = JSON.parse(response.body) as { config?: unknown };
+      return typeof parsed.config === 'string' ? parsed.config : null;
+    } catch {
+      return null;
+    }
   }
 
   private async loadPipelines(

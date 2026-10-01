@@ -133,13 +133,67 @@ describe('project resolution in the header', () => {
     host.files.delete('.git/config');
     host.files.delete('.git/HEAD');
     host.files.set('.git', 'gitdir: /primary/.git/worktrees/wt\n');
-    host.worktrees = [{ directory: '/repo', name: 'wt', branch: 'feature/x', status: 'ready' }];
+    // The worktree directory is not the registered project; the primary is.
+    host.projects = [{ id: 'p1', name: 'project', directory: '/primary' }];
+    host.worktrees = [
+      { directory: '/repo', name: 'wt', branch: 'feature/x', status: 'ready' },
+      { directory: '/primary', name: 'primary', branch: 'main', status: 'ready' },
+    ];
     host.handler = handlerFor({});
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Linked worktree');
     expect(text(root)).toContain('Current ref: feature/x');
     expect(text(root)).not.toContain('Not a Git repository');
     expect(text(root)).toContain('Project');
+  });
+});
+
+describe('a linked worktree resolved through the service', () => {
+  /** The open project is the worktree `/repo`; its primary checkout is `/primary`. */
+  function worktreeHost(): FakeHost {
+    const host = new FakeHost();
+    host.files.set('.git', 'gitdir: /primary/.git/worktrees/wt\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/primary' }];
+    host.worktrees = [
+      { directory: '/repo', name: 'wt', branch: 'feature/x', status: 'ready' },
+      { directory: '/primary', name: 'primary', branch: 'main', status: 'ready' },
+    ];
+    return host;
+  }
+
+  test('reads the primary config and lists pipelines on the worktree ref', async () => {
+    const host = worktreeHost();
+    host.serviceHandler = (request) => {
+      if (request.path === '/git-config') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            config: '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n',
+          }),
+        };
+      }
+      return { status: 200, body: '[]' };
+    };
+    host.handler = handlerFor({ pipelines: [pipeline()] });
+    const { root } = await mount(host, new FakeTimers());
+
+    expect(host.serviceRequests[0]?.path).toBe('/git-config');
+    const sent = JSON.parse(host.serviceRequests[0]?.body ?? '{}') as { directory?: string };
+    expect(sent.directory).toBe('/repo');
+    expect(text(root)).toContain('gitlab.com/group/project');
+    expect(text(root)).toContain('feature/x');
+    expect(host.requests.some((request) => request.path.endsWith('/pipelines'))).toBe(true);
+  });
+
+  test('keeps the linked-worktree state when the service cannot read it', async () => {
+    const host = worktreeHost();
+    host.serviceHandler = () => ({ status: 404, body: JSON.stringify({ error: 'nope' }) });
+    host.handler = handlerFor({});
+    const { root } = await mount(host, new FakeTimers());
+
+    expect(text(root)).toContain('Linked worktree');
+    expect(text(root)).toContain('Current ref: feature/x');
+    expect(host.requests).toHaveLength(0);
   });
 });
 

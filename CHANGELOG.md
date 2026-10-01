@@ -7,6 +7,21 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.5.0] - 2026-10-01
+
+### Added
+
+- Show pipelines for a project opened as a Linked worktree. The panel follows the
+  worktree's `.git` pointer to the primary repository through its host-runtime
+  service, so the GitLab project and the worktree's own Ref resolve automatically
+  instead of requiring the Project setting.
+
+### Changed
+
+- A Linked worktree is no longer always a dead end: the typed `linked-worktree`
+  state remains only as the fallback when the service is not granted or cannot
+  read the primary config.
+
 ## [0.4.0] - 2026-10-01
 
 ### Added

@@ -164,6 +164,23 @@ export function isLinkedWorktree(gitFile: string | null | undefined): boolean {
   return gitFile != null && /^\s*gitdir:\s*\S+/.test(gitFile);
 }
 
+/**
+ * The working directory of the primary checkout a linked-worktree `.git` pointer
+ * names — `<primary>/.git/worktrees/<name>` → `<primary>`. Null when the pointer
+ * is not an absolute gitdir in that standard layout, so callers fall back rather
+ * than guess. The Ref's worktree list is keyed by the primary checkout, which the
+ * open worktree directory is not registered under.
+ */
+export function worktreePrimaryDirectory(gitFile: string | null | undefined): string | null {
+  const match = /^\s*gitdir:\s*(.+?)\s*$/m.exec(gitFile ?? '');
+  const gitdir = match?.[1];
+  if (!gitdir || !gitdir.startsWith('/')) return null;
+  const marker = '/.git/worktrees/';
+  const index = gitdir.lastIndexOf(marker);
+  if (index <= 0) return null;
+  return gitdir.slice(0, index);
+}
+
 /** The current Ref: the worktree list first, HEAD only as a fallback. */
 export function deriveRef(
   directory: string | null,

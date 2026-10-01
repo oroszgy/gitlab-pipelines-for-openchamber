@@ -8,6 +8,7 @@ import {
   parseRemoteUrl,
   pickRemote,
   resolveProject,
+  worktreePrimaryDirectory,
 } from '../panel/project-resolver';
 
 describe('parseRemoteUrl', () => {
@@ -238,5 +239,18 @@ describe('isLinkedWorktree', () => {
     expect(isLinkedWorktree('[core]\n\tbare = false\n')).toBe(false);
     expect(isLinkedWorktree(null)).toBe(false);
     expect(isLinkedWorktree('')).toBe(false);
+  });
+});
+
+describe('worktreePrimaryDirectory', () => {
+  test('names the primary checkout a worktree gitdir sits under', () => {
+    expect(worktreePrimaryDirectory('gitdir: /main/.git/worktrees/repo\n')).toBe('/main');
+    expect(worktreePrimaryDirectory('gitdir: /a/b/.git/worktrees/feature-x')).toBe('/a/b');
+  });
+  test('is null when the pointer is relative or not a worktree layout', () => {
+    expect(worktreePrimaryDirectory('gitdir: ../main/.git/worktrees/repo\n')).toBeNull();
+    expect(worktreePrimaryDirectory('gitdir: /super/.git/modules/sub\n')).toBeNull();
+    expect(worktreePrimaryDirectory('ref: refs/heads/main\n')).toBeNull();
+    expect(worktreePrimaryDirectory(null)).toBeNull();
   });
 });

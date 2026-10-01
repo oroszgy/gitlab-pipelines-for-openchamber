@@ -19,6 +19,9 @@ export const PER_PAGE = 20;
 /** The proxy service's one route. */
 export const SERVICE_PATH = "/proxy";
 
+/** The proxy service's route that returns a repository's git config. */
+export const SERVICE_GIT_CONFIG_PATH = "/git-config";
+
 /** Safety cap on lines rendered in the log drawer; the host also caps a response at 256 000 chars. */
 export const LOG_MAX_LINES = 20_000;
 

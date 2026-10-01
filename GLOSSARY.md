@@ -75,10 +75,18 @@ _Avoid_: on-prem, private
 
 **Linked worktree**:
 A git checkout whose `.git` is a _file_ pointing at the primary repository instead of a directory, so
-`.git/config` and `.git/HEAD` cannot be read from the open project. The Panel cannot derive a GitLab
-project from one — the host API exposes no remote — so it reports `linked-worktree` and the `project`
-override is the way to read its pipelines. Its Ref is still known from the host's worktree list.
+`.git/config` and `.git/HEAD` cannot be read from the open project. The Panel's own file capability
+cannot reach the remote there, so it asks its **Proxy service** to follow the `.git` pointer to the
+primary repository's config, and reads its Ref from the primary's worktree list. When the service is
+not granted or cannot read it, the Panel reports `linked-worktree` and the `project` override is the
+way to read its pipelines.
 _Avoid_: secondary checkout, submodule (a different thing)
+
+**Proxy service**:
+The extension's host-runtime process, used to reach what the sandboxed Panel cannot: a custom GitLab
+host, and the primary repository of a **Linked worktree**. The Panel sends it a request over a loopback
+socket; it runs with the user's rights, so the install shows a service grant.
+_Avoid_: backend, daemon
 
 **Built-in host**:
 The single GitLab origin baked into the Extension's manifest (`apiOrigin`). Requests to it go over the
