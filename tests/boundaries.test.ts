@@ -29,7 +29,6 @@ const ALLOWED: readonly string[] = [
   // Presentation helpers that predate the ratchet; candidates to move out later.
   'isAtBottom',
   'resolveCustomBase',
-  'projectFromRedirectTarget',
   'hostOfBase',
   'proxyResponse',
   'traceTruncation',

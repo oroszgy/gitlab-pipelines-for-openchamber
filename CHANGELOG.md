@@ -7,6 +7,14 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-01
+
+### Fixed
+
+- Following a moved GitLab project no longer fails when GitLab answers a sub-resource request
+  with that resource's own location rather than the project root — only the project is adopted
+  from the redirect target, with its sub-path and query dropped.
+
 ## [0.6.0] - 2026-10-01
 
 ### Changed

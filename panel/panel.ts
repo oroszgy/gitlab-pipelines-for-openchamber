@@ -19,6 +19,7 @@ import {
   fetchPipelines,
   fetchTrace,
   fromHostPort,
+  projectFromRedirectTarget,
   type ClientFailure,
   type Requester,
 } from './gitlab-client';
@@ -1807,29 +1808,6 @@ export function resolveCustomBase(value: string): string | null {
   }
   if (!/^[a-z0-9.-]+(:\d+)?$/i.test(raw)) return null;
   return `https://${raw}`;
-}
-
-/**
- * The project reference named by a redirect target URL, when that URL is on the
- * effective host — a project id, or an encoded path. A target on another host is
- * refused: following it would name a different instance's project.
- */
-function projectFromRedirectTarget(target: string, host: string): string | null {
-  let url: URL;
-  try {
-    url = new URL(target);
-  } catch {
-    return null;
-  }
-  if (url.host !== host) return null;
-  const match = /^\/api\/v4\/projects\/(.+?)\/?$/.exec(url.pathname);
-  const reference = match?.[1];
-  if (!reference) return null;
-  try {
-    return decodeURIComponent(reference);
-  } catch {
-    return null;
-  }
 }
 
 /** The host (with port) of a base URL, for display and comparison. */

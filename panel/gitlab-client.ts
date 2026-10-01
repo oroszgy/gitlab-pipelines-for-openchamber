@@ -102,6 +102,33 @@ export function parseMoveTarget(body: string): string | null {
   }
 }
 
+/**
+ * The project reference named by a redirect target URL, when that URL is on the
+ * effective host — a project id, or an encoded path. GitLab answers a request
+ * for a sub-resource with that resource's full location (e.g.
+ * `/api/v4/projects/81/pipelines?per_page=100`), so only the first segment after
+ * `projects/` names the project; any sub-resource path and query are dropped. A
+ * target on another host is refused: following it would name a different
+ * instance's project.
+ */
+export function projectFromRedirectTarget(target: string, host: string): string | null {
+  let url: URL;
+  try {
+    url = new URL(target);
+  } catch {
+    return null;
+  }
+  if (url.host !== host) return null;
+  const match = /^\/api\/v4\/projects\/([^/]+)(?:\/|$)/.exec(url.pathname);
+  const reference = match?.[1];
+  if (!reference) return null;
+  try {
+    return decodeURIComponent(reference);
+  } catch {
+    return null;
+  }
+}
+
 /** HTTP status → typed failure, or null for a success. */
 export function mapHttpStatus(status: number): ClientFailure | null {
   if (status >= 200 && status < 300) return null;

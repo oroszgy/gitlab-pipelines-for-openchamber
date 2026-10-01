@@ -1044,6 +1044,27 @@ describe('a moved project', () => {
     ]);
   });
 
+  test('follows a move when GitLab names the full sub-resource in the target', async () => {
+    const host = configuredHost();
+    // GitLab answers a pipelines request with that resource's own location, not
+    // the project root: `/api/v4/projects/<id>/pipelines?per_page=…`.
+    host.handler = (request: HostRequest): HostResponse => {
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines') {
+        return {
+          status: 301,
+          body: movedTo('https://gitlab.com/api/v4/projects/81/pipelines?per_page=100&ref=main'),
+        };
+      }
+      if (request.path === '/api/v4/projects/81/pipelines') {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 5 })]) };
+      }
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Passed');
+    expect(text(root)).not.toContain('Project not found');
+  });
+
   test('a refresh reuses the healed target without following the move again', async () => {
     const host = configuredHost();
     host.handler = moveHandler();

@@ -12,6 +12,7 @@ import {
   parseMoveTarget,
   pipelinesRequest,
   projectBase,
+  projectFromRedirectTarget,
   traceRequest,
   type Requester,
 } from '../panel/gitlab-client';
@@ -203,6 +204,44 @@ describe('fetchPipelines over a requester', () => {
       { scope: 'all' },
     );
     expect(result).toEqual({ ok: false, failure: { kind: 'redirect', target: null } });
+  });
+});
+
+describe('projectFromRedirectTarget', () => {
+  const HOST = 'gitlab.example.com';
+
+  test('reads a project-root target', () => {
+    expect(projectFromRedirectTarget(`https://${HOST}/api/v4/projects/81`, HOST)).toBe('81');
+  });
+
+  test('drops a sub-resource path and query, keeping only the project', () => {
+    // GitLab names the full resource location it was asked for, not the project
+    // root: following it wholesale would seek `81/pipelines` as a project.
+    expect(
+      projectFromRedirectTarget(
+        `https://${HOST}/api/v4/projects/81/pipelines?per_page=100&ref=main`,
+        HOST,
+      ),
+    ).toBe('81');
+  });
+
+  test('decodes an encoded project path in the target', () => {
+    expect(
+      projectFromRedirectTarget(
+        `https://${HOST}/api/v4/projects/group%2Fsubgroup%2Fproject/pipelines`,
+        HOST,
+      ),
+    ).toBe('group/subgroup/project');
+  });
+
+  test('refuses a target on another host', () => {
+    expect(
+      projectFromRedirectTarget('https://evil.example.com/api/v4/projects/81', HOST),
+    ).toBeNull();
+  });
+
+  test('refuses a target that names no project', () => {
+    expect(projectFromRedirectTarget(`https://${HOST}/api/v4/projects/`, HOST)).toBeNull();
   });
 });
 
