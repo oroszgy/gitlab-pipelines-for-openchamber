@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  bridgesRequest,
+  fetchBridges,
   fetchJobs,
   fetchPipelines,
   fetchTrace,
@@ -47,6 +49,13 @@ describe('path and query construction', () => {
     expect(traceRequest('g/p', 34)).toEqual({
       path: '/api/v4/projects/g%2Fp/jobs/34/trace',
       query: {},
+    });
+  });
+
+  test('bridges path asks for a full page', () => {
+    expect(bridgesRequest('g/p', 12)).toEqual({
+      path: '/api/v4/projects/g%2Fp/pipelines/12/bridges',
+      query: { per_page: '100' },
     });
   });
 });
@@ -224,5 +233,75 @@ describe('fetchJobs and fetchTrace', () => {
       9,
     );
     expect(result).toEqual({ ok: true, data: 'line one\nline two\n' });
+  });
+});
+
+describe('fetchBridges over a requester', () => {
+  const requester =
+    (handler: (request: Parameters<Requester>[0]) => { status: number; body: string }): Requester =>
+    async (request) => handler(request);
+
+  test('reads a bridge payload, including its downstream pipeline', async () => {
+    const payload = [
+      {
+        id: 5,
+        name: 'deploy',
+        stage: 'deploy',
+        status: 'success',
+        web_url: 'https://gitlab.com/group/project/-/jobs/5',
+        downstream_pipeline: { id: 42, iid: 3, project_id: 7, status: 'failed' },
+      },
+      {
+        id: 6,
+        name: 'trigger',
+        stage: 'deploy',
+        status: 'pending',
+        web_url: 'https://gitlab.com/group/project/-/jobs/6',
+        downstream_pipeline: null,
+      },
+    ];
+    const result = await fetchBridges(
+      requester(() => ({ status: 200, body: JSON.stringify(payload) })),
+      'g/p',
+      12,
+    );
+    if (!result.ok) throw new Error('expected success');
+    expect(result.data).toHaveLength(2);
+    expect(result.data[0]?.downstream_pipeline?.status).toBe('failed');
+    expect(result.data[1]?.downstream_pipeline).toBeNull();
+  });
+
+  test('maps its failures exactly as the other fetches do', async () => {
+    expect(await fetchBridges(requester(() => ({ status: 401, body: '' })), 'g/p', 12)).toEqual({
+      ok: false,
+      failure: { kind: 'unauthorized' },
+    });
+    expect(await fetchBridges(requester(() => ({ status: 403, body: '' })), 'g/p', 12)).toEqual({
+      ok: false,
+      failure: { kind: 'unauthorized' },
+    });
+    expect(await fetchBridges(requester(() => ({ status: 404, body: '' })), 'g/p', 12)).toEqual({
+      ok: false,
+      failure: { kind: 'not-found' },
+    });
+    const disconnected: Requester = () => {
+      const error = new Error('disconnected') as Error & { code: string };
+      error.code = 'DISCONNECTED';
+      throw error;
+    };
+    expect(await fetchBridges(disconnected, 'g/p', 12)).toEqual({
+      ok: false,
+      failure: { kind: 'disconnected' },
+    });
+    const failing: Requester = () => {
+      throw new Error('socket hang up');
+    };
+    expect(await fetchBridges(failing, 'g/p', 12)).toEqual({
+      ok: false,
+      failure: { kind: 'network' },
+    });
+    expect(await fetchBridges(requester(() => ({ status: 200, body: 'not json' })), 'g/p', 12)).toEqual(
+      { ok: false, failure: { kind: 'http', status: 200 } },
+    );
   });
 });

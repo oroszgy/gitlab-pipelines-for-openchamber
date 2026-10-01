@@ -167,8 +167,46 @@ html, body { margin: 0; height: 100%; color-scheme: light dark; }
 @keyframes gp-spin { to { transform: rotate(360deg); } }
 
 .gp-jobs { display: flex; flex-direction: column; gap: 6px; padding: 2px 8px 8px 22px; }
+.gp-jobs-body { display: flex; flex-direction: column; gap: 6px; }
 .gp-jobs-link { align-self: flex-start; color: var(--oc-primary-text, #9db8f5); text-decoration: none; font-size: 0.6875rem; }
 .gp-jobs-link:hover { text-decoration: underline; }
+
+.gp-downstream-badge {
+  flex: 0 0 auto;
+  color: var(--oc-muted, GrayText);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+}
+
+.gp-trigger-wrap { display: flex; flex-direction: column; gap: 2px; }
+.gp-trigger .gp-job-name { font-style: italic; }
+.gp-downstream-card {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  margin: 0 6px 4px 20px;
+  padding: 6px 8px;
+  border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
+  border-left: 2px solid var(--oc-primary, #5b8def);
+  border-radius: var(--oc-radius, 6px);
+  background: var(--oc-muted-surface, var(--oc-subtle, transparent));
+}
+.gp-downstream-label { font-weight: 600; font-size: 0.75rem; }
+.gp-downstream-meta { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
+.gp-downstream-iid { flex: 0 0 auto; color: var(--oc-muted, GrayText); font-size: 0.6875rem; }
+.gp-downstream-open {
+  align-self: flex-start;
+  padding: 2px 7px;
+  border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
+  border-radius: var(--oc-radius, 6px);
+  background: transparent;
+  color: var(--oc-primary-text, #9db8f5);
+  font-size: 0.6875rem;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.gp-downstream-open:hover:not([disabled]) { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); }
+.gp-downstream-open[disabled] { color: var(--oc-muted, GrayText); opacity: 0.6; cursor: default; }
 .gp-stage { display: flex; flex-direction: column; gap: 1px; }
 .gp-stage-head { display: flex; align-items: center; gap: 6px; color: var(--oc-muted, GrayText); font-size: 0.6875rem; text-transform: uppercase; letter-spacing: 0.05em; }
 .gp-stage-name { flex: 0 0 auto; }

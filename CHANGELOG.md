@@ -7,6 +7,27 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-01
+
+### Added
+
+- Follow a pipeline's Trigger jobs into their Downstream pipelines: each Trigger job shows as a row
+  in its Stage carrying the Downstream pipeline's own status, with a card beneath it for the
+  pipeline — label (project path, or "child pipeline"), Ref, short SHA and a link to GitLab.
+- Expand a Downstream card to that pipeline's jobs by stage, open a nested job's log in the same
+  drawer, and expand its own Trigger jobs in turn — bounded at three generations below the root, with
+  a "Continue in GitLab" link beyond.
+- A collapsed pipeline row shows a `↳ N downstream` count, fetched once per listed pipeline on load
+  and afterwards only for active or already-fanning-out pipelines.
+- Downstream statuses keep the panel polling after a `mirror`'d upstream has settled, so a card stays
+  live while its downstream runs.
+
+### Changed
+
+- A pipeline's stages now include its Trigger jobs, so its `done/total` counts them.
+- **Start session** is offered only on failed jobs of the open project — the root pipeline and its
+  child pipelines — not on jobs of a Downstream pipeline in another project.
+
 ## [0.3.0] - 2026-10-01
 
 ### Added

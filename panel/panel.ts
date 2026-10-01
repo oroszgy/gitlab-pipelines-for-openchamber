@@ -2,8 +2,19 @@ import type { GuestConnection, HostReadyContext, StartSessionSent } from '@openc
 import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
 
 import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS, PANEL_ID, SERVICE_PATH } from './config';
+import {
+  MAX_DOWNSTREAM_GENERATIONS,
+  canExpand,
+  downstreamCount,
+  downstreamLabel,
+  downstreamProject,
+  triggerRows,
+  triggerStateInfo,
+  type TriggerRow,
+} from './downstream';
 import { ago, duration, elapsed, logLines, shortSha, tailLines, toEpoch } from './format';
 import {
+  fetchBridges,
   fetchJobs,
   fetchPipelines,
   fetchTrace,
@@ -24,7 +35,7 @@ import {
 } from './project-resolver';
 import { groupJobsByStage, type StageGroup } from './stage-groups';
 import { isActiveStatus, jobStatusInfo, statusInfo, type StatusInfo } from './status';
-import type { Job, Pipeline, Scope } from './types';
+import type { Bridge, Job, Pipeline, Scope } from './types';
 
 /** Everything the panel needs from a clock. Injected so tests are deterministic. */
 export type Timers = {
@@ -86,7 +97,32 @@ type TraceState = {
   truncated: TraceTruncation;
 };
 
-type OpenJob = { pipelineId: number; jobId: number };
+/** A Pipeline's identity: its id alone is not unique across projects in the view. */
+type PipelineKey = { project: string; pipelineId: number };
+
+/** A Job's identity: its id alone is not unique across projects in the view. */
+type JobKey = { project: string; jobId: number };
+
+/** The open Jobs drawer, pinned to the project and pipeline the Job belongs to. */
+type OpenJob = JobKey & { pipelineId: number };
+
+/** An expanded Downstream pipeline: what to fetch, how deep it sits, and its path. */
+type DownstreamNode = PipelineKey & {
+  generation: number;
+  /** Every ancestor (root last), so a cycle on one path is refused. */
+  ancestors: PipelineKey[];
+};
+
+/** A Pipeline's Trigger rows, or a failure. Keyed by project + pipeline id. */
+type BridgeEntry = TriggerRow[] | 'error';
+
+function pipelineKey(project: string, pipelineId: number): string {
+  return `${project}\u0000${pipelineId}`;
+}
+
+function jobKey(project: string, jobId: number): string {
+  return `${project}\u0000${jobId}`;
+}
 
 // ---------------------------------------------------------------------------
 // SVG shapes (glyph names come from the pure status map)
@@ -166,10 +202,16 @@ class PipelinesPanel implements PanelHandle {
   private error: string | null = null;
   private pipelines: Pipeline[] = [];
   private expandedId: number | null = null;
-  private readonly jobs = new Map<number, Job[] | 'loading' | 'error'>();
+  /** Trigger rows per Pipeline, from `/bridges`; missing means not fetched yet. */
+  private readonly bridges = new Map<string, BridgeEntry>();
+  /** Build Jobs per (project, pipeline id), fetched lazily on expansion. */
+  private readonly jobs = new Map<string, Job[] | 'loading' | 'error'>();
+  /** The open Downstream chain, root-most first; each entry is an expanded card. */
+  private downstreamPath: DownstreamNode[] = [];
   private openJob: OpenJob | null = null;
-  private readonly traces = new Map<number, TraceState>();
-  private traceLoadingId: number | null = null;
+  /** Traces per (project, job id). */
+  private readonly traces = new Map<string, TraceState>();
+  private traceLoadingKey: string | null = null;
   /** The Job whose handoff is in flight, and the last handoff failure to show. */
   private handoffJobId: number | null = null;
   private handoffError: string | null = null;
@@ -268,6 +310,7 @@ class PipelinesPanel implements PanelHandle {
     if (scope === this.scope) return;
     this.scope = scope;
     this.expandedId = null;
+    this.downstreamPath = [];
     this.openJob = null;
     this.pipelines = [];
     this.refresh();
@@ -336,7 +379,7 @@ class PipelinesPanel implements PanelHandle {
     this.derivedProject = resolution.project;
     this.redirectHops = 0;
     this.resolved = this.applyHealedProject(resolution);
-    await this.loadPipelines(gen, this.resolved);
+    await this.loadPipelines(gen, this.resolved, true);
   }
 
   /**
@@ -362,10 +405,12 @@ class PipelinesPanel implements PanelHandle {
    */
   private forgetHostData(): void {
     this.pipelines = [];
+    this.bridges.clear();
     this.jobs.clear();
     this.traces.clear();
     this.openJob = null;
     this.expandedId = null;
+    this.downstreamPath = [];
     this.updatedAt = null;
     this.healed.clear();
     this.derivedProject = null;
@@ -427,6 +472,7 @@ class PipelinesPanel implements PanelHandle {
   private async loadPipelines(
     gen: number,
     resolution: Extract<ProjectResolution, { ok: true }>,
+    seedBridges = false,
   ): Promise<void> {
     const scope: Scope = resolution.ref ? this.scope : 'all';
     const result = await fetchPipelines(this.requester(), resolution.project, {
@@ -449,11 +495,38 @@ class PipelinesPanel implements PanelHandle {
     this.phase = 'ready';
     this.error = null;
     this.promoteHealNotice();
-    if (this.expandedId != null) {
-      void this.loadJobs(gen, this.expandedId, this.jobs.has(this.expandedId));
+    this.pruneDownstreamNode();
+    if (seedBridges) {
+      this.seedBridges(gen, resolution.project);
+      // A manual refresh re-reads the expanded Pipeline's own Jobs. On a poll,
+      // `refetchVisible` owns every refetch, so this must not double up.
+      if (this.expandedId != null) {
+        void this.loadJobs(gen, resolution.project, this.expandedId, true);
+      }
     }
     this.render();
     this.schedulePoll();
+  }
+
+  /**
+   * Fetch bridges once for each listed Pipeline as the list loads, so every
+   * collapsed row can show its Downstream count. A poll does not re-seed; it
+   * refetches only active or already-fanning-out Pipelines (`refetchVisible`).
+   */
+  private seedBridges(gen: number, project: string): void {
+    for (const pipeline of this.pipelines) {
+      const key = pipelineKey(project, pipeline.id);
+      if (!this.bridges.has(key)) void this.loadBridges(gen, project, pipeline.id, false);
+    }
+  }
+
+  /** Drop an expanded Downstream chain whose root Pipeline is no longer listed. */
+  private pruneDownstreamNode(): void {
+    const first = this.downstreamPath[0];
+    if (!first) return;
+    if (this.pipelines.some((pipeline) => pipeline.id === first.ancestors[0]?.pipelineId)) return;
+    this.downstreamPath = [];
+    this.openJob = null;
   }
 
   private handleFailure(failure: ClientFailure): void {
@@ -517,7 +590,7 @@ class PipelinesPanel implements PanelHandle {
     // The notice is only shown once the heal lands; see `promoteHealNotice`.
     this.pendingHealNotice = { from, to: project };
     this.resolved = { ...resolution, project };
-    void this.loadPipelines(gen, this.resolved);
+    void this.loadPipelines(gen, this.resolved, true);
     return true;
   }
 
@@ -547,86 +620,112 @@ class PipelinesPanel implements PanelHandle {
   private togglePipeline(id: number): void {
     if (this.expandedId === id) {
       this.expandedId = null;
+      this.downstreamPath = [];
+      this.openJob = null;
       this.render();
       return;
     }
     this.expandedId = id;
-    if (!this.jobs.has(id)) {
-      this.jobs.set(id, 'loading');
-      this.render();
-      void this.loadJobs(this.generation, id, false);
-    } else {
-      this.render();
+    this.downstreamPath = [];
+    const project = this.resolved?.project;
+    if (project) {
+      const key = pipelineKey(project, id);
+      // Re-expanding retries a previous failure; a filled cache is reused.
+      if (!Array.isArray(this.jobs.get(key))) void this.loadJobs(this.generation, project, id, false);
+      if (!Array.isArray(this.bridges.get(key))) void this.loadBridges(this.generation, project, id, false);
     }
+    this.render();
   }
 
-  private async loadJobs(gen: number, pipelineId: number, silent: boolean): Promise<void> {
-    const project = this.resolved?.project;
-    if (!project) return;
-    if (!silent || !Array.isArray(this.jobs.get(pipelineId))) {
-      this.jobs.set(pipelineId, 'loading');
+  private async loadJobs(gen: number, project: string, pipelineId: number, silent: boolean): Promise<void> {
+    const key = pipelineKey(project, pipelineId);
+    if (!silent || !Array.isArray(this.jobs.get(key))) {
+      this.jobs.set(key, 'loading');
       this.render();
     }
     const result = await fetchJobs(this.requester(), project, pipelineId);
     if (this.disposed || gen !== this.generation) return;
     if (result.ok) {
-      this.jobs.set(pipelineId, result.data);
+      this.jobs.set(key, result.data);
     } else if (silent) {
       // A background refresh must not discard jobs already on screen.
     } else {
       // A failed fetch is not an absence of jobs; say so rather than showing none.
-      this.jobs.set(pipelineId, 'error');
+      this.jobs.set(key, 'error');
     }
-    if (this.expandedId === pipelineId) this.render();
+    this.render();
   }
 
-  private openJobDrawer(pipelineId: number, jobId: number): void {
-    this.openJob = { pipelineId, jobId };
+  private async loadBridges(gen: number, project: string, pipelineId: number, silent: boolean): Promise<void> {
+    const key = pipelineKey(project, pipelineId);
+    const result = await fetchBridges(this.requester(), project, pipelineId);
+    if (this.disposed || gen !== this.generation) return;
+    if (result.ok) {
+      this.bridges.set(key, triggerRows(result.data, project));
+    } else if (silent) {
+      // Keep the last known count rather than let a poll failure clear it.
+    } else {
+      // A failed bridge fetch is contained: the row shows no count, the list stands.
+      this.bridges.set(key, 'error');
+    }
+    this.render();
+    // A newly cached Downstream status can start the poll, e.g. a settled
+    // mirror'd upstream whose downstream is still running. Poll-driven (silent)
+    // refetches must not re-arm it, or a settled view would never stop.
+    if (!silent && this.resolved) this.schedulePoll();
+  }
+
+  private openJobDrawer(project: string, pipelineId: number, jobId: number): void {
+    this.openJob = { project, pipelineId, jobId };
     this.followTail = true;
     this.drawerScrollTop = 0;
-    if (this.traces.has(jobId)) {
+    const key = jobKey(project, jobId);
+    if (this.traces.has(key)) {
       this.render();
       return;
     }
-    this.traceLoadingId = jobId;
+    this.traceLoadingKey = key;
     this.render();
-    void this.loadTrace(this.generation, jobId);
+    void this.loadTrace(this.generation, project, jobId);
   }
 
-  private async loadTrace(gen: number, jobId: number): Promise<void> {
-    const project = this.resolved?.project;
-    if (!project) return;
+  private async loadTrace(gen: number, project: string, jobId: number): Promise<void> {
+    const key = jobKey(project, jobId);
     const result = await fetchTrace(this.requester(), project, jobId);
     if (this.disposed || gen !== this.generation) return;
-    this.traceLoadingId = null;
+    if (this.traceLoadingKey === key) this.traceLoadingKey = null;
     if (!result.ok) {
       // A failed fetch is not a missing log; keep the two apart.
-      this.traces.set(jobId, { state: 'error', text: '', truncated: null });
+      this.traces.set(key, { state: 'error', text: '', truncated: null });
     } else {
-      this.traces.set(jobId, traceStateOf(result.data ?? ''));
+      this.traces.set(key, traceStateOf(result.data ?? ''));
     }
     this.render();
   }
 
   /**
    * While the open Job is still active, refresh just its trace on the poll — the log is otherwise
-   * fetched once and cached, so a running Job would freeze at the moment it was opened.
+   * fetched once and cached, so a running Job would freeze at the moment it was opened. The Job's
+   * own project is what it is fetched against, nested or not.
    */
   private refreshOpenTrace(gen: number): void {
     const reference = this.openJob;
-    if (!reference || this.traceLoadingId === reference.jobId) return;
-    const job = this.jobById(reference.jobId);
+    if (!reference) return;
+    if (this.traceLoadingKey === jobKey(reference.project, reference.jobId)) return;
+    const job = this.jobById(reference.project, reference.pipelineId, reference.jobId);
     if (!job || !isActiveStatus(job.status)) return;
-    void this.loadTrace(gen, reference.jobId);
+    void this.loadTrace(gen, reference.project, reference.jobId);
   }
 
-  private jobById(jobId: number): Job | undefined {
-    for (const value of this.jobs.values()) {
-      if (!Array.isArray(value)) continue;
-      const match = value.find((job) => job.id === jobId);
-      if (match) return match;
-    }
-    return undefined;
+  /**
+   * The live Job behind a drawer/`Start session` reference: looked up in its own
+   * (project, pipeline id) Jobs entry, so a same job id in another project cannot
+   * answer in its place.
+   */
+  private jobById(project: string, pipelineId: number, jobId: number): Job | undefined {
+    const jobs = this.jobs.get(pipelineKey(project, pipelineId));
+    if (!Array.isArray(jobs)) return undefined;
+    return jobs.find((job) => job.id === jobId);
   }
 
   private closeDrawer(): void {
@@ -647,22 +746,54 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /**
+   * Whether this Job offers **Start session**. Handoff seeds a session in the open checkout, so a
+   * Job of a Downstream pipeline in *another* project is deliberately excluded: the checkout cannot
+   * fix that project. Only the root Pipeline and its same-project child pipelines qualify. See the
+   * Handoff section of `.scratch/downstream-pipelines/spec.md`.
+   */
+  private canHandoffJob(project: string): boolean {
+    return this.resolved != null && samePath(project, this.resolved.project);
+  }
+
+  /**
    * Start a new session from a failed Job, seeded with its identity, links and
    * Trace tail. The Panel's only outbound action; nothing is sent to GitLab.
    */
-  private startHandoff(pipelineId: number, jobId: number): void {
-    if (!this.canHandoff() || this.handoffJobId != null) return;
-    const job = this.jobById(jobId);
+  private startHandoff(project: string, pipelineId: number, jobId: number): void {
+    if (!this.canHandoff() || !this.canHandoffJob(project) || this.handoffJobId != null) return;
+    const job = this.jobById(project, pipelineId, jobId);
     if (!job || !isHandoffJob(job)) return;
-    const pipeline = this.pipelines.find((candidate) => candidate.id === pipelineId) ?? null;
+    const pipeline = this.pipelineFor(project, pipelineId);
     this.handoffJobId = jobId;
     this.handoffError = null;
     this.render();
-    void this.runHandoff(pipeline, job);
+    void this.runHandoff(project, pipeline, job);
   }
 
-  private async runHandoff(pipeline: Pipeline | null, job: Job): Promise<void> {
-    const trace = await this.traceFor(job);
+  /** The Pipeline behind a (project, pipeline id), from the list or an expanded card. */
+  private pipelineFor(project: string, pipelineId: number): Pipeline | null {
+    const local = this.pipelines.find((candidate) => candidate.id === pipelineId);
+    if (local && samePath(project, this.resolved?.project ?? '')) return local;
+    const downstream = this.triggerFor(project, pipelineId)?.downstream;
+    if (downstream) {
+      return { ...downstream, started_at: null, finished_at: null, duration: null };
+    }
+    return local ?? null;
+  }
+
+  /** The Trigger row in `project` whose card is the pipeline `pipelineId`. */
+  private triggerFor(project: string, pipelineId: number): TriggerRow | undefined {
+    for (const [key, value] of this.bridges) {
+      if (!Array.isArray(value)) continue;
+      if (key.split('\u0000')[0] !== project) continue;
+      const match = value.find((row) => row.downstream?.id === pipelineId);
+      if (match) return match;
+    }
+    return undefined;
+  }
+
+  private async runHandoff(project: string, pipeline: Pipeline | null, job: Job): Promise<void> {
+    const trace = await this.traceFor(project, job);
     if (this.disposed) return;
     if (trace == null) {
       this.finishHandoff('Could not read the job log to hand off. The session was not started.');
@@ -673,7 +804,7 @@ class PipelinesPanel implements PanelHandle {
       const result = await this.port.startSession(
         buildHandoff({
           providerId: PANEL_ID,
-          project: this.resolved?.project ?? '',
+          project,
           pipeline,
           job,
           trace,
@@ -689,15 +820,14 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /** The Job's Trace: the cached one, or a fresh fetch. null when it cannot be read. */
-  private async traceFor(job: Job): Promise<string | null> {
-    const cached = this.traces.get(job.id);
+  private async traceFor(project: string, job: Job): Promise<string | null> {
+    const key = jobKey(project, job.id);
+    const cached = this.traces.get(key);
     if (cached?.state === 'ready') return cached.text;
-    const project = this.resolved?.project;
-    if (!project) return null;
     const result = await fetchTrace(this.requester(), project, job.id);
     if (!result.ok) return null;
     const text = result.data ?? '';
-    this.traces.set(job.id, traceStateOf(text));
+    this.traces.set(key, traceStateOf(text));
     return text;
   }
 
@@ -709,10 +839,19 @@ class PipelinesPanel implements PanelHandle {
 
   // -- polling --------------------------------------------------------------
 
+  /**
+   * Every Status the Panel keeps polling for: the listed Pipelines, every cached build Job, and
+   * every cached Trigger row's *contributing* status — its Downstream pipeline's where it has one,
+   * its own otherwise. Without the Trigger rows a mirror'd upstream that has already settled would
+   * stop the poll while its Downstream pipeline is still running.
+   */
   private visibleStatuses(): string[] {
     const statuses: string[] = this.pipelines.map((pipeline) => pipeline.status);
     for (const value of this.jobs.values()) {
       if (Array.isArray(value)) for (const job of value) statuses.push(job.status);
+    }
+    for (const value of this.bridges.values()) {
+      if (Array.isArray(value)) for (const row of value) statuses.push(row.status);
     }
     return statuses;
   }
@@ -741,7 +880,74 @@ class PipelinesPanel implements PanelHandle {
     const gen = ++this.generation;
     this.redirectHops = 0;
     await this.loadPipelines(gen, this.resolved);
-    if (gen === this.generation) this.refreshOpenTrace(gen);
+    if (gen !== this.generation) return;
+    this.refreshOpenTrace(gen);
+    await this.refetchVisible(gen);
+    // `loadPipelines` armed the next poll from the *pre-refetch* statuses. Now
+    // that bridges and Jobs are fresh, re-evaluate: this is what lets a settled
+    // mirror'd upstream stop once its downstream has settled too.
+    if (gen === this.generation) this.schedulePoll();
+  }
+
+  /**
+   * On the poll, refetch bridges and Jobs only for Pipelines that are visible and worth a call: the
+   * expanded root, an expanded Downstream card, or a still-active Pipeline (whose count may move).
+   * An untouched, settled row is not fetched; its badge reads from the cache. Bridges are refetched
+   * for a Pipeline known to fan out even when it has settled, so a late Downstream is seen.
+   */
+  private async refetchVisible(gen: number): Promise<void> {
+    if (!this.resolved) return;
+    const project = this.resolved.project;
+    const targets = new Map<string, { target: PipelineKey; status: string; expanded: boolean }>();
+
+    const add = (target: PipelineKey, status: string, expanded: boolean): void => {
+      const key = pipelineKey(target.project, target.pipelineId);
+      const prior = targets.get(key);
+      // An expanded target also being active stays expanded.
+      if (!prior || expanded) targets.set(key, { target, status, expanded });
+    };
+
+    for (const pipeline of this.pipelines) {
+      const expanded = pipeline.id === this.expandedId;
+      const entry = this.bridges.get(pipelineKey(project, pipeline.id));
+      const hasDownstream = Array.isArray(entry) ? downstreamCount(entry) > 0 : false;
+      // Bridges move for active Pipelines and for any known to fan out; Jobs only
+      // for the expanded Pipeline or a still-active one. Other rows read the cache.
+      if (expanded || isActiveStatus(pipeline.status) || hasDownstream) {
+        add({ project, pipelineId: pipeline.id }, pipeline.status, expanded);
+      }
+    }
+    for (const node of this.downstreamPath) {
+      const entry = this.bridges.get(pipelineKey(node.project, node.pipelineId));
+      const row = Array.isArray(entry) ? entry[0] : undefined;
+      add({ project: node.project, pipelineId: node.pipelineId }, row?.status ?? this.jobsStatus(node), true);
+    }
+
+    const pending: Array<Promise<void>> = [];
+    for (const { target, status, expanded } of targets.values()) {
+      const key = pipelineKey(target.project, target.pipelineId);
+      if (expanded || isActiveStatus(status) || this.hasCachedDownstream(key)) {
+        pending.push(this.loadBridges(gen, target.project, target.pipelineId, true));
+      }
+      if ((expanded || isActiveStatus(status)) && Array.isArray(this.jobs.get(key))) {
+        pending.push(this.loadJobs(gen, target.project, target.pipelineId, true));
+      }
+    }
+    await Promise.all(pending);
+  }
+
+  private hasCachedDownstream(key: string): boolean {
+    const entry = this.bridges.get(key);
+    return Array.isArray(entry) && downstreamCount(entry) > 0;
+  }
+
+  /** A Downstream node's own status, else 'success' so it is not seen as active. */
+  private jobsStatus(node: DownstreamNode): string {
+    const jobs = this.jobs.get(pipelineKey(node.project, node.pipelineId));
+    if (Array.isArray(jobs)) {
+      for (const job of jobs) if (isActiveStatus(job.status)) return 'running';
+    }
+    return 'success';
   }
 
   private stopPollTimer(): void {
@@ -1070,6 +1276,7 @@ class PipelinesPanel implements PanelHandle {
   }
 
   private renderPipeline(pipeline: Pipeline): HTMLElement {
+    const project = this.resolved?.project ?? '';
     const open = this.expandedId === pipeline.id;
     const item = el('div', 'gp-item');
     item.dataset.open = open ? 'true' : 'false';
@@ -1089,37 +1296,82 @@ class PipelinesPanel implements PanelHandle {
     main.append(line, el('div', 'gp-row-sub', pipelineSubtitle(pipeline)));
     row.append(main, this.timingSpan(pipeline));
 
+    const count = this.collapsedDownstreamCount(project, pipeline.id);
+    if (count > 0) row.append(el('span', 'gp-downstream-badge', `↳ ${count} downstream`));
+
     row.addEventListener('click', () => this.togglePipeline(pipeline.id));
     item.append(row);
 
     if (open) {
       const jobsWrap = el('div', 'gp-jobs');
-      if (pipeline.web_url) {
-        const link = document.createElement('a');
-        link.className = 'gp-jobs-link';
-        link.href = pipeline.web_url;
-        link.target = '_blank';
-        link.rel = 'noreferrer';
-        link.textContent = 'View pipeline in GitLab';
-        link.addEventListener('click', (event) => {
-          event.preventDefault();
-          void this.port.openUrl(pipeline.web_url);
-        });
-        jobsWrap.append(link);
-      }
-      const value = this.jobs.get(pipeline.id);
-      if (value === undefined || value === 'loading') {
-        jobsWrap.append(el('div', 'gp-row-sub', 'Loading jobs…'));
-      } else if (value === 'error') {
-        jobsWrap.append(el('div', 'gp-row-sub', 'Could not load jobs. Collapse and reopen to retry.'));
-      } else if (value.length === 0) {
-        jobsWrap.append(el('div', 'gp-row-sub', 'No jobs reported yet.'));
-      } else {
-        for (const group of groupJobsByStage(value)) jobsWrap.append(this.renderStage(pipeline.id, group));
-      }
+      if (pipeline.web_url) jobsWrap.append(this.renderExternalLink('gp-jobs-link', 'View pipeline in GitLab', pipeline.web_url));
+      const entry = this.bridges.get(pipelineKey(project, pipeline.id));
+      jobsWrap.append(this.renderJobsBody(project, pipeline.id, entry));
+      if (entry === 'error') jobsWrap.append(el('div', 'gp-row-sub', 'Could not load downstream pipelines.'));
       item.append(jobsWrap);
     }
     return item;
+  }
+
+  /** The collapsed row's badge; zero, unknown, or a failed fetch show nothing. */
+  private collapsedDownstreamCount(project: string, pipelineId: number): number {
+    const entry = this.bridges.get(pipelineKey(project, pipelineId));
+    return Array.isArray(entry) ? downstreamCount(entry) : 0;
+  }
+
+  /** A Pipeline's Jobs by Stage, with the loading / error / empty distinctions kept apart. */
+  private renderJobsBody(
+    project: string,
+    pipelineId: number,
+    bridges: BridgeEntry | undefined,
+    context: 'root' | 'downstream' = 'root',
+  ): HTMLElement {
+    const wrap = el('div', 'gp-jobs-body');
+    const value = this.jobs.get(pipelineKey(project, pipelineId));
+    if (value === undefined || value === 'loading') {
+      wrap.append(el('div', 'gp-row-sub', 'Loading jobs…'));
+      return wrap;
+    }
+    if (value === 'error') {
+      // A failed fetch is not an absence of jobs. A downstream project that
+      // cannot be read is its own state, distinct from the root's retry hint.
+      wrap.append(
+        el(
+          'div',
+          'gp-row-sub',
+          context === 'downstream'
+            ? 'Could not read this downstream project. It may be private, or the token may not reach it.'
+            : 'Could not load jobs. Collapse and reopen to retry.',
+        ),
+      );
+      return wrap;
+    }
+    if (bridges === 'error' && context === 'downstream') {
+      wrap.append(el('div', 'gp-row-sub', 'Could not read this downstream project’s own triggers.'));
+    }
+    const triggers = Array.isArray(bridges) ? bridges : [];
+    if (value.length === 0 && triggers.length === 0 && bridges !== 'error') {
+      wrap.append(el('div', 'gp-row-sub', 'No jobs reported yet.'));
+      return wrap;
+    }
+    for (const group of groupJobsByStage(value, triggers)) {
+      wrap.append(this.renderStage(project, pipelineId, group));
+    }
+    return wrap;
+  }
+
+  private renderExternalLink(className: string, label: string, url: string): HTMLAnchorElement {
+    const link = document.createElement('a');
+    link.className = className;
+    link.href = url;
+    link.target = '_blank';
+    link.rel = 'noreferrer';
+    link.textContent = label;
+    link.addEventListener('click', (event) => {
+      event.preventDefault();
+      void this.port.openUrl(url);
+    });
+    return link;
   }
 
   private timingSpan(pipeline: Pipeline): HTMLElement {
@@ -1164,7 +1416,7 @@ class PipelinesPanel implements PanelHandle {
     return el('span', 'gp-job-meta', jobStatusInfo(job).label.toLowerCase());
   }
 
-  private renderStage(pipelineId: number, group: StageGroup): HTMLElement {
+  private renderStage(project: string, pipelineId: number, group: StageGroup): HTMLElement {
     const stage = el('div', 'gp-stage');
     const head = el('div', 'gp-stage-head');
     head.append(
@@ -1177,28 +1429,180 @@ class PipelinesPanel implements PanelHandle {
       const row = el('div', 'gp-job');
       row.tabIndex = 0;
       row.setAttribute('role', 'button');
-      if (this.openJob?.jobId === job.id) row.dataset.selected = 'true';
+      if (this.openJob?.project === project && this.openJob.jobId === job.id) row.dataset.selected = 'true';
       row.setAttribute('aria-label', `${job.name}, ${jobStatusInfo(job).label}`);
       row.append(statusIcon(jobStatusInfo(job), 13), el('span', 'gp-job-name', job.name));
       row.append(this.jobMeta(job));
-      row.addEventListener('click', () => this.openJobDrawer(pipelineId, job.id));
+      row.addEventListener('click', () => this.openJobDrawer(project, pipelineId, job.id));
       row.addEventListener('keydown', (event) => {
         // Only when the row itself is focused: the nested action button owns its
         // own Enter/Space, and this must not swallow it.
         if (event.target !== row) return;
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
-          this.openJobDrawer(pipelineId, job.id);
+          this.openJobDrawer(project, pipelineId, job.id);
         }
       });
-      if (isHandoffJob(job)) row.append(this.renderHandoffAction(job, pipelineId));
+      // Start session stays inside the open project: a multi-project Downstream
+      // job renders without it, since the checkout cannot fix another project.
+      if (isHandoffJob(job) && this.canHandoffJob(project)) row.append(this.renderHandoffAction(project, pipelineId, job));
       stage.append(row);
     }
+    for (const trigger of group.triggers) stage.append(this.renderTriggerRow(project, pipelineId, trigger));
     return stage;
   }
 
+  /** A Trigger job as a row carrying its Downstream pipeline's Status, then its card. */
+  private renderTriggerRow(project: string, pipelineId: number, trigger: TriggerRow): HTMLElement {
+    const info = triggerStateInfo(trigger.state, trigger.status);
+    const row = el('div', 'gp-job gp-trigger');
+    row.dataset.trigger = 'true';
+    row.append(statusIcon(info, 13), el('span', 'gp-job-name', trigger.name));
+    row.append(el('span', 'gp-job-meta', info.label.toLowerCase()));
+    if (!trigger.downstream) return row;
+
+    const card = this.renderDownstreamCard(project, pipelineId, trigger);
+    const rowWrap = el('div', 'gp-trigger-wrap');
+    rowWrap.append(row, card);
+    return rowWrap;
+  }
+
+  /** The card beneath a Trigger row: its Downstream pipeline, and its Jobs when opened. */
+  private renderDownstreamCard(
+    project: string,
+    pipelineId: number,
+    trigger: TriggerRow,
+    parentNode?: DownstreamNode,
+  ): HTMLElement {
+    const downstream = trigger.downstream;
+    const card = el('div', 'gp-downstream-card');
+    if (!downstream) return card;
+
+    card.append(el('div', 'gp-downstream-label', downstreamLabel(downstream, project)));
+    const meta = el('div', 'gp-downstream-meta');
+    // The spec gives the card its own Status, so it reads correctly once expanded
+    // by itself rather than only via the Trigger row's glyph.
+    meta.append(statusIcon(statusInfo(downstream.status), 13));
+    meta.append(el('span', 'gp-ref', downstream.ref || '—'));
+    meta.append(el('span', 'gp-sha', shortSha(downstream.sha)));
+    meta.append(el('span', 'gp-downstream-iid', `#${downstream.iid}`));
+    card.append(meta);
+    if (downstream.web_url) {
+      card.append(this.renderExternalLink('gp-jobs-link', 'View pipeline in GitLab', downstream.web_url));
+    }
+
+    // The card's own project is where the Downstream pipeline lives, read from
+    // its URL. When the URL cannot be parsed there is no project to read, so the
+    // card is display-only: it never fetches jobs or offers Start session.
+    const projectPath = downstreamProject(downstream);
+    const parent = parentNode ?? this.nodeFor(project, pipelineId);
+    const cardProject = projectPath ?? '';
+
+    if (projectPath && this.nodeFor(cardProject, downstream.id)) {
+      const entry = this.bridges.get(pipelineKey(cardProject, downstream.id));
+      card.append(this.renderJobsBody(cardProject, downstream.id, entry, 'downstream'));
+      this.renderNestedTriggerCards(card, cardProject, downstream.id, parent);
+    } else {
+      const expandable =
+        projectPath != null && this.cardCanExpand(project, pipelineId, downstream.id, cardProject, parent);
+      const button = el('button', 'gp-downstream-open');
+      button.type = 'button';
+      button.textContent = expandable ? 'Show jobs' : 'Continue in GitLab';
+      button.setAttribute('aria-label', `${button.textContent} — ${downstreamLabel(downstream, project)}`);
+      button.addEventListener('click', (event) => {
+        event.stopPropagation();
+        if (expandable) this.toggleDownstream(project, pipelineId, cardProject, downstream.id);
+        else if (downstream.web_url) void this.port.openUrl(downstream.web_url);
+      });
+      card.append(button);
+      if (!expandable && !downstream.web_url) button.disabled = true;
+    }
+    return card;
+  }
+
+  /** The open node for a pipeline, or undefined when it is not expanded. */
+  private nodeFor(project: string, pipelineId: number): DownstreamNode | undefined {
+    return this.downstreamPath.find(
+      (node) => node.pipelineId === pipelineId && samePath(node.project, project),
+    );
+  }
+
+  /** Render any nested Trigger rows' cards, for an open Downstream pipeline. */
+  private renderNestedTriggerCards(
+    parent: HTMLElement,
+    project: string,
+    pipelineId: number,
+    node: DownstreamNode | undefined,
+  ): void {
+    const entry = this.bridges.get(pipelineKey(project, pipelineId));
+    if (!Array.isArray(entry)) return;
+    for (const trigger of entry) {
+      if (trigger.downstream) parent.append(this.renderDownstreamCard(project, pipelineId, trigger, node));
+    }
+  }
+
+  /**
+   * Whether a card expands here. Its parent is the root Pipeline (generation 0)
+   * or the open node it hangs under; expansion stops at the generation cap and
+   * refuses a pipeline already on the path — the root pipeline, the parent
+   * itself, or any of the parent's ancestors.
+   */
+  private cardCanExpand(
+    project: string,
+    pipelineId: number,
+    downstreamId: number,
+    downstreamProject: string,
+    parentNode: DownstreamNode | undefined,
+  ): boolean {
+    const generation = parentNode?.generation ?? 0;
+    if (!canExpand(generation)) return false;
+    const next: PipelineKey = { project: downstreamProject, pipelineId: downstreamId };
+    for (const ancestor of this.openPathFor(project, pipelineId, parentNode)) {
+      if (ancestor.project === next.project && ancestor.pipelineId === next.pipelineId) return false;
+    }
+    return true;
+  }
+
+  /** Every pipeline already on the open path down to the card's parent, inclusive. */
+  private openPathFor(
+    project: string,
+    pipelineId: number,
+    parentNode: DownstreamNode | undefined,
+  ): PipelineKey[] {
+    const parent: PipelineKey = { project, pipelineId };
+    if (parentNode) return [...parentNode.ancestors, parent];
+    const root: PipelineKey = {
+      project: this.resolved?.project ?? '',
+      pipelineId: this.expandedId ?? -1,
+    };
+    return [root, parent];
+  }
+
+  private toggleDownstream(
+    parentProject: string,
+    parentPipelineId: number,
+    downstreamProject: string,
+    downstreamId: number,
+  ): void {
+    const parentNode = this.nodeFor(parentProject, parentPipelineId);
+    const index = parentNode ? this.downstreamPath.indexOf(parentNode) : -1;
+    // A deeper card opened from an ancestor replaces the tail below it, so one
+    // open path is kept: root-most first, no branches.
+    const prefix = parentNode ? this.downstreamPath.slice(0, index + 1) : [];
+    const generation = (parentNode?.generation ?? 0) + 1;
+    const ancestors = [...(parentNode?.ancestors ?? []), { project: parentProject, pipelineId: parentPipelineId }];
+    const node: DownstreamNode = { project: downstreamProject, pipelineId: downstreamId, generation, ancestors };
+    this.downstreamPath = [...prefix, node];
+    this.openJob = null;
+    const key = pipelineKey(downstreamProject, downstreamId);
+    // Re-opening retries a previous failure; a filled cache is reused.
+    if (!Array.isArray(this.jobs.get(key))) void this.loadJobs(this.generation, downstreamProject, downstreamId, false);
+    if (!Array.isArray(this.bridges.get(key))) void this.loadBridges(this.generation, downstreamProject, downstreamId, false);
+    this.render();
+  }
+
   /** The "Start session" affordance for a failed Job, on its row or in the drawer. */
-  private renderHandoffAction(job: Job, pipelineId: number): HTMLElement {
+  private renderHandoffAction(project: string, pipelineId: number, job: Job): HTMLElement {
     const button = el('button', 'gp-handoff');
     button.type = 'button';
     const busy = this.handoffJobId === job.id;
@@ -1214,7 +1618,7 @@ class PipelinesPanel implements PanelHandle {
     if (canHandoff && !busy) {
       button.addEventListener('click', (event) => {
         event.stopPropagation();
-        this.startHandoff(pipelineId, job.id);
+        this.startHandoff(project, pipelineId, job.id);
       });
     }
     return button;
@@ -1254,26 +1658,16 @@ class PipelinesPanel implements PanelHandle {
 
   private renderDrawer(reference: OpenJob): HTMLElement {
     const drawer = el('div', 'gp-drawer');
-    const jobs = this.jobs.get(reference.pipelineId);
-    const job = Array.isArray(jobs) ? jobs.find((candidate) => candidate.id === reference.jobId) : undefined;
+    const job = this.jobById(reference.project, reference.pipelineId, reference.jobId);
 
     const head = el('div', 'gp-drawer-head');
     const title = el('span', 'gp-drawer-title', job ? `${job.name} · ${jobStatusInfo(job).label}` : `Job #${reference.jobId}`);
     head.append(title);
-    if (job?.web_url) {
-      const link = document.createElement('a');
-      link.className = 'gp-drawer-link';
-      link.href = job.web_url;
-      link.target = '_blank';
-      link.rel = 'noreferrer';
-      link.textContent = 'View full log in GitLab';
-      link.addEventListener('click', (event) => {
-        event.preventDefault();
-        void this.port.openUrl(job.web_url);
-      });
-      head.append(link);
+    if (job?.web_url) head.append(this.renderExternalLink('gp-drawer-link', 'View full log in GitLab', job.web_url));
+    // Start session only inside the open project, matching the row's own gating.
+    if (job && isHandoffJob(job) && this.canHandoffJob(reference.project)) {
+      head.append(this.renderHandoffAction(reference.project, reference.pipelineId, job));
     }
-    if (job && isHandoffJob(job)) head.append(this.renderHandoffAction(job, reference.pipelineId));
     const close = el('button', 'gp-drawer-close');
     close.type = 'button';
     close.setAttribute('aria-label', 'Close log');
@@ -1283,7 +1677,7 @@ class PipelinesPanel implements PanelHandle {
     head.append(close);
     drawer.append(head);
 
-    const entry = this.traces.get(reference.jobId);
+    const entry = this.traces.get(jobKey(reference.project, reference.jobId));
     if (!entry) {
       this.drawerEl = null;
       drawer.append(el('div', 'gp-drawer-empty', 'Loading log…'));

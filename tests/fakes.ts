@@ -10,7 +10,7 @@ import type {
   StartSessionResult,
 } from '@openchamber/sdk';
 import type { HostPort, HostRequest, HostResponse } from '../panel/host-port';
-import type { Job, Pipeline } from '../panel/types';
+import type { Bridge, DownstreamPipeline, Job, Pipeline } from '../panel/types';
 
 export type RequestHandler = (
   request: HostRequest,
@@ -250,6 +250,36 @@ export function job(overrides: Partial<Job> = {}): Job {
     started_at: '2026-09-30T11:50:00Z',
     finished_at: '2026-09-30T11:50:10Z',
     web_url: 'https://gitlab.com/group/project/-/jobs/1',
+    ...overrides,
+  };
+}
+
+/** A Downstream pipeline's shape, as it rides inside a Bridge payload. */
+export function downstreamPipeline(overrides: Partial<DownstreamPipeline> = {}): DownstreamPipeline {
+  return {
+    id: 42,
+    iid: 3,
+    project_id: 7,
+    status: 'failed',
+    source: 'pipeline',
+    ref: 'main',
+    sha: 'abcdef1234567890',
+    web_url: 'https://gitlab.com/other/project/-/pipelines/42',
+    created_at: '2026-09-30T11:50:00Z',
+    updated_at: '2026-09-30T11:58:00Z',
+    ...overrides,
+  };
+}
+
+/** A Trigger job's shape, with only the fields a test cares about overridden. */
+export function bridge(overrides: Partial<Bridge> = {}): Bridge {
+  return {
+    id: 50,
+    name: 'trigger',
+    stage: 'deploy',
+    status: 'success',
+    web_url: 'https://gitlab.com/group/project/-/jobs/50',
+    downstream_pipeline: null,
     ...overrides,
   };
 }

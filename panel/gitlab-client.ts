@@ -1,6 +1,6 @@
 import { PER_PAGE } from './config';
 import type { HostPort, HostRequest, HostResponse } from './host-port';
-import type { Job, Pipeline, Scope } from './types';
+import type { Bridge, Job, Pipeline, Scope } from './types';
 
 /** A typed failure, mapped from an HTTP status or a host error. */
 export type ClientFailure =
@@ -61,6 +61,13 @@ export function pipelinesRequest(
 export function jobsRequest(project: string, pipelineId: number): BuiltRequest {
   return {
     path: `${projectBase(project)}/pipelines/${pipelineId}/jobs`,
+    query: { per_page: '100' },
+  };
+}
+
+export function bridgesRequest(project: string, pipelineId: number): BuiltRequest {
+  return {
+    path: `${projectBase(project)}/pipelines/${pipelineId}/bridges`,
     query: { per_page: '100' },
   };
 }
@@ -182,6 +189,17 @@ export async function fetchJobs(
   const result = await call(requester, { method: 'GET', ...request });
   if (!result.ok) return result;
   return parseJson<Job[]>(result.body, result.status);
+}
+
+export async function fetchBridges(
+  requester: Requester,
+  project: string,
+  pipelineId: number,
+): Promise<ClientResult<Bridge[]>> {
+  const request = bridgesRequest(project, pipelineId);
+  const result = await call(requester, { method: 'GET', ...request });
+  if (!result.ok) return result;
+  return parseJson<Bridge[]>(result.body, result.status);
 }
 
 export async function fetchTrace(

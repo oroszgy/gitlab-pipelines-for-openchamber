@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { groupJobsByStage, isDoneJob } from '../panel/stage-groups';
 import type { Job } from '../panel/types';
+import type { TriggerRow } from '../panel/downstream';
 
 function job(overrides: Partial<Job> & { id: number; stage: string; status: string }): Job {
   return {
@@ -11,6 +12,17 @@ function job(overrides: Partial<Job> & { id: number; stage: string; status: stri
     started_at: null,
     finished_at: null,
     web_url: '',
+    ...overrides,
+  };
+}
+
+function trigger(
+  overrides: Partial<TriggerRow> & { id: number; stage: string; status: string },
+): TriggerRow {
+  return {
+    name: `trigger-${overrides.id}`,
+    state: 'ready',
+    downstream: null,
     ...overrides,
   };
 }
@@ -44,6 +56,44 @@ describe('groupJobsByStage', () => {
   test('an empty job list yields no stages', () => {
     expect(groupJobsByStage([])).toEqual([]);
     expect(groupJobsByStage()).toEqual([]);
+  });
+
+  test('groups Trigger rows into their Stage, after the build Jobs', () => {
+    const groups = groupJobsByStage(
+      [
+        job({ id: 1, stage: 'build', status: 'success' }),
+        job({ id: 2, stage: 'deploy', status: 'success' }),
+      ],
+      [
+        trigger({ id: 10, stage: 'deploy', status: 'failed' }),
+        trigger({ id: 11, stage: 'build', status: 'success' }),
+      ],
+    );
+    expect(groups.map((group) => group.stage)).toEqual(['build', 'deploy']);
+    expect(groups[0]?.jobs.map((entry) => entry.id)).toEqual([1]);
+    expect(groups[0]?.triggers.map((entry) => entry.id)).toEqual([11]);
+    expect(groups[1]?.jobs.map((entry) => entry.id)).toEqual([2]);
+    expect(groups[1]?.triggers.map((entry) => entry.id)).toEqual([10]);
+  });
+
+  test('Trigger jobs count toward done/total with their contributing status', () => {
+    const groups = groupJobsByStage(
+      [job({ id: 1, stage: 'deploy', status: 'success' })],
+      [
+        trigger({ id: 10, stage: 'deploy', status: 'failed' }),
+        trigger({ id: 11, stage: 'deploy', status: 'running' }),
+      ],
+    );
+    expect(groups[0]).toMatchObject({ done: 2, total: 3 });
+  });
+
+  test('a Trigger row can introduce a Stage no build Job named', () => {
+    const groups = groupJobsByStage(
+      [job({ id: 1, stage: 'build', status: 'success' })],
+      [trigger({ id: 10, stage: 'trigger', status: 'pending' })],
+    );
+    expect(groups.map((group) => group.stage)).toEqual(['build', 'trigger']);
+    expect(groups[1]).toMatchObject({ done: 0, total: 1 });
   });
 });
 

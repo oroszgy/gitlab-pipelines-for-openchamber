@@ -2,8 +2,18 @@ import { afterEach, describe, expect, test } from 'bun:test';
 import { HOST_BODY_CAP, LOG_MAX_LINES } from '../panel/config';
 import type { HostRequest, HostResponse } from '../panel/host-port';
 import { isAtBottom, mountPanel, type PanelHandle } from '../panel/panel';
-import type { Job, Pipeline } from '../panel/types';
-import { FakeHost, FakeTimers, GIT_CONFIG, flush, job, pipeline, readyContext } from './fakes';
+import type { Bridge, Job, Pipeline } from '../panel/types';
+import {
+  FakeHost,
+  FakeTimers,
+  GIT_CONFIG,
+  bridge,
+  downstreamPipeline,
+  flush,
+  job,
+  pipeline,
+  readyContext,
+} from './fakes';
 
 const HOST = 'https://gitlab.com';
 
@@ -23,6 +33,7 @@ function configuredHost(): FakeHost {
 function handlerFor(data: {
   pipelines?: Pipeline[];
   jobs?: Job[];
+  bridges?: Bridge[];
   trace?: string;
   fail?: HostResponse;
 }): (request: HostRequest) => HostResponse {
@@ -33,6 +44,9 @@ function handlerFor(data: {
     }
     if (request.path.endsWith('/jobs')) {
       return { status: 200, body: JSON.stringify(data.jobs ?? []) };
+    }
+    if (request.path.endsWith('/bridges')) {
+      return { status: 200, body: JSON.stringify(data.bridges ?? []) };
     }
     if (request.path.endsWith('/trace')) {
       return { status: 200, body: data.trace ?? '' };
@@ -1147,3 +1161,577 @@ describe('the heal notice', () => {
     expect(text(root)).not.toContain('Showing');
   });
 });
+
+describe('downstream pipelines', () => {
+  /** A handler where the same pipeline id can live in two projects, keyed by path. */
+  function multiProjectHandler(data: {
+    pipelines: Pipeline[];
+    jobsByProject?: Record<string, Job[]>;
+    bridgesByProject?: Record<string, Bridge[]>;
+  }): (request: HostRequest) => HostResponse {
+    const projectOf = (path: string): string => {
+      const match = /\/api\/v4\/projects\/([^/]+)\//.exec(path);
+      return match ? decodeURIComponent(match[1] ?? '') : '';
+    };
+    return (request) => {
+      const project = projectOf(request.path);
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify(data.pipelines) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify(data.jobsByProject?.[project] ?? []) };
+      }
+      if (request.path.endsWith('/bridges')) {
+        return { status: 200, body: JSON.stringify(data.bridgesByProject?.[project] ?? []) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 200, body: 'boom' };
+      return { status: 404, body: '' };
+    };
+  }
+
+  const OTHER = downstreamPipeline({
+    id: 42,
+    iid: 3,
+    project_id: 9,
+    status: 'failed',
+    ref: 'release',
+    sha: 'deadbeefcafe',
+    web_url: 'https://gitlab.com/other/project/-/pipelines/42',
+  });
+
+  test('shows a Trigger row in its Stage carrying the Downstream status, and a card', async () => {
+    const host = configuredHost();
+    host.handler = multiProjectHandler({
+      pipelines: [pipeline({ id: 7 })],
+      bridgesByProject: { 'group/project': [bridge({ downstream_pipeline: OTHER })] },
+      jobsByProject: { 'group/project': [job({ id: 1, stage: 'build', status: 'success' })] },
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+
+    const trigger = root.querySelector('.gp-trigger');
+    expect(trigger).not.toBeNull();
+    // The row carries the downstream's own status, not the trigger's passed one.
+    expect(trigger?.querySelector('.gp-icon')?.getAttribute('aria-label')).toBe('Failed');
+    expect(text(root)).toContain('other/project');
+    const card = root.querySelector('.gp-downstream-card');
+    // The card carries the downstream's status too (spec: "status, label …").
+    expect(card?.querySelector('.gp-icon')?.getAttribute('aria-label')).toBe('Failed');
+    expect(card?.textContent).toContain('release');
+    expect(card?.textContent).toContain('deadbe');
+    expect(card?.textContent).toContain('#3');
+    expect(card?.textContent).toContain('View pipeline in GitLab');
+  });
+
+  test('a starting trigger shows no card, and a broken one says it could not start', async () => {
+    const host = configuredHost();
+    host.handler = multiProjectHandler({
+      pipelines: [pipeline({ id: 7 })],
+      bridgesByProject: {
+        'group/project': [
+          bridge({ id: 1, name: 'waiting', status: 'pending', downstream_pipeline: null }),
+          bridge({ id: 2, name: 'broken', status: 'failed', downstream_pipeline: null }),
+        ],
+      },
+      jobsByProject: { 'group/project': [] },
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('starting');
+    expect(text(root)).toContain('could not start');
+    expect(root.querySelector('.gp-downstream-card')).toBeNull();
+  });
+
+  test('expanding a card fetches that pipeline’s Jobs and renders them by Stage', async () => {
+    const host = configuredHost();
+    host.handler = multiProjectHandler({
+      pipelines: [pipeline({ id: 7 })],
+      bridgesByProject: { 'group/project': [bridge({ downstream_pipeline: OTHER })] },
+      jobsByProject: {
+        'group/project': [job({ id: 1, stage: 'build', status: 'success' })],
+        'other/project': [job({ id: 99, name: 'e2e', stage: 'test', status: 'failed' })],
+      },
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+
+    expect(text(root)).toContain('e2e');
+    const requested = host.requests.some(
+      (request) => request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs',
+    );
+    expect(requested).toBe(true);
+  });
+
+  test('a nested Job opens its Trace against the downstream project in the drawer', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1 })]) };
+      }
+      if (request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 99, name: 'e2e', stage: 'test', status: 'failed' })]) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 200, body: 'nested log line' };
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-card .gp-job') as HTMLElement).click();
+    await flush();
+
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('nested log line');
+    expect(
+      host.requests.some((request) => request.path === '/api/v4/projects/other%2Fproject/jobs/99/trace'),
+    ).toBe(true);
+  });
+
+  test('the same pipeline id in two projects resolves to the right project', async () => {
+    const host = configuredHost();
+    host.handler = multiProjectHandler({
+      pipelines: [pipeline({ id: 42, ref: 'root' })],
+      bridgesByProject: {
+        'group/project': [
+          bridge({ downstream_pipeline: downstreamPipeline({ id: 42, project_id: 9, web_url: 'https://gitlab.com/other/project/-/pipelines/42' }) }),
+        ],
+      },
+      jobsByProject: {
+        'group/project': [job({ id: 1, name: 'root-job', stage: 'build' })],
+        'other/project': [job({ id: 1, name: 'downstream-job', stage: 'build' })],
+      },
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('root-job');
+    expect(text(root)).toContain('downstream-job');
+  });
+
+  test('an unreadable downstream project shows a per-card error, not "no jobs"', async () => {
+    const host = configuredHost();
+    let fail = true;
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1 })]) };
+      }
+      if (request.path.includes('/other%2Fproject/')) {
+        return fail ? { status: 403, body: '' } : { status: 200, body: JSON.stringify([job({ id: 9, name: 'e2e', stage: 'test' })]) };
+      }
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('Could not read this downstream project');
+    expect(text(root)).not.toContain('No jobs reported yet');
+    // A per-card failure never escalates to the Panel-wide unauthorized state.
+    expect(root.querySelector('.gp-state')).toBeNull();
+
+    // Collapsing and re-opening retries the failed fetch, as the error promises.
+    fail = false;
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('e2e');
+  });
+
+  test('bridges are fetched once per listed Pipeline on load, then only for active ones', async () => {
+    const host = configuredHost();
+    let pipelines = [pipeline({ id: 1, status: 'success' }), pipeline({ id: 2, status: 'success' })];
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify(pipelines) };
+      return { status: 200, body: '[]' };
+    };
+    const timers = new FakeTimers();
+    const { panel } = await mount(host, timers);
+    const bridgePaths = () =>
+      host.requests.filter((request) => request.path.endsWith('/bridges')).map((request) => request.path);
+
+    // One `/bridges` per listed Pipeline on first load.
+    expect(bridgePaths()).toHaveLength(2);
+    expect(panel.isPolling()).toBe(false);
+
+    // One Pipeline goes active; the next poll refetches only *its* bridges.
+    pipelines = [
+      pipeline({ id: 1, status: 'running', finished_at: null }),
+      pipeline({ id: 2, status: 'success' }),
+    ];
+    panel.refresh();
+    await flush();
+    const afterRefresh = bridgePaths().length;
+    timers.advance(5000);
+    await flush();
+    const onPoll = bridgePaths().slice(afterRefresh);
+    expect(onPoll).toContain('/api/v4/projects/group%2Fproject/pipelines/1/bridges');
+    expect(onPoll).not.toContain('/api/v4/projects/group%2Fproject/pipelines/2/bridges');
+  });
+
+  test('a collapsed row shows a downstream count, hidden when there is none', async () => {
+    const host = configuredHost();
+    host.handler = multiProjectHandler({
+      pipelines: [pipeline({ id: 1 }), pipeline({ id: 2 })],
+      bridgesByProject: {
+        'group/project': [bridge({ id: 1 }), bridge({ id: 2 })],
+      },
+      jobsByProject: { 'group/project': [] },
+    });
+    // Give both pipelines the same bridges payload (the handler is project-keyed only).
+    const { root } = await mount(host, new FakeTimers());
+    const badges = Array.from(root.querySelectorAll('.gp-downstream-badge')).map((node) => node.textContent);
+    expect(badges.length).toBe(0);
+
+    // A fanned-out pipeline shows its count of Trigger jobs that have a downstream.
+    const host2 = configuredHost();
+    host2.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 1 })]) };
+      if (request.path.endsWith('/bridges')) {
+        return {
+          status: 200,
+          body: JSON.stringify([
+            bridge({ id: 1, downstream_pipeline: OTHER }),
+            bridge({ id: 2, downstream_pipeline: downstreamPipeline({ id: 43 }) }),
+            bridge({ id: 3, downstream_pipeline: null }),
+          ]),
+        };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const mounted = await mount(host2, new FakeTimers());
+    expect(mounted.root.querySelector('.gp-downstream-badge')?.textContent).toBe('↳ 2 downstream');
+  });
+
+  test('a failed bridge fetch leaves the list intact, with no count', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 1 }), pipeline({ id: 2 })]) };
+      }
+      if (request.path.endsWith('/bridges')) return { status: 500, body: '' };
+      return { status: 200, body: '[]' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    expect(root.querySelectorAll('.gp-row').length).toBe(2);
+    expect(root.querySelector('.gp-downstream-badge')).toBeNull();
+    expect(root.querySelector('.gp-state')).toBeNull();
+  });
+
+  test('a settled root with an active downstream keeps polling, and stops when it settles', async () => {
+    const host = configuredHost();
+    let downstreamStatus = 'running';
+    let upstreamStatus = 'failed';
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        // The upstream is a mirror'd failure: already settled, no active jobs of its own.
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: upstreamStatus, finished_at: '2026-09-30T11:52:00Z' })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return {
+          status: 200,
+          body: JSON.stringify([bridge({ downstream_pipeline: downstreamPipeline({ status: downstreamStatus }) })]),
+        };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1, status: 'success' })]) };
+      }
+      if (request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 99, status: downstreamStatus })]) };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const timers = new FakeTimers();
+    const { panel } = await mount(host, timers);
+    expect(panel.isPolling()).toBe(true);
+
+    downstreamStatus = 'failed';
+    upstreamStatus = 'failed';
+    timers.advance(5000);
+    await flush();
+    expect(panel.isPolling()).toBe(false);
+  });
+
+  test('Start session is absent on a multi-project downstream job, present on a child’s', async () => {
+    const host = configuredHost();
+    const child = downstreamPipeline({
+      id: 55,
+      project_id: 7,
+      status: 'failed',
+      web_url: 'https://gitlab.com/group/project/-/pipelines/55',
+    });
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'failed' })]) };
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: child })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1, status: 'success' })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/55/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 2, name: 'child-fail', status: 'failed' })]) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 200, body: 'boom' };
+      return { status: 404, body: '' };
+    };
+    // A multi-project downstream: its failed Job renders without the affordance.
+    const multiHost = configuredHost();
+    multiHost.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'failed' })]) };
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1, status: 'success' })]) };
+      }
+      if (request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 9, name: 'other-fail', status: 'failed' })]) };
+      }
+      return { status: 404, body: '' };
+    };
+    const multi = await mount(multiHost, new FakeTimers());
+    (multi.root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (multi.root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    expect(text(multi.root)).toContain('other-fail');
+    expect(multi.root.querySelector('.gp-handoff')).toBeNull();
+
+    // A same-project child pipeline: the checkout can fix it, so it offers the action.
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('child-fail');
+    expect(root.querySelector('.gp-handoff')).not.toBeNull();
+  });
+
+  test('a same-project downstream is labelled "child pipeline"', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return {
+          status: 200,
+          body: JSON.stringify([
+            bridge({
+              downstream_pipeline: downstreamPipeline({
+                id: 55,
+                project_id: 7,
+                web_url: 'https://gitlab.com/group/project/-/pipelines/55',
+              }),
+            }),
+          ]),
+        };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-downstream-label')?.textContent).toBe('child pipeline');
+  });
+
+  test('a two-generation chain expands, and a cycle does not loop', async () => {
+    // Root 7 → child 42, and 42's own bridge points back at root 7 (a cycle).
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return {
+          status: 200,
+          body: JSON.stringify([
+            bridge({
+              downstream_pipeline: downstreamPipeline({
+                id: 42,
+                web_url: 'https://gitlab.com/group/project/-/pipelines/42',
+              }),
+            }),
+          ]),
+        };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/42/bridges') {
+        return {
+          status: 200,
+          body: JSON.stringify([
+            bridge({
+              id: 51,
+              name: 'loop',
+              downstream_pipeline: downstreamPipeline({
+                id: 7,
+                web_url: 'https://gitlab.com/group/project/-/pipelines/7',
+              }),
+            }),
+          ]),
+        };
+      }
+      if (request.path.endsWith('/jobs')) return { status: 200, body: '[]' };
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+
+    // Generation 2 is open and shows its own Trigger row.
+    expect(text(root)).toContain('loop');
+    // Its card points back at the root, so it must not be expandable again.
+    const nestedButtons = Array.from(root.querySelectorAll('.gp-downstream-open')).map(
+      (node) => node.textContent,
+    );
+    expect(nestedButtons).toContain('Continue in GitLab');
+  });
+
+  test('a chain stops at three generations with a "Continue in GitLab" link', async () => {
+    const url = (id: number) => `https://gitlab.com/group/project/-/pipelines/${id}`;
+    const host = configuredHost();
+    const chain: Record<number, number> = { 10: 20, 20: 30, 30: 40, 40: 50 };
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 10 })]) };
+      const match = /\/pipelines\/(\d+)\/bridges$/.exec(request.path);
+      if (match) {
+        const id = Number(match[1]);
+        const to = chain[id];
+        return {
+          status: 200,
+          body: JSON.stringify(
+            to
+              ? [bridge({ id: id * 10, downstream_pipeline: downstreamPipeline({ id: to, web_url: url(to) }) })]
+              : [],
+          ),
+        };
+      }
+      if (request.path.endsWith('/jobs')) return { status: 200, body: '[]' };
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+
+    // Generation 1 → 2 → 3 expand; generation 4 (pipeline 40) is the cap.
+    for (let step = 0; step < 3; step += 1) {
+      const buttons = Array.from(root.querySelectorAll('.gp-downstream-open'));
+      const button = buttons[buttons.length - 1] as HTMLElement | undefined;
+      expect(button?.textContent).toBe('Show jobs');
+      button?.click();
+      await flush();
+    }
+    // At the cap the deepest card offers only a link out.
+    const buttons = Array.from(root.querySelectorAll('.gp-downstream-open')).map((node) => node.textContent);
+    expect(buttons).toContain('Continue in GitLab');
+  });
+
+  test('a root whose own bridge points back at the root is not expandable', async () => {
+    // Pipeline 7's Trigger job starts pipeline 7 again (same project, same id).
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return {
+          status: 200,
+          body: JSON.stringify([
+            bridge({
+              downstream_pipeline: downstreamPipeline({
+                id: 7,
+                web_url: 'https://gitlab.com/group/project/-/pipelines/7',
+              }),
+            }),
+          ]),
+        };
+      }
+      if (request.path.endsWith('/jobs')) return { status: 200, body: '[]' };
+      return { status: 404, body: '' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    // The card renders, but the root is already on the path, so it cannot expand.
+    expect(root.querySelector('.gp-downstream-open')?.textContent).toBe('Continue in GitLab');
+  });
+
+  test('a poll refetches the expanded root’s Jobs exactly once', async () => {
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1, status: 'running', finished_at: null })]) };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const timers = new FakeTimers();
+    const { root, panel } = await mount(host, timers);
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(panel.isPolling()).toBe(true);
+
+    const rootJobsPath = '/api/v4/projects/group%2Fproject/pipelines/7/jobs';
+    const before = host.requests.filter((request) => request.path === rootJobsPath).length;
+    timers.advance(5000);
+    await flush();
+    const after = host.requests.filter((request) => request.path === rootJobsPath).length;
+    expect(after - before).toBe(1);
+  });
+
+  test('a nested Job’s Trace keeps refreshing on the poll while it runs', async () => {
+    let traceText = 'line 1';
+    const host = configuredHost();
+    host.handler = (request) => {
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1 })]) };
+      }
+      if (request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 99, name: 'e2e', stage: 'test', status: 'running', finished_at: null })]) };
+      }
+      if (request.path === '/api/v4/projects/other%2Fproject/jobs/99/trace') return { status: 200, body: traceText };
+      return { status: 200, body: '' };
+    };
+    const timers = new FakeTimers();
+    const { root } = await mount(host, timers);
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-downstream-card .gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('line 1');
+
+    traceText = 'line 1\nline 2';
+    timers.advance(5000);
+    await flush();
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toContain('line 2');
+  });
+});
+
