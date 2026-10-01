@@ -1,8 +1,12 @@
 # Coding standards
 
 Rules that need judgement at review time — cross-file consistency, shape, boundaries. Mechanical
-patterns (formatting, types, import shape) are left to tooling: `bun run check` (typecheck + tests)
-and the Husky pre-commit hook. Prefer adding a check to adding a rule here.
+patterns (types, import shape) are left to tooling: `bun run check` (typecheck + tests) and the Husky
+pre-commit hook. Prefer adding a check to adding a rule here.
+
+Source is formatted by hand: single quotes, and lines may run past 80 columns. No formatter runs here
+(`opencode.json` disables auto-formatting, because Prettier cannot reproduce this style), so a
+whole-file reformat in a diff is a mistake, not a preference.
 
 ## Architecture
 

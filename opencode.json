@@ -1,0 +1,11 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  // This repo's source is hand-formatted (single quotes, lines past 80 columns).
+  // Prettier cannot reproduce that style, so auto-formatting would rewrite whole
+  // files on every edit. Disable it and keep the style as-is.
+  "formatter": {
+    "prettier": {
+      "disabled": true
+    }
+  }
+}

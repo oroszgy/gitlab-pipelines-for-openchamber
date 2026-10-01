@@ -18,4 +18,6 @@ Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
 - **Feature specs** — `.scratch/<feature>/spec.md`, with implementation issues beside them at
   `issues/NN-*.md`.
 - **Coding standards** (read at review): `CODING_STANDARDS.md`.
+- **Generated bundles** — `panel/main.js` and `service/main.js` are built by `bun run build`; keep them
+  out of searches, diffs and review.
 - **Before committing** — `bun run check` (typecheck + tests). A Husky pre-commit hook runs it.
