@@ -201,18 +201,12 @@ describe('the proxy resolves the token from configuration', () => {
     expect(fetchImpl.calls[0]?.init.headers.Authorization).toBe('Bearer configured');
   });
 
-  test('falls back to a body token while the Panel is being cut over', async () => {
-    const fs = fakeFs();
-    const fetchImpl = fakeFetch();
-    await proxyWithConfig(fs, PATH, proxyRequest({ token: 'body-token' }), fetchImpl);
-    expect(fetchImpl.calls[0]?.init.headers.Authorization).toBe('Bearer body-token');
-  });
-
-  test('prefers the configured token over a body token', async () => {
+  test('ignores a stray body token, using only the configured one', async () => {
     const fs = fakeFs();
     await writeTokenRoute(fs, PATH, { host: 'gitlab.example.com', token: 'configured' });
     const fetchImpl = fakeFetch();
-    await proxyWithConfig(fs, PATH, proxyRequest({ token: 'body-token' }), fetchImpl);
+    const request = { ...proxyRequest(), token: 'body-token' } as unknown as ProxyRouteRequest;
+    await proxyWithConfig(fs, PATH, request, fetchImpl);
     expect(fetchImpl.calls[0]?.init.headers.Authorization).toBe('Bearer configured');
   });
 
@@ -252,7 +246,7 @@ describe('the proxy resolves the token from configuration', () => {
       const result = await proxyWithConfig(
         fs,
         PATH,
-        proxyRequest({ baseUrl, token: 'body-token' }),
+        proxyRequest({ baseUrl }),
         fetchImpl,
       );
       expect(result.ok).toBe(false);

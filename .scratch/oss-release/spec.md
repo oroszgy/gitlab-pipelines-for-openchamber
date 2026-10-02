@@ -1,6 +1,6 @@
 # Spec: Public release — gitlab.com by default and service-owned configuration
 
-Status: ready-for-agent
+Status: implemented — see `.scratch/oss-release/issues/01`–`06`.
 Feature: `oss-release`
 Supersedes: `.scratch/configurable-host` (for the transport and configuration model)
 

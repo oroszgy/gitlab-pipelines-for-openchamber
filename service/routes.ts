@@ -88,8 +88,8 @@ async function persist(fs: ConfigFs, path: string, config: Config): Promise<Conf
   return { ok: true, view: configView(saved.config) };
 }
 
-/** A `/proxy` request: the GitLab call, plus an optional transitional body token. */
-export type ProxyRouteRequest = Omit<ProxyRequest, 'token'> & { token?: unknown };
+/** A `/proxy` request: the GitLab call only. The token is resolved by the service. */
+export type ProxyRouteRequest = Omit<ProxyRequest, 'token'>;
 
 /** A host with no token is its own state, so the failure carries a code to map. */
 export const NO_TOKEN_ERROR = 'No Access token is configured for this GitLab host.';
@@ -99,11 +99,10 @@ export type ProxyRouteResult =
   | { ok: false; code?: 'no-token'; error: string };
 
 /**
- * Resolve the token for the request's host from configuration and attach it,
- * falling back to a body token only while the Panel is being cut over; a
- * configured token always wins. A malformed or non-`https` base URL is refused
- * before anything else, and a host with no token is a typed `no-token` error,
- * never an empty success.
+ * Resolve the token for the request's host from configuration and attach it.
+ * The caller never supplies a token. A malformed or non-`https` base URL is
+ * refused before anything else, and a host with no token is a typed `no-token`
+ * error, never an empty success.
  */
 export async function proxyWithConfig(
   fs: ConfigFs,
@@ -115,9 +114,7 @@ export async function proxyWithConfig(
   if (!origin) return { ok: false, error: HOST_ERROR };
 
   const config = await readConfig(fs, path);
-  const configured = resolveToken(config, origin);
-  const fallback = typeof request.token === 'string' ? request.token.trim() : '';
-  const token = configured ?? (fallback || null);
+  const token = resolveToken(config, origin);
   if (!token) return { ok: false, code: 'no-token', error: NO_TOKEN_ERROR };
 
   return handleProxy(

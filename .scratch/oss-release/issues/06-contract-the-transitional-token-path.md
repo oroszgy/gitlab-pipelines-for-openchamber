@@ -7,11 +7,11 @@ from its own configuration.
 
 **Blocked by:** 03 — Panel owns configuration through the service
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] `/proxy` no longer accepts or reads a token from the request body; its request type no longer
+- [x] `/proxy` no longer accepts or reads a token from the request body; its request type no longer
       carries one.
-- [ ] No code references the removed integration, `apiOrigin`, the baked origin constant, or the host
+- [x] No code references the removed integration, `apiOrigin`, the baked origin constant, or the host
       request bridge.
-- [ ] No unused host-seam member or fake remains.
-- [ ] `bun run check` stays green.
+- [x] No unused host-seam member or fake remains.
+- [x] `bun run check` stays green.
