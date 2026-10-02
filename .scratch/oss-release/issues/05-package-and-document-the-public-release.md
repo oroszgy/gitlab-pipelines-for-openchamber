@@ -8,12 +8,12 @@ lives in the service's `0600` file. No version bump here; the user-observable ch
 
 **Blocked by:** 03 — Panel owns configuration through the service
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The package name is `gitlab-pipelines` and it is no longer private.
-- [ ] An MIT `LICENSE` is present and consistent with the README.
-- [ ] The README covers install, configuration (masked Access token, default host `gitlab.com`, Project
+- [x] The package name is `gitlab-pipelines` and it is no longer private.
+- [x] An MIT `LICENSE` is present and consistent with the README.
+- [x] The README covers install, configuration (masked Access token, default host `gitlab.com`, Project
       override) and security (mandatory service grant; the token is held by the service; GitLab access is
       read-only).
-- [ ] The README states the Extension no longer appears in Settings → Integrations.
-- [ ] `bun run check` stays green.
+- [x] The README states the Extension no longer appears in Settings → Integrations.
+- [x] `bun run check` stays green.

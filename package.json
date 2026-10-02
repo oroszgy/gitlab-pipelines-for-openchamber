@@ -1,8 +1,9 @@
 {
-  "name": "@ec/gitlab-pipelines",
+  "name": "gitlab-pipelines",
   "version": "0.7.0",
-  "private": true,
+  "private": false,
   "description": "Read-only OpenChamber panel showing GitLab CI/CD pipelines for the open project.",
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "build": "bun run build:panel && bun run build:service",
