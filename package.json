@@ -1,6 +1,6 @@
 {
   "name": "@ec/gitlab-pipelines",
-  "version": "0.6.1",
+  "version": "0.7.0",
   "private": true,
   "description": "Read-only OpenChamber panel showing GitLab CI/CD pipelines for the open project.",
   "type": "module",
@@ -39,32 +39,6 @@
       "service": {
         "entry": "service/main.js",
         "runtime": "host"
-      },
-      "integration": {
-        "name": "GitLab",
-        "description": "Reads CI/CD pipelines, jobs and logs from one GitLab project. Read-only.",
-        "token": {
-          "apiOrigin": "https://sdlc.webcloud.ec.europa.eu",
-          "scheme": "bearer",
-          "account": {
-            "path": "/api/v4/user",
-            "name": "username"
-          }
-        },
-        "settings": [
-          {
-            "id": "project",
-            "label": "GitLab project path or ID (optional)"
-          },
-          {
-            "id": "host",
-            "label": "GitLab host (optional)"
-          },
-          {
-            "id": "token",
-            "label": "Access token"
-          }
-        ]
       }
     }
   }

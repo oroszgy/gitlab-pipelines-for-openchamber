@@ -1,10 +1,10 @@
 import { PER_PAGE } from './config';
-import type { HostPort, HostRequest, HostResponse } from './host-port';
+import type { HostRequest, HostResponse } from './host-port';
 import type { Bridge, Job, Pipeline, Scope } from './types';
 
 /** A typed failure, mapped from an HTTP status or a host error. */
 export type ClientFailure =
-  | { kind: 'disconnected' }
+  | { kind: 'no-token' }
   | { kind: 'unauthorized' }
   | { kind: 'not-found' }
   | { kind: 'service' }
@@ -14,19 +14,11 @@ export type ClientFailure =
   | { kind: 'network' };
 
 /**
- * The one call a GitLab fetch makes. In built-in mode this is the host request
- * bridge; in custom-host mode it is the proxy service. Kept narrow so the client
- * never sees the transport, only "send this and give me a status and a body".
+ * The one call a GitLab fetch makes: a request to the Proxy service, which
+ * attaches the Access token itself. Kept narrow so the client never sees the
+ * transport, only "send this and give me a status and a body".
  */
 export type Requester = (request: HostRequest) => Promise<HostResponse>;
-
-/**
- * Wrap a host port as a `Requester`. Host ports are objects, so a bare method
- * reference would lose its `this`; this keeps the call bound.
- */
-export function fromHostPort(port: HostPort): Requester {
-  return (request) => port.request(request);
-}
 
 export type ClientResult<T> = { ok: true; data: T } | { ok: false; failure: ClientFailure };
 
@@ -138,14 +130,6 @@ export function mapHttpStatus(status: number): ClientFailure | null {
   return { kind: 'http', status };
 }
 
-export function isDisconnectedError(error: unknown): boolean {
-  return (
-    typeof error === 'object' &&
-    error !== null &&
-    (error as { code?: unknown }).code === 'DISCONNECTED'
-  );
-}
-
 /** A host error code, when the error carries one. */
 export function hostErrorCode(error: unknown): string | null {
   if (typeof error !== 'object' || error === null) return null;
@@ -154,14 +138,14 @@ export function hostErrorCode(error: unknown): string | null {
 }
 
 /**
- * Map a host error to a typed failure. The service errors matter only on the
- * custom-host path: `NO_SERVICE` (not declared, not granted, not started) and
- * `SERVICE_FAILED` (crashed) mean the proxy is unusable; everything else is a
- * plain transport failure.
+ * Map a host error to a typed failure. `no-token` is the service refusing a
+ * request for a host with no Access token; `NO_SERVICE` (not declared, not
+ * granted, not started) and `SERVICE_FAILED` (crashed) mean the Proxy service
+ * is unusable; everything else is a plain transport failure.
  */
 export function clientFailureFromError(error: unknown): ClientFailure {
   const code = hostErrorCode(error);
-  if (code === 'DISCONNECTED') return { kind: 'disconnected' };
+  if (code === 'no-token') return { kind: 'no-token' };
   if (code === 'NO_SERVICE' || code === 'SERVICE_FAILED' || code === 'NOT_GRANTED') {
     return { kind: 'service' };
   }
@@ -205,6 +189,18 @@ export async function fetchPipelines(
   const result = await call(requester, { method: 'GET', ...request });
   if (!result.ok) return result;
   return parseJson<Pipeline[]>(result.body, result.status);
+}
+
+/** The authenticated account `/api/v4/user` answers, used to show who the token is. */
+export type AuthenticatedUser = {
+  username?: string | null;
+  name?: string | null;
+};
+
+export async function fetchUser(requester: Requester): Promise<ClientResult<AuthenticatedUser>> {
+  const result = await call(requester, { method: 'GET', path: '/api/v4/user', query: {} });
+  if (!result.ok) return result;
+  return parseJson<AuthenticatedUser>(result.body, result.status);
 }
 
 export async function fetchJobs(

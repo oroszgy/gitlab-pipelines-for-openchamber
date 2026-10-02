@@ -5,8 +5,6 @@ import {
   fetchJobs,
   fetchPipelines,
   fetchTrace,
-  fromHostPort,
-  isDisconnectedError,
   jobsRequest,
   mapHttpStatus,
   parseMoveTarget,
@@ -16,7 +14,6 @@ import {
   traceRequest,
   type Requester,
 } from '../panel/gitlab-client';
-import { FakeHost } from './fakes';
 
 describe('path and query construction', () => {
   test('encodes the project path', () => {
@@ -109,11 +106,29 @@ describe('parseMoveTarget', () => {
   });
 });
 
-describe('isDisconnectedError', () => {
-  test('matches the host error code', () => {
-    expect(isDisconnectedError({ code: 'DISCONNECTED' })).toBe(true);
-    expect(isDisconnectedError(new Error('nope'))).toBe(false);
-    expect(isDisconnectedError(null)).toBe(false);
+describe('clientFailureFromError', () => {
+  test('maps the no-token service error to its own kind', async () => {
+    const noToken: Requester = () => {
+      const error = new Error('no token') as Error & { code: string };
+      error.code = 'no-token';
+      throw error;
+    };
+    expect(await fetchPipelines(noToken, 'g/p', { scope: 'all' })).toEqual({
+      ok: false,
+      failure: { kind: 'no-token' },
+    });
+  });
+
+  test('maps a service grant error to the service kind', async () => {
+    const noService: Requester = () => {
+      const error = new Error('no service') as Error & { code: string };
+      error.code = 'NO_SERVICE';
+      throw error;
+    };
+    expect(await fetchPipelines(noService, 'g/p', { scope: 'all' })).toEqual({
+      ok: false,
+      failure: { kind: 'service' },
+    });
   });
 });
 
@@ -124,10 +139,13 @@ describe('fetchPipelines over a requester', () => {
 
   test('passes its request through to the requester unchanged', async () => {
     // The client must not reach into the transport: the requester sees the built path and query.
-    const host = new FakeHost();
-    host.handler = () => ({ status: 200, body: '[]' });
-    await fetchPipelines(fromHostPort(host), 'g/p', { scope: 'branch', ref: 'feature/x' });
-    expect(host.requests[0]).toEqual({
+    const seen: Array<Parameters<Requester>[0]> = [];
+    const capture: Requester = async (request) => {
+      seen.push(request);
+      return { status: 200, body: '[]' };
+    };
+    await fetchPipelines(capture, 'g/p', { scope: 'branch', ref: 'feature/x' });
+    expect(seen[0]).toEqual({
       method: 'GET',
       path: '/api/v4/projects/g%2Fp/pipelines',
       query: { per_page: '20', ref: 'feature/x' },
@@ -149,16 +167,6 @@ describe('fetchPipelines over a requester', () => {
       scope: 'all',
     });
     expect(result).toEqual({ ok: false, failure: { kind: 'unauthorized' } });
-  });
-
-  test('maps a disconnected host error', async () => {
-    const disconnected: Requester = () => {
-      const error = new Error('disconnected') as Error & { code: string };
-      error.code = 'DISCONNECTED';
-      throw error;
-    };
-    const result = await fetchPipelines(disconnected, 'g/p', { scope: 'all' });
-    expect(result).toEqual({ ok: false, failure: { kind: 'disconnected' } });
   });
 
   test('maps an unexpected transport failure to network', async () => {
@@ -323,14 +331,14 @@ describe('fetchBridges over a requester', () => {
       ok: false,
       failure: { kind: 'not-found' },
     });
-    const disconnected: Requester = () => {
-      const error = new Error('disconnected') as Error & { code: string };
-      error.code = 'DISCONNECTED';
+    const noToken: Requester = () => {
+      const error = new Error('no token') as Error & { code: string };
+      error.code = 'no-token';
       throw error;
     };
-    expect(await fetchBridges(disconnected, 'g/p', 12)).toEqual({
+    expect(await fetchBridges(noToken, 'g/p', 12)).toEqual({
       ok: false,
-      failure: { kind: 'disconnected' },
+      failure: { kind: 'no-token' },
     });
     const failing: Requester = () => {
       throw new Error('socket hang up');

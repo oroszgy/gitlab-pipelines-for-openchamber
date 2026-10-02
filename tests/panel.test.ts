@@ -27,6 +27,7 @@ function configuredHost(): FakeHost {
   host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
   host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
   host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+  host.tokens['gitlab.com'] = 'pat';
   return host;
 }
 
@@ -62,7 +63,7 @@ async function mount(
 ): Promise<{ root: HTMLElement; panel: PanelHandle }> {
   const root = document.createElement('div');
   document.body.append(root);
-  const panel = mountPanel(root, host, { apiOrigin: HOST, timers });  host.emitReady(ready);
+  const panel = mountPanel(root, host, { timers });  host.emitReady(ready);
   await flush();
   return { root, panel };
 }
@@ -71,8 +72,29 @@ function text(root: HTMLElement): string {
   return root.textContent ?? '';
 }
 
+/** Open the configuration form the way a user would: click the header's gear. */
+function openConfig(root: HTMLElement): void {
+  (root.querySelector('.gp-config-open') as HTMLElement).click();
+}
+
+/** Submit the configuration form, as its Save button would. */
+function submitConfig(root: HTMLElement): void {
+  const form = root.querySelector('.gp-config') as HTMLFormElement;
+  // happy-dom's Event constructor, not Node's, so the event is dispatchable.
+  const EventCtor = (form.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+  form.dispatchEvent(new EventCtor('submit', { bubbles: true, cancelable: true }));
+}
+
+/** Set a form field's value and fire `input`, the way typing would. */
+function setField(root: HTMLElement, field: string, value: string): void {
+  const input = root.querySelector(`.${field}`) as HTMLInputElement;
+  input.value = value;
+  const EventCtor = (input.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+  input.dispatchEvent(new EventCtor('input', { bubbles: true }));
+}
+
 function pipelineRequests(host: FakeHost): HostRequest[] {
-  return host.requests.filter((request) => request.path.endsWith('/pipelines'));
+  return host.gitlabRequests.filter((request) => request.path.endsWith('/pipelines'));
 }
 
 function movedTo(url: string): string {
@@ -93,7 +115,7 @@ function redirectChainHandler(): (request: HostRequest) => HostResponse {
 describe('project resolution in the header', () => {
   test('shows the resolved host, project path and current ref', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline()] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('gitlab.com/group/project');
     expect(text(root)).toContain('main');
@@ -102,7 +124,7 @@ describe('project resolution in the header', () => {
 
   test('no project open degrades the header and offers the setting', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({});
+    host.gitlabHandler = handlerFor({});
     const { root } = await mount(host, new FakeTimers(), readyContext({ directory: null }));
     expect(text(root)).toContain('No project open');
     expect(root.querySelector('.gp-project')?.hasAttribute('hidden')).toBe(true);
@@ -111,7 +133,7 @@ describe('project resolution in the header', () => {
 
   test('a project that is not a repo says so', async () => {
     const host = new FakeHost();
-    host.handler = handlerFor({});
+    host.gitlabHandler = handlerFor({});
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Not a Git repository');
     expect(text(root)).toContain('Project');
@@ -120,7 +142,7 @@ describe('project resolution in the header', () => {
   test('a remote on another host is reported with no phantom path', async () => {
     const host = configuredHost();
     host.files.set('.git/config', '[remote "origin"]\n\turl = git@github.com:me/proj.git\n');
-    host.handler = handlerFor({});
+    host.gitlabHandler = handlerFor({});
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Different GitLab host');
     expect(text(root)).toContain('github.com/me/proj');
@@ -139,7 +161,7 @@ describe('project resolution in the header', () => {
       { directory: '/repo', name: 'wt', branch: 'feature/x', status: 'ready' },
       { directory: '/primary', name: 'primary', branch: 'main', status: 'ready' },
     ];
-    host.handler = handlerFor({});
+    host.gitlabHandler = handlerFor({});
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Linked worktree');
     expect(text(root)).toContain('Current ref: feature/x');
@@ -158,49 +180,41 @@ describe('a linked worktree resolved through the service', () => {
       { directory: '/repo', name: 'wt', branch: 'feature/x', status: 'ready' },
       { directory: '/primary', name: 'primary', branch: 'main', status: 'ready' },
     ];
+    host.tokens['gitlab.com'] = 'pat';
     return host;
   }
 
   test('reads the primary config and lists pipelines on the worktree ref', async () => {
     const host = worktreeHost();
-    host.serviceHandler = (request) => {
-      if (request.path === '/git-config') {
-        return {
-          status: 200,
-          body: JSON.stringify({
-            config: '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n',
-          }),
-        };
-      }
-      return { status: 200, body: '[]' };
-    };
-    host.handler = handlerFor({ pipelines: [pipeline()] });
+    host.gitConfig = '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n';
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
 
-    expect(host.serviceRequests[0]?.path).toBe('/git-config');
-    const sent = JSON.parse(host.serviceRequests[0]?.body ?? '{}') as { directory?: string };
+    const gitConfigCall = host.serviceRequests.find((request) => request.path === '/git-config');
+    expect(gitConfigCall).toBeDefined();
+    const sent = JSON.parse(gitConfigCall?.body ?? '{}') as { directory?: string };
     expect(sent.directory).toBe('/repo');
     expect(text(root)).toContain('gitlab.com/group/project');
     expect(text(root)).toContain('feature/x');
-    expect(host.requests.some((request) => request.path.endsWith('/pipelines'))).toBe(true);
+    expect(host.gitlabRequests.some((request) => request.path.endsWith('/pipelines'))).toBe(true);
   });
 
   test('keeps the linked-worktree state when the service cannot read it', async () => {
     const host = worktreeHost();
-    host.serviceHandler = () => ({ status: 404, body: JSON.stringify({ error: 'nope' }) });
-    host.handler = handlerFor({});
+    host.gitConfig = null; // the `/git-config` route answers 404
+    host.gitlabHandler = handlerFor({});
     const { root } = await mount(host, new FakeTimers());
 
     expect(text(root)).toContain('Linked worktree');
     expect(text(root)).toContain('Current ref: feature/x');
-    expect(host.requests).toHaveLength(0);
+    expect(host.gitlabRequests).toHaveLength(0);
   });
 });
 
 describe('the brand mark', () => {
   test('uses the gitlab-line glyph', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline()] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
     const path = root.querySelector('.gp-brand-mark svg path');
     expect(path?.getAttribute('d')?.startsWith('M5.54429')).toBe(true);
@@ -210,7 +224,7 @@ describe('the brand mark', () => {
 describe('pipeline list', () => {
   test('lists pipelines newest first with a two-line row', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({
+    host.gitlabHandler = handlerFor({
       pipelines: [
         pipeline({ id: 2, iid: 12, ref: 'newer', sha: '1111111aaaa', status: 'failed' }),
         pipeline({ id: 1, iid: 11, ref: 'older', sha: '2222222bbbb' }),
@@ -228,14 +242,14 @@ describe('pipeline list', () => {
 
   test('shows a merge-request marker on the second line', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline({ merge_request: { iid: 5 } })] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ merge_request: { iid: 5 } })] });
     const { root } = await mount(host, new FakeTimers());
     expect(root.querySelector('.gp-row-sub')?.textContent).toContain('!5');
   });
 
   test('keeps the source on the second line even when the pipeline has a name', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline({ name: 'nightly', source: 'schedule' })] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ name: 'nightly', source: 'schedule' })] });
     const { root } = await mount(host, new FakeTimers());
     const subtitle = root.querySelector('.gp-row-sub')?.textContent ?? '';
     expect(subtitle).toContain('nightly');
@@ -244,27 +258,25 @@ describe('pipeline list', () => {
 
   test('no pipelines for the ref is an empty state, not an error', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [] });
+    host.gitlabHandler = handlerFor({ pipelines: [] });
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('No pipelines for this ref');
   });
 
-  test('a disconnected token is a typed state', async () => {
+  test('a host with no Access token is its own state', async () => {
     const host = configuredHost();
-    host.handler = () => {
-      const error = new Error('disconnected') as Error & { code: string };
-      error.code = 'DISCONNECTED';
-      throw error;
-    };
+    delete host.tokens['gitlab.com'];
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
-    expect(text(root)).toContain('GitLab not connected');
+    expect(text(root)).toContain('No Access token');
+    expect(host.gitlabRequests).toHaveLength(0);
   });
 });
 
 describe('expanding a pipeline', () => {
   test('shows jobs grouped by stage with done/total', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({
+    host.gitlabHandler = handlerFor({
       pipelines: [pipeline({ id: 7 })],
       jobs: [
         job({ id: 1, stage: 'build', name: 'compile', status: 'success' }),
@@ -288,21 +300,21 @@ describe('expanding a pipeline', () => {
   });
 
   test('collapsing does not refetch jobs', async () => {    const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job()] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job()] });
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
-    const before = host.requests.filter((request) => request.path.endsWith('/jobs')).length;
+    const before = host.gitlabRequests.filter((request) => request.path.endsWith('/jobs')).length;
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
-    const after = host.requests.filter((request) => request.path.endsWith('/jobs')).length;
+    const after = host.gitlabRequests.filter((request) => request.path.endsWith('/jobs')).length;
     expect(after).toBe(before);
     expect(root.querySelector('.gp-jobs')).toBeNull();
   });
 
   test('offers a link back to GitLab when expanded', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({
+    host.gitlabHandler = handlerFor({
       pipelines: [pipeline({ id: 7, web_url: 'https://gitlab.com/group/project/-/pipelines/7' })],
       jobs: [job()],
     });
@@ -318,7 +330,7 @@ describe('expanding a pipeline', () => {
 
   test('a failed jobs fetch is an error, not an empty list', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       }
@@ -337,7 +349,7 @@ describe('the job log drawer', () => {
   test('opens the whole log wrapped, with a full-log link, and closes back', async () => {
     const host = configuredHost();
     const trace = Array.from({ length: 45 }, (_, index) => `line ${index + 1}`).join('\n');
-    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -361,7 +373,7 @@ describe('the job log drawer', () => {
   test('a log over the line cap says older lines are not shown', async () => {
     const host = configuredHost();
     const trace = Array.from({ length: LOG_MAX_LINES + 5 }, (_, index) => `line ${index + 1}`).join('\n');
-    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -374,7 +386,7 @@ describe('the job log drawer', () => {
   test('a log at the host body cap says GitLab capped it', async () => {
     const host = configuredHost();
     const trace = 'x'.repeat(HOST_BODY_CAP);
-    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -385,7 +397,7 @@ describe('the job log drawer', () => {
 
   test('closing the drawer restores the list scroll position', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })] });
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -402,7 +414,7 @@ describe('the job log drawer', () => {
 
   test('a missing trace is a clear state', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       if (request.path.endsWith('/jobs')) return { status: 200, body: JSON.stringify([job({ id: 9 })]) };
       return { status: 404, body: '' };
@@ -417,7 +429,7 @@ describe('the job log drawer', () => {
 
   test('a failed log fetch is an error, not "no output"', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       }
@@ -441,7 +453,7 @@ describe('live log while a job runs', () => {
   test('refetches the open log while its job is active', async () => {
     const host = configuredHost();
     let trace = 'line 1';
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
       }
@@ -467,7 +479,7 @@ describe('live log while a job runs', () => {
 
   test('does not refetch a settled job’s log, even while the pipeline polls', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
       }
@@ -485,10 +497,10 @@ describe('live log while a job runs', () => {
     await flush();
     expect(panel.isPolling()).toBe(true);
 
-    const before = host.requests.filter((request) => request.path.endsWith('/trace')).length;
+    const before = host.gitlabRequests.filter((request) => request.path.endsWith('/trace')).length;
     timers.advance(5000);
     await flush();
-    const after = host.requests.filter((request) => request.path.endsWith('/trace')).length;
+    const after = host.gitlabRequests.filter((request) => request.path.endsWith('/trace')).length;
     expect(after).toBe(before);
   });
 });
@@ -506,7 +518,7 @@ describe('isAtBottom', () => {
 describe('branch / all refs scope', () => {
   test('switching scope refetches once without the ref filter', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline()] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root, panel } = await mount(host, new FakeTimers());
     expect(pipelineRequests(host)).toHaveLength(1);
     expect(pipelineRequests(host)[0]?.query?.ref).toBe('main');
@@ -524,7 +536,7 @@ describe('branch / all refs scope', () => {
   test('the scope control is hidden on a failure state', async () => {
     const host = configuredHost();
     host.files.set('.git/config', '[remote "origin"]\n\turl = git@github.com:me/proj.git\n');
-    host.handler = handlerFor({});
+    host.gitlabHandler = handlerFor({});
     const { root } = await mount(host, new FakeTimers());
     expect(root.querySelector('.gp-scope')?.hasAttribute('hidden')).toBe(true);
     expect(root.querySelector('[role="tablist"]')).toBeNull();
@@ -534,14 +546,14 @@ describe('branch / all refs scope', () => {
 describe('adaptive polling and freshness', () => {
   test('polls while running and stops once settled', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline({ status: 'running', finished_at: null })] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ status: 'running', finished_at: null })] });
     const timers = new FakeTimers();
     const { panel, root } = await mount(host, timers);
     expect(panel.isPolling()).toBe(true);
     expect(root.querySelector('.gp-updated')).not.toBeNull();
     expect(timers.pendingDelays()).toContain(5000);
 
-    host.handler = handlerFor({ pipelines: [pipeline({ status: 'success' })] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ status: 'success' })] });
     timers.advance(5000);
     await flush();
 
@@ -552,7 +564,7 @@ describe('adaptive polling and freshness', () => {
   test('a slow response cannot overwrite a newer one', async () => {
     const host = configuredHost();
     let release: ((response: HostResponse) => void) | null = null;
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (!request.path.endsWith('/pipelines')) return { status: 404, body: '' };
       if (release == null) {
         return new Promise<HostResponse>((resolve) => {
@@ -577,246 +589,61 @@ describe('adaptive polling and freshness', () => {
   });
 });
 
-describe('custom host mode', () => {
-  function customHost(): FakeHost {
-    const host = new FakeHost();
-    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
-    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
-    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
-    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
-    return host;
-  }
-
-  test('routes GitLab fetches through the service and carries the token in the body', async () => {
-    const host = customHost();
-    host.serviceHandler = (request) => {
-      const payload = JSON.parse(request.body ?? '{}') as { path?: string };
-      if (payload.path?.endsWith('/pipelines')) {
-        return { status: 200, body: JSON.stringify({ status: 200, body: JSON.stringify([pipeline()]) }) };
-      }
-      return { status: 200, body: JSON.stringify({ status: 404, body: '' }) };
-    };
-    const root = document.createElement('div');
-    document.body.append(root);
-    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
-    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
-    await flush();
-
-    expect(host.requests).toHaveLength(0);
-    expect(host.serviceRequests.length).toBeGreaterThan(0);
-    const first = host.serviceRequests[0];
-    expect(first?.path).toBe('/proxy');
-    expect(first?.query?.baseUrl).toBe('https://gitlab.example.com');
-    const body = JSON.parse(first?.body ?? '{}') as { token?: string; path?: string };
-    expect(body.token).toBe('pat');
-    expect(body.path).toContain('/pipelines');
-    expect(text(root)).toContain('Passed');
-    panel.dispose();
-  });
-
-  test('keeps using the host bridge for the built-in host', async () => {
+describe('configuration through the service', () => {
+  test('routes every GitLab call through the service, carrying no token', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline()] });
-    await mount(host, new FakeTimers(), readyContext({ settings: { host: 'gitlab.com' } }));
-    expect(host.serviceRequests).toHaveLength(0);
-    expect(host.requests.length).toBeGreaterThan(0);
-  });
-});
-
-describe('switching hosts', () => {
-  function customHost(): FakeHost {
-    const host = new FakeHost();
-    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
-    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
-    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
-    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
-    return host;
-  }
-
-  test('clearing the host returns to the built-in path with no foreign data', async () => {
-    const host = new FakeHost();
-    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
-    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
-    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
-    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
-    host.handler = handlerFor({ pipelines: [pipeline({ id: 1, ref: 'builtin' })] });
-    host.serviceHandler = () => ({
-      status: 200,
-      body: JSON.stringify({ status: 200, body: JSON.stringify([pipeline({ id: 9, ref: 'custom' })]) }),
-    });
-
-    const root = document.createElement('div');
-    document.body.append(root);
-    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
-    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
-    await flush();
-    expect(text(root)).toContain('custom');
-
-    // Clearing the setting returns to the built-in host — here the remote is on
-    // the custom host, so the built-in path reports the mismatch and clears data.
-    host.emitReady(readyContext({ settings: {} }));
-    await flush();
-
-    expect(text(root)).not.toContain('custom');
-    expect(text(root)).toContain('Different GitLab host');
-    expect(root.querySelector('.gp-row')).toBeNull();
-    panel.dispose();
-  });
-
-  test('a switch drops cached jobs from the previous host', async () => {
-    const host = customHost();
-    host.serviceHandler = (request) => {
-      const body = JSON.parse(request.body ?? '{}') as { path?: string };
-      if (body.path?.endsWith('/pipelines')) {
-        return { status: 200, body: JSON.stringify({ status: 200, body: JSON.stringify([pipeline({ id: 7 })]) }) };
-      }
-      if (body.path?.endsWith('/jobs')) {
-        return { status: 200, body: JSON.stringify({ status: 200, body: JSON.stringify([job({ id: 3, name: 'old-job' })]) }) };
-      }
-      return { status: 200, body: JSON.stringify({ status: 404, body: '' }) };
-    };
-    const root = document.createElement('div');
-    document.body.append(root);
-    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
-    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
-    await flush();
-    (root.querySelector('.gp-row') as HTMLElement).click();
-    await flush();
-    expect(text(root)).toContain('old-job');
-
-    host.emitReady(readyContext({ settings: {} }));
-    await flush();
-    expect(text(root)).not.toContain('old-job');
-    panel.dispose();
-  });
-
-  test('the header names a custom host', async () => {
-    const host = customHost();
-    host.serviceHandler = () => ({ status: 200, body: JSON.stringify({ status: 200, body: '[]' }) });
-    const root = document.createElement('div');
-    document.body.append(root);
-    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
-    host.emitReady(readyContext({ settings: { host: 'gitlab.example.com', token: 'pat' } }));
-    await flush();
-    expect(root.querySelector('.gp-foot-host')?.textContent).toContain('gitlab.example.com');
-    expect(root.querySelector('.gp-host-tag')?.textContent).toBe('Custom host');
-    panel.dispose();
-  });
-
-  test('the built-in mode shows no custom marker', async () => {
-    const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline()] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
-    expect(root.querySelector('.gp-foot-host')).toBeNull();
-    expect(root.querySelector('.gp-host-tag')).toBeNull();
-  });
-});
 
-describe('custom host failures and grants', () => {
-  function customHost(): FakeHost {
-    const host = new FakeHost();
-    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
-    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
-    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
-    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
-    return host;
-  }
-
-  async function mountWith(host: FakeHost, settings: Record<string, string>) {
-    const root = document.createElement('div');
-    document.body.append(root);
-    const panel = mountPanel(root, host, { apiOrigin: HOST, timers: new FakeTimers() });
-    host.emitReady(readyContext({ settings }));
-    await flush();
-    return { root, panel };
-  }
-
-  test('a malformed host is a typed failure, not a fallback', async () => {
-    const host = customHost();
-    const { root, panel } = await mountWith(host, { host: 'not a host!!', token: 'pat' });
-    expect(text(root)).toContain('Invalid GitLab host');
-    expect(host.requests).toHaveLength(0);
-    expect(host.serviceRequests).toHaveLength(0);
-    panel.dispose();
+    expect(text(root)).toContain('Passed');
+    // The first service call is the configuration read; GitLab traffic follows.
+    expect(host.serviceRequests[0]?.path).toBe('/config');
+    const proxy = host.serviceRequests.find((request) => {
+      if (request.path !== '/proxy') return false;
+      const body = JSON.parse(request.body ?? '{}') as { path?: string };
+      return body.path?.endsWith('/pipelines') ?? false;
+    });
+    expect(proxy?.query?.baseUrl).toBe('https://gitlab.com');
+    const body = JSON.parse(proxy?.body ?? '{}') as { baseUrl?: string; path?: string; token?: unknown };
+    expect(body.baseUrl).toBe('https://gitlab.com');
+    expect(body.path).toBe('/api/v4/projects/group%2Fproject/pipelines');
+    // The Panel never carries the token: the service attaches it.
+    expect(body).not.toHaveProperty('token');
   });
 
-  test('a non-https host is refused rather than silently upgraded', async () => {
-    const host = customHost();
-    const { root, panel } = await mountWith(host, { host: 'http://gitlab.example.com', token: 'pat' });
-    expect(text(root)).toContain('Invalid GitLab host');
-    expect(host.serviceRequests).toHaveLength(0);
-    panel.dispose();
-  });
-
-  test('a host with embedded credentials or a path is refused', async () => {
-    const host = customHost();
-    const credentialed = await mountWith(host, { host: 'https://u:p@gitlab.example.com', token: 'pat' });
-    expect(text(credentialed.root)).toContain('Invalid GitLab host');
-    credentialed.panel.dispose();
-    const pathed = await mountWith(host, { host: 'https://gitlab.example.com/gitlab', token: 'pat' });
-    expect(text(pathed.root)).toContain('Invalid GitLab host');
-    pathed.panel.dispose();
-  });
-
-  test('a custom host with no token has its own state', async () => {
-    const host = customHost();
-    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com' });
-    expect(text(root)).toContain('No token for this host');
-    expect(text(root)).not.toContain('GitLab not connected');
-    expect(host.serviceRequests).toHaveLength(0);
-    panel.dispose();
+  test('shows the authenticated user from the service', async () => {
+    const host = configuredHost();
+    host.username = 'octocat';
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root } = await mount(host, new FakeTimers());
+    expect(root.querySelector('.gp-foot-user')?.textContent).toBe('octocat');
   });
 
   test('an ungranted service is a service state pointing at Settings', async () => {
-    const host = customHost();
-    host.serviceHandler = () => {
-      const error = new Error('no service') as Error & { code: string };
-      error.code = 'NO_SERVICE';
-      throw error;
-    };
-    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com', token: 'pat' });
-    expect(text(root)).toContain('Proxy service unavailable');
-    expect(text(root)).toContain('Extensions');
-    panel.dispose();
-  });
-
-  test('a failed proxy request is an error, not an empty list', async () => {
-    const host = customHost();
-    host.serviceHandler = () => {
-      throw new Error('REQUEST_FAILED');
-    };
-    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com', token: 'pat' });
-    expect(text(root)).toContain('Could not reach GitLab');
-    expect(text(root)).not.toContain('No pipelines');
-    panel.dispose();
-  });
-
-  test('a 502 envelope from the proxy shell is a network error, not an HTTP one', async () => {
-    const host = customHost();
-    // The shell answers a handler failure with 502 and an `error` envelope.
-    host.serviceHandler = () => ({ status: 502, body: JSON.stringify({ error: 'Could not reach https://gitlab.example.com: boom' }) });
-    const { root, panel } = await mountWith(host, { host: 'gitlab.example.com', token: 'pat' });
-    expect(text(root)).toContain('Could not reach GitLab');
-    expect(text(root)).not.toContain('unexpected response');
-    panel.dispose();
-  });
-
-  test('the built-in path is unaffected with no service grant', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline()] });
     host.serviceHandler = () => {
       const error = new Error('no service') as Error & { code: string };
       error.code = 'NO_SERVICE';
       throw error;
     };
     const { root } = await mount(host, new FakeTimers());
-    expect(text(root)).toContain('Passed');
-    expect(host.serviceRequests).toHaveLength(0);
+    expect(text(root)).toContain('Proxy service unavailable');
+    expect(text(root)).toContain('Extensions');
+  });
+
+  test('a failed proxy request is an error, not an empty list', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = () => {
+      throw new Error('REQUEST_FAILED');
+    };
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Could not reach GitLab');
+    expect(text(root)).not.toContain('No pipelines');
   });
 
   test('an ordinary refresh keeps the list and the open log', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace: 'line 1' });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace: 'line 1' });
     const { root, panel } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -832,33 +659,283 @@ describe('custom host failures and grants', () => {
   });
 });
 
-describe('project override setting', () => {
-  test('a pinned project is used instead of the derived one', async () => {
+describe('the configuration form', () => {
+  function formHost(): FakeHost {
     const host = new FakeHost();
-    host.handler = handlerFor({ pipelines: [] });
-    const { root } = await mount(
-      host,
-      new FakeTimers(),
-      readyContext({ directory: null, settings: { project: 'group/pinned' } }),
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    return host;
+  }
+
+  async function open(host: FakeHost) {
+    const root = document.createElement('div');
+    document.body.append(root);
+    const panel = mountPanel(root, host, { timers: new FakeTimers() });
+    host.emitReady(readyContext());
+    await flush();
+    openConfig(root);
+    await flush();
+    return { root, panel };
+  }
+
+  test('saves the Configured host, Project override and a masked token', async () => {
+    const host = formHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root, panel } = await open(host);
+
+    const tokenInput = root.querySelector('.gp-config-token') as HTMLInputElement;
+    expect(tokenInput.type).toBe('password');
+    expect(tokenInput.value).toBe('');
+
+    setField(root, 'gp-config-host', 'gitlab.example.com');
+    setField(root, 'gp-config-project', 'group/pinned');
+    setField(root, 'gp-config-token', 'new-pat');
+    submitConfig(root);
+    await flush();
+
+    expect(host.config.host).toBe('gitlab.example.com');
+    expect(host.config.project).toBe('group/pinned');
+    expect(host.tokens['gitlab.example.com']).toBe('new-pat');
+    // The form closes and the Panel reloads from the new configuration.
+    expect(root.querySelector('.gp-config')).toBeNull();
+    expect(text(root)).toContain('gitlab.example.com/group/pinned');
+    panel.dispose();
+  });
+
+  test('reopening never renders a stored token back', async () => {
+    const host = formHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    host.tokens['gitlab.example.com'] = 'secret-pat';
+    host.config = { host: 'gitlab.example.com', project: '' };
+    const { root, panel } = await open(host);
+    const tokenInput = root.querySelector('.gp-config-token') as HTMLInputElement;
+    expect(tokenInput.value).toBe('');
+    // A stored token shows only as presence, never as its value.
+    expect(tokenInput.placeholder).toContain('token is saved');
+    expect(text(root)).not.toContain('secret-pat');
+    panel.dispose();
+  });
+
+  test('clears a stored token', async () => {
+    const host = formHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    host.tokens['gitlab.example.com'] = 'secret-pat';
+    host.config = { host: 'gitlab.example.com', project: '' };
+    const { root, panel } = await open(host);
+    (root.querySelector('.gp-config-clear') as HTMLElement).click();
+    await flush();
+    expect(host.tokens['gitlab.example.com']).toBeUndefined();
+    expect(text(root)).toContain('No Access token');
+    panel.dispose();
+  });
+
+  test('refuses a malformed host with no request', async () => {
+    const host = formHost();
+    const { root, panel } = await open(host);
+    const before = host.serviceRequests.filter((request) => request.path === '/config').length;
+    setField(root, 'gp-config-host', 'not a host!!');
+    submitConfig(root);
+    await flush();
+    expect(root.querySelector('.gp-config-error')).not.toBeNull();
+    expect(host.serviceRequests.filter((request) => request.path === '/config')).toHaveLength(before);
+    panel.dispose();
+  });
+
+  test('refuses a non-https host', async () => {
+    const host = formHost();
+    const { root, panel } = await open(host);
+    setField(root, 'gp-config-host', 'http://gitlab.example.com');
+    submitConfig(root);
+    await flush();
+    expect(root.querySelector('.gp-config-error')).not.toBeNull();
+    panel.dispose();
+  });
+});
+
+describe('configuration states and host switching', () => {
+  function formHost(): FakeHost {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    return host;
+  }
+
+  test('no token offers Configure, which opens the form', async () => {
+    const host = formHost();
+    host.config.host = 'gitlab.example.com';
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('No Access token');
+    const configure = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Configure',
     );
+    expect(configure).toBeDefined();
+    configure?.click();
+    await flush();
+    expect(root.querySelector('.gp-config')).not.toBeNull();
+    panel.dispose();
+  });
+
+  test('an invalid token is a distinct state that offers the form', async () => {
+    const host = formHost();
+    host.tokens['gitlab.example.com'] = 'bad';
+    host.config = { host: 'gitlab.example.com', project: '' };
+    host.gitlabHandler = () => ({ status: 401, body: '' });
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('GitLab token rejected');
+    expect(
+      Array.from(root.querySelectorAll('button')).some((button) => button.textContent === 'Configure'),
+    ).toBe(true);
+    panel.dispose();
+  });
+
+  test('host-mismatch names both the detected and Configured hosts', async () => {
+    const host = configuredHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@github.com:me/proj.git\n');
+    host.gitlabHandler = handlerFor({});
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('github.com');
+    expect(text(root)).toContain('gitlab.com');
+  });
+
+  test('the Project override is used instead of the derived project', async () => {
+    const host = new FakeHost();
+    host.config.project = 'group/pinned';
+    host.tokens['gitlab.com'] = 'pat';
+    host.gitlabHandler = handlerFor({ pipelines: [] });
+    const { root } = await mount(host, new FakeTimers(), readyContext({ directory: null }));
     expect(text(root)).toContain('gitlab.com/group/pinned');
     expect(text(root)).not.toContain('No project open');
   });
 
-  test('clearing the override returns to the derived project', async () => {
-    const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [] });
-    const { root } = await mount(
-      host,
-      new FakeTimers(),
-      readyContext({ settings: { project: 'group/pinned' } }),
-    );
-    expect(text(root)).toContain('gitlab.com/group/pinned');
-
-    host.emitReady(readyContext({ settings: {} }));
+  test('changing the Configured host clears the previous host and re-resolves', async () => {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    host.tokens['gitlab.com'] = 'pat';
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 3, name: 'old-job', status: 'failed' })],
+      trace: 'old log line',
+    });
+    const { root, panel } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
+    expect(text(root)).toContain('old-job');
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('old log line');
+
+    // Switch the Configured host through the form, with a token for the new host.
+    openConfig(root);
+    await flush();
+    setField(root, 'gp-config-host', 'other.example.com');
+    setField(root, 'gp-config-token', 'pat2');
+    submitConfig(root);
+    await flush();
+
+    // The old host's jobs, open log and list are gone; the remote now mismatches.
+    expect(text(root)).not.toContain('old-job');
+    expect(text(root)).not.toContain('old log line');
+    expect(root.querySelector('.gp-drawer')).toBeNull();
+    expect(text(root)).toContain('Different GitLab host');
+    expect(root.querySelector('.gp-row')).toBeNull();
+    panel.dispose();
+  });
+
+  test('a background refresh does not wipe the open form', async () => {
+    const host = formHost();
+    host.tokens['gitlab.example.com'] = 'pat';
+    host.config = { host: 'gitlab.example.com', project: '' };
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ status: 'running', finished_at: null })] });
+    const timers = new FakeTimers();
+    const { root, panel } = await mount(host, timers);
+    expect(panel.isPolling()).toBe(true);
+    openConfig(root);
+    await flush();
+    setField(root, 'gp-config-project', 'typed/override');
+
+    // A poll re-renders the panel; the half-typed override must survive.
+    timers.advance(5000);
+    await flush();
+    expect((root.querySelector('.gp-config-project') as HTMLInputElement).value).toBe('typed/override');
+    panel.dispose();
+  });
+
+  test('clearing the Configured host returns to gitlab.com', async () => {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    host.tokens['gitlab.example.com'] = 'pat';
+    host.tokens['gitlab.com'] = 'pat';
+    host.config = { host: 'gitlab.example.com', project: '' };
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root, panel } = await mount(host, new FakeTimers());
+    // The remote is gitlab.com, so the custom host reports a mismatch first.
+    expect(text(root)).toContain('Different GitLab host');
+
+    openConfig(root);
+    await flush();
+    setField(root, 'gp-config-host', '');
+    submitConfig(root);
+    await flush();
+    expect(host.config.host).toBe('gitlab.com');
     expect(text(root)).toContain('gitlab.com/group/project');
-    expect(text(root)).not.toContain('pinned');
+    panel.dispose();
+  });
+
+  test('the authenticated username updates when the host changes', async () => {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    host.tokens['gitlab.example.com'] = 'pat';
+    host.tokens['gitlab.com'] = 'pat';
+    host.config = { host: 'gitlab.example.com', project: '' };
+    host.username = 'first-user';
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(root.querySelector('.gp-foot-user')?.textContent).toBe('first-user');
+
+    // Move both the remote and the Configured host to gitlab.com.
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n');
+    host.username = 'second-user';
+    openConfig(root);
+    await flush();
+    setField(root, 'gp-config-host', 'gitlab.com');
+    submitConfig(root);
+    await flush();
+    expect(root.querySelector('.gp-foot-user')?.textContent).toBe('second-user');
+    panel.dispose();
+  });
+});
+
+describe('service failures', () => {
+  test('a 502 envelope from the service is a network error, not an HTTP one', async () => {
+    const host = configuredHost();
+    // The shell answers a proxy failure with 502 and an `error` envelope.
+    host.serviceHandler = (request) => {
+      if (request.path === '/config') {
+        return {
+          status: 200,
+          body: JSON.stringify({
+            config: { host: 'gitlab.com', project: '', hasToken: { 'gitlab.com': true } },
+          }),
+        };
+      }
+      return { status: 502, body: JSON.stringify({ error: 'Could not reach https://gitlab.com: boom' }) };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Could not reach GitLab');
+    expect(text(root)).not.toContain('unexpected response');
   });
 });
 
@@ -873,7 +950,7 @@ describe('session handoff', () => {
 
   test('offers the action on the failed job row and in the drawer', async () => {
     const host = configuredHost();
-    host.handler = failedRun();
+    host.gitlabHandler = failedRun();
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -886,7 +963,7 @@ describe('session handoff', () => {
 
   test('the drawer action also starts a session', async () => {
     const host = configuredHost();
-    host.handler = failedRun();
+    host.gitlabHandler = failedRun();
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -901,7 +978,7 @@ describe('session handoff', () => {
 
   test('the row keyboard handler does not hijack the action button', async () => {
     const host = configuredHost();
-    host.handler = failedRun();
+    host.gitlabHandler = failedRun();
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -914,7 +991,7 @@ describe('session handoff', () => {
 
   test('starting a session seeds it from the job, opens it and does not open the drawer', async () => {
     const host = configuredHost();
-    host.handler = failedRun();
+    host.gitlabHandler = failedRun();
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
@@ -934,7 +1011,7 @@ describe('session handoff', () => {
 
   test('a skipped send is surfaced, not silent', async () => {
     const host = configuredHost();
-    host.handler = failedRun();
+    host.gitlabHandler = failedRun();
     host.startSessionResult = { sessionId: 'ses_1', sent: 'no-model' };
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
@@ -947,7 +1024,7 @@ describe('session handoff', () => {
 
   test('a host error starting the session is surfaced', async () => {
     const host = configuredHost();
-    host.handler = failedRun();
+    host.gitlabHandler = failedRun();
     host.startSessionError = new Error('boom');
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
@@ -959,7 +1036,7 @@ describe('session handoff', () => {
 
   test('a failed log fetch blocks the handoff with a clear message', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'failed' })]) };
       }
@@ -980,12 +1057,10 @@ describe('session handoff', () => {
 
   test('is disabled with an explanation when no project is open', async () => {
     const host = new FakeHost();
-    host.handler = failedRun();
-    const { root } = await mount(
-      host,
-      new FakeTimers(),
-      readyContext({ directory: null, settings: { project: 'group/pinned' } }),
-    );
+    host.config.project = 'group/pinned';
+    host.tokens['gitlab.com'] = 'pat';
+    host.gitlabHandler = failedRun();
+    const { root } = await mount(host, new FakeTimers(), readyContext({ directory: null }));
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
 
@@ -1001,7 +1076,7 @@ describe('session handoff', () => {
 
   test('a job that did not fail offers nothing to fix', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({
+    host.gitlabHandler = handlerFor({
       pipelines: [pipeline({ id: 7, status: 'failed' })],
       jobs: [
         job({ id: 9, status: 'success' }),
@@ -1034,7 +1109,7 @@ describe('a moved project', () => {
 
   test('follows a move and shows the pipelines under the project id', async () => {
     const host = configuredHost();
-    host.handler = moveHandler();
+    host.gitlabHandler = moveHandler();
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Passed');
     expect(text(root)).toContain('gitlab.com/81');
@@ -1048,7 +1123,7 @@ describe('a moved project', () => {
     const host = configuredHost();
     // GitLab answers a pipelines request with that resource's own location, not
     // the project root: `/api/v4/projects/<id>/pipelines?per_page=…`.
-    host.handler = (request: HostRequest): HostResponse => {
+    host.gitlabHandler = (request: HostRequest): HostResponse => {
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines') {
         return {
           status: 301,
@@ -1067,7 +1142,7 @@ describe('a moved project', () => {
 
   test('a refresh reuses the healed target without following the move again', async () => {
     const host = configuredHost();
-    host.handler = moveHandler();
+    host.gitlabHandler = moveHandler();
     const { root, panel } = await mount(host, new FakeTimers());
     panel.refresh();
     await flush();
@@ -1080,7 +1155,7 @@ describe('a moved project', () => {
 
   test('a chain of redirects past the cap stops and shows a state, not a spin', async () => {
     const host = configuredHost();
-    host.handler = redirectChainHandler();
+    host.gitlabHandler = redirectChainHandler();
     const { root } = await mount(host, new FakeTimers());
     expect(pipelineRequests(host)).toHaveLength(6);
     expect(root.querySelector('.gp-row')).toBeNull();
@@ -1089,12 +1164,12 @@ describe('a moved project', () => {
 
   test('a target on another host is not followed', async () => {
     const host = configuredHost();
-    host.handler = () => ({
+    host.gitlabHandler = () => ({
       status: 301,
       body: movedTo('https://evil.example.com/api/v4/projects/81'),
     });
     const { root } = await mount(host, new FakeTimers());
-    expect(host.requests.some((request) => request.path === '/api/v4/projects/81/pipelines')).toBe(
+    expect(host.gitlabRequests.some((request) => request.path === '/api/v4/projects/81/pipelines')).toBe(
       false,
     );
     expect(root.querySelector('.gp-row')).toBeNull();
@@ -1102,13 +1177,16 @@ describe('a moved project', () => {
 
   test('a healed target does not carry over to a different project', async () => {
     const host = configuredHost();
-    host.handler = moveHandler();
-    const { panel } = await mount(host, new FakeTimers());
-    host.handler = (request: HostRequest): HostResponse =>
+    host.gitlabHandler = moveHandler();
+    const { root, panel } = await mount(host, new FakeTimers());
+    host.gitlabHandler = (request: HostRequest): HostResponse =>
       request.path === '/api/v4/projects/other%2Fproj/pipelines'
         ? { status: 200, body: JSON.stringify([pipeline({ id: 9 })]) }
         : { status: 404, body: '' };
-    host.emitReady(readyContext({ settings: { project: 'other/proj' } }));
+    openConfig(root);
+    await flush();
+    setField(root, 'gp-config-project', 'other/proj');
+    submitConfig(root);
     await flush();
     expect(pipelineRequests(host).at(-1)?.path).toBe('/api/v4/projects/other%2Fproj/pipelines');
     panel.dispose();
@@ -1116,17 +1194,17 @@ describe('a moved project', () => {
 
   test('a host switch forgets a healed target', async () => {
     const host = configuredHost();
-    host.handler = moveHandler();
-    const { panel } = await mount(host, new FakeTimers());
-    host.emitReady(
-      readyContext({
-        settings: { host: 'gitlab.example.com', token: 'pat', project: 'group/project' },
-      }),
-    );
+    host.gitlabHandler = moveHandler();
+    const { root, panel } = await mount(host, new FakeTimers());
+    host.tokens['gitlab.example.com'] = 'pat';
+    openConfig(root);
     await flush();
-    // The custom-host transport carries the GitLab path in the body, not the URL.
-    const forwarded = JSON.parse(host.serviceRequests[0]?.body ?? '{}') as { path?: string };
-    expect(forwarded.path).toBe('/api/v4/projects/group%2Fproject/pipelines');
+    setField(root, 'gp-config-host', 'gitlab.example.com');
+    setField(root, 'gp-config-project', 'group/project');
+    submitConfig(root);
+    await flush();
+    // The switched host resolves the override and forwards the GitLab path.
+    expect(pipelineRequests(host).at(-1)?.path).toBe('/api/v4/projects/group%2Fproject/pipelines');
     panel.dispose();
   });
 });
@@ -1135,7 +1213,7 @@ describe('a move that cannot be healed', () => {
 
   test('a redirect that is not a move is reported as a redirect, not a move', async () => {
     const host = configuredHost();
-    host.handler = () => ({ status: 302, body: '<html>Sign in</html>' });
+    host.gitlabHandler = () => ({ status: 302, body: '<html>Sign in</html>' });
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('GitLab redirected this request');
     expect(text(root)).not.toContain('Project moved');
@@ -1143,7 +1221,7 @@ describe('a move that cannot be healed', () => {
 
   test('a move that runs past the cap is a moved project, naming the target', async () => {
     const host = configuredHost();
-    host.handler = redirectChainHandler();
+    host.gitlabHandler = redirectChainHandler();
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Project moved');
     expect(text(root)).toContain('https://gitlab.com/api/v4/projects/6');
@@ -1152,7 +1230,7 @@ describe('a move that cannot be healed', () => {
 
   test('a move to another host is a moved project, naming the target', async () => {
     const host = configuredHost();
-    host.handler = () => ({
+    host.gitlabHandler = () => ({
       status: 301,
       body: movedTo('https://evil.example.com/api/v4/projects/81'),
     });
@@ -1163,7 +1241,7 @@ describe('a move that cannot be healed', () => {
 
   test('the moved state opens the old path in GitLab, which redirects the browser', async () => {
     const host = configuredHost();
-    host.handler = () => ({
+    host.gitlabHandler = () => ({
       status: 301,
       body: movedTo('https://evil.example.com/api/v4/projects/81'),
     });
@@ -1179,7 +1257,7 @@ describe('a move that cannot be healed', () => {
 
   test('the redirect state also offers opening the old path', async () => {
     const host = configuredHost();
-    host.handler = () => ({ status: 302, body: '<html>Sign in</html>' });
+    host.gitlabHandler = () => ({ status: 302, body: '<html>Sign in</html>' });
     const { root } = await mount(host, new FakeTimers());
     const action = Array.from(root.querySelectorAll('button')).find(
       (button) => button.textContent === 'Open in GitLab',
@@ -1195,7 +1273,7 @@ describe('the heal notice', () => {
 
   function healedHost(): FakeHost {
     const host = configuredHost();
-    host.handler = (request: HostRequest): HostResponse => {
+    host.gitlabHandler = (request: HostRequest): HostResponse => {
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines') {
         return {
           status: 301,
@@ -1231,7 +1309,7 @@ describe('the heal notice', () => {
 
   test('no heal means no notice', async () => {
     const host = configuredHost();
-    host.handler = handlerFor({ pipelines: [pipeline()] });
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).not.toContain('Showing');
   });
@@ -1276,7 +1354,7 @@ describe('downstream pipelines', () => {
 
   test('shows a Trigger row in its Stage carrying the Downstream status, and a card', async () => {
     const host = configuredHost();
-    host.handler = multiProjectHandler({
+    host.gitlabHandler = multiProjectHandler({
       pipelines: [pipeline({ id: 7 })],
       bridgesByProject: { 'group/project': [bridge({ downstream_pipeline: OTHER })] },
       jobsByProject: { 'group/project': [job({ id: 1, stage: 'build', status: 'success' })] },
@@ -1301,7 +1379,7 @@ describe('downstream pipelines', () => {
 
   test('a starting trigger shows no card, and a broken one says it could not start', async () => {
     const host = configuredHost();
-    host.handler = multiProjectHandler({
+    host.gitlabHandler = multiProjectHandler({
       pipelines: [pipeline({ id: 7 })],
       bridgesByProject: {
         'group/project': [
@@ -1321,7 +1399,7 @@ describe('downstream pipelines', () => {
 
   test('expanding a card fetches that pipeline’s Jobs and renders them by Stage', async () => {
     const host = configuredHost();
-    host.handler = multiProjectHandler({
+    host.gitlabHandler = multiProjectHandler({
       pipelines: [pipeline({ id: 7 })],
       bridgesByProject: { 'group/project': [bridge({ downstream_pipeline: OTHER })] },
       jobsByProject: {
@@ -1337,7 +1415,7 @@ describe('downstream pipelines', () => {
     await flush();
 
     expect(text(root)).toContain('e2e');
-    const requested = host.requests.some(
+    const requested = host.gitlabRequests.some(
       (request) => request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs',
     );
     expect(requested).toBe(true);
@@ -1345,7 +1423,7 @@ describe('downstream pipelines', () => {
 
   test('a nested Job opens its Trace against the downstream project in the drawer', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       }
@@ -1371,13 +1449,13 @@ describe('downstream pipelines', () => {
 
     expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('nested log line');
     expect(
-      host.requests.some((request) => request.path === '/api/v4/projects/other%2Fproject/jobs/99/trace'),
+      host.gitlabRequests.some((request) => request.path === '/api/v4/projects/other%2Fproject/jobs/99/trace'),
     ).toBe(true);
   });
 
   test('the same pipeline id in two projects resolves to the right project', async () => {
     const host = configuredHost();
-    host.handler = multiProjectHandler({
+    host.gitlabHandler = multiProjectHandler({
       pipelines: [pipeline({ id: 42, ref: 'root' })],
       bridgesByProject: {
         'group/project': [
@@ -1401,7 +1479,7 @@ describe('downstream pipelines', () => {
   test('an unreadable downstream project shows a per-card error, not "no jobs"', async () => {
     const host = configuredHost();
     let fail = true;
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
         return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };
@@ -1438,14 +1516,14 @@ describe('downstream pipelines', () => {
   test('bridges are fetched once per listed Pipeline on load, then only for active ones', async () => {
     const host = configuredHost();
     let pipelines = [pipeline({ id: 1, status: 'success' }), pipeline({ id: 2, status: 'success' })];
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify(pipelines) };
       return { status: 200, body: '[]' };
     };
     const timers = new FakeTimers();
     const { panel } = await mount(host, timers);
     const bridgePaths = () =>
-      host.requests.filter((request) => request.path.endsWith('/bridges')).map((request) => request.path);
+      host.gitlabRequests.filter((request) => request.path.endsWith('/bridges')).map((request) => request.path);
 
     // One `/bridges` per listed Pipeline on first load.
     expect(bridgePaths()).toHaveLength(2);
@@ -1468,7 +1546,7 @@ describe('downstream pipelines', () => {
 
   test('a collapsed row shows a downstream count, hidden when there is none', async () => {
     const host = configuredHost();
-    host.handler = multiProjectHandler({
+    host.gitlabHandler = multiProjectHandler({
       pipelines: [pipeline({ id: 1 }), pipeline({ id: 2 })],
       bridgesByProject: {
         'group/project': [bridge({ id: 1 }), bridge({ id: 2 })],
@@ -1482,7 +1560,7 @@ describe('downstream pipelines', () => {
 
     // A fanned-out pipeline shows its count of Trigger jobs that have a downstream.
     const host2 = configuredHost();
-    host2.handler = (request) => {
+    host2.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 1 })]) };
       if (request.path.endsWith('/bridges')) {
         return {
@@ -1502,7 +1580,7 @@ describe('downstream pipelines', () => {
 
   test('a failed bridge fetch leaves the list intact, with no count', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 1 }), pipeline({ id: 2 })]) };
       }
@@ -1519,7 +1597,7 @@ describe('downstream pipelines', () => {
     const host = configuredHost();
     let downstreamStatus = 'running';
     let upstreamStatus = 'failed';
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         // The upstream is a mirror'd failure: already settled, no active jobs of its own.
         return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: upstreamStatus, finished_at: '2026-09-30T11:52:00Z' })]) };
@@ -1557,7 +1635,7 @@ describe('downstream pipelines', () => {
       status: 'failed',
       web_url: 'https://gitlab.com/group/project/-/pipelines/55',
     });
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'failed' })]) };
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
         return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: child })]) };
@@ -1573,7 +1651,7 @@ describe('downstream pipelines', () => {
     };
     // A multi-project downstream: its failed Job renders without the affordance.
     const multiHost = configuredHost();
-    multiHost.handler = (request) => {
+    multiHost.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'failed' })]) };
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
         return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };
@@ -1606,7 +1684,7 @@ describe('downstream pipelines', () => {
 
   test('a same-project downstream is labelled "child pipeline"', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
         return {
@@ -1633,7 +1711,7 @@ describe('downstream pipelines', () => {
   test('a two-generation chain expands, and a cycle does not loop', async () => {
     // Root 7 → child 42, and 42's own bridge points back at root 7 (a cycle).
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
         return {
@@ -1685,7 +1763,7 @@ describe('downstream pipelines', () => {
     const url = (id: number) => `https://gitlab.com/group/project/-/pipelines/${id}`;
     const host = configuredHost();
     const chain: Record<number, number> = { 10: 20, 20: 30, 30: 40, 40: 50 };
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 10 })]) };
       const match = /\/pipelines\/(\d+)\/bridges$/.exec(request.path);
       if (match) {
@@ -1723,7 +1801,7 @@ describe('downstream pipelines', () => {
   test('a root whose own bridge points back at the root is not expandable', async () => {
     // Pipeline 7's Trigger job starts pipeline 7 again (same project, same id).
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
         return {
@@ -1750,7 +1828,7 @@ describe('downstream pipelines', () => {
 
   test('a poll refetches the expanded root’s Jobs exactly once', async () => {
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) {
         return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
       }
@@ -1769,17 +1847,17 @@ describe('downstream pipelines', () => {
     expect(panel.isPolling()).toBe(true);
 
     const rootJobsPath = '/api/v4/projects/group%2Fproject/pipelines/7/jobs';
-    const before = host.requests.filter((request) => request.path === rootJobsPath).length;
+    const before = host.gitlabRequests.filter((request) => request.path === rootJobsPath).length;
     timers.advance(5000);
     await flush();
-    const after = host.requests.filter((request) => request.path === rootJobsPath).length;
+    const after = host.gitlabRequests.filter((request) => request.path === rootJobsPath).length;
     expect(after - before).toBe(1);
   });
 
   test('a nested Job’s Trace keeps refreshing on the poll while it runs', async () => {
     let traceText = 'line 1';
     const host = configuredHost();
-    host.handler = (request) => {
+    host.gitlabHandler = (request) => {
       if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
       if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
         return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: OTHER })]) };

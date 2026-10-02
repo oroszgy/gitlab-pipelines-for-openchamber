@@ -11,19 +11,19 @@ land in the same commit.
 
 **Blocked by:** 02 — Service serves configuration and resolves tokens
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] With no configuration at all the Configured host is `gitlab.com`; once an Access token is entered,
+- [x] With no configuration at all the Configured host is `gitlab.com`; once an Access token is entered,
       the Panel reads that project's Pipelines.
-- [ ] The configuration form's token field is masked and the token is never rendered back.
-- [ ] Saving the form persists host, Project override and token through the service; a reload shows them,
+- [x] The configuration form's token field is masked and the token is never rendered back.
+- [x] Saving the form persists host, Project override and token through the service; a reload shows them,
       with the token only as present or absent.
-- [ ] The Panel makes no `host.request` call for GitLab; all GitLab traffic goes through the service.
-- [ ] The manifest declares no integration, no `apiOrigin` and no settings; it declares the service and
+- [x] The Panel makes no `host.request` call for GitLab; all GitLab traffic goes through the service.
+- [x] The manifest declares no integration, no `apiOrigin` and no settings; it declares the service and
       the `files` and `sessions` capabilities.
-- [ ] A project on another host reports `host-mismatch` against the Configured host.
-- [ ] The header names the Configured host and the resolved project.
-- [ ] The authenticated user is shown, resolved through the service.
-- [ ] The manifest test asserts the service, the capabilities, and the absence of an integration.
-- [ ] `package.json` version is bumped and `CHANGELOG.md` carries the matching entry in the same commit.
-- [ ] `bun run check` stays green.
+- [x] A project on another host reports `host-mismatch` against the Configured host.
+- [x] The header names the Configured host and the resolved project.
+- [x] The authenticated user is shown, resolved through the service.
+- [x] The manifest test asserts the service, the capabilities, and the absence of an integration.
+- [x] `package.json` version is bumped and `CHANGELOG.md` carries the matching entry in the same commit.
+- [x] `bun run check` stays green.

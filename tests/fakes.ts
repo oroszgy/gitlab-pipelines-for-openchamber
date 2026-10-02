@@ -1,5 +1,4 @@
 import type {
-  GuestConnection,
   GuestProject,
   GuestProjectsSnapshot,
   GuestWorktree,
@@ -17,54 +16,119 @@ export type RequestHandler = (
   callIndex: number,
 ) => HostResponse | Promise<HostResponse>;
 
-/** A host-port test double. Every read and request the panel makes is recorded. */
+function envelope(payload: unknown, status = 200): HostResponse {
+  return { status, body: JSON.stringify(payload) };
+}
+
+/**
+ * A host-port test double. Every service request the panel makes is recorded,
+ * and the fake service models the loopback service's routes (`/config`,
+ * `/token`, `/proxy`, `/git-config`) over an in-memory configuration and token
+ * store, so tests drive the Panel exactly as the real service would.
+ *
+ * A `gitlabHandler` answers the GitLab calls inside `/proxy`; `serviceHandler`
+ * overrides the whole service, for grant/failure cases. `serviceRequests` holds
+ * every service call; `gitlabRequests` holds the GitLab calls the service
+ * forwarded.
+ */
 export class FakeHost implements HostPort {
   files = new Map<string, string>();
   projects: GuestProject[] = [];
   worktrees: GuestWorktree[] = [];
-  requests: HostRequest[] = [];
   serviceRequests: HostRequest[] = [];
+  gitlabRequests: HostRequest[] = [];
   openUrls: string[] = [];
   startSessions: StartSessionRequest[] = [];
   startSessionResult: StartSessionResult = { sessionId: 'ses_1', sent: 'sent', directory: '/repo' };
   startSessionError: unknown = null;
   disposed = false;
-  handler: RequestHandler | null = null;
+
+  /** The service's stored configuration (the Configured host and Project override). */
+  config: { host: string; project: string } = { host: 'gitlab.com', project: '' };
+  /** Access tokens keyed by host, as the service holds them. */
+  tokens: Record<string, string> = {};
+  /** The authenticated username `/api/v4/user` answers with. */
+  username = 'me';
+  /** The repository config `/git-config` answers with, or null for 404. */
+  gitConfig: string | null = null;
+  /** Answers a GitLab call forwarded through `/proxy`. */
+  gitlabHandler: RequestHandler | null = null;
+  /** Overrides the whole service, for grant/failure cases. */
   serviceHandler: RequestHandler | null = null;
 
   private readonly readyListeners = new Set<(context: HostReadyContext) => void>();
-  private readonly connectionListeners = new Set<(connection: GuestConnection) => void>();
 
   onReady(listener: (context: HostReadyContext) => void): () => void {
     this.readyListeners.add(listener);
     return () => this.readyListeners.delete(listener);
   }
 
-  onConnection(listener: (connection: GuestConnection) => void): () => void {
-    this.connectionListeners.add(listener);
-    return () => this.connectionListeners.delete(listener);
-  }
-
   emitReady(context: HostReadyContext): void {
     for (const listener of [...this.readyListeners]) listener(context);
-  }
-
-  emitConnection(connection: GuestConnection): void {
-    for (const listener of [...this.connectionListeners]) listener(connection);
-  }
-
-  async request(input: HostRequest): Promise<HostResponse> {
-    const index = this.requests.length;
-    this.requests.push(input);
-    if (this.handler) return this.handler(input, index);
-    return { status: 200, body: '[]' };
   }
 
   async serviceRequest(input: HostRequest): Promise<HostResponse> {
     const index = this.serviceRequests.length;
     this.serviceRequests.push(input);
     if (this.serviceHandler) return this.serviceHandler(input, index);
-    return { status: 200, body: '[]' };
+    return this.defaultService(input);
+  }
+
+  /** The configuration the Panel sees: never a token, only presence per host. */
+  private configView(): { host: string; project: string; hasToken: Record<string, boolean> } {
+    const hasToken: Record<string, boolean> = {};
+    for (const host of Object.keys(this.tokens)) hasToken[host] = true;
+    return { host: this.config.host, project: this.config.project, hasToken };
+  }
+
+  private async defaultService(input: HostRequest): Promise<HostResponse> {
+    if (input.path === '/config') {
+      if ((input.method ?? 'GET') === 'GET') return envelope({ config: this.configView() });
+      const body = JSON.parse(input.body ?? '{}') as { host?: unknown; project?: unknown };
+      if (typeof body.host === 'string') this.config.host = body.host;
+      if (typeof body.project === 'string') this.config.project = body.project;
+      return envelope({ config: this.configView() });
+    }
+    if (input.path === '/token') {
+      const body = JSON.parse(input.body ?? '{}') as { host?: unknown; token?: unknown };
+      const host = typeof body.host === 'string' ? body.host : this.config.host;
+      if (body.token === null) delete this.tokens[host];
+      else if (typeof body.token === 'string') this.tokens[host] = body.token;
+      return envelope({ config: this.configView() });
+    }
+    if (input.path === '/git-config') {
+      if (this.gitConfig == null) return { status: 404, body: JSON.stringify({ error: 'nope' }) };
+      return envelope({ config: this.gitConfig });
+    }
+    if (input.path === '/proxy') {
+      const body = JSON.parse(input.body ?? '{}') as {
+        baseUrl?: string;
+        method?: string;
+        path?: string;
+        query?: Record<string, string>;
+      };
+      const host = (body.baseUrl ?? '').replace(/^https:\/\//, '').replace(/\/+$/, '');
+      if (!this.tokens[host]) {
+        return {
+          status: 502,
+          body: JSON.stringify({ error: 'No Access token is configured for this GitLab host.', code: 'no-token' }),
+        };
+      }
+      const request: HostRequest = {
+        method: (body.method ?? 'GET') as HostRequest['method'],
+        path: body.path ?? '/',
+        query: body.query ?? {},
+      };
+      const index = this.gitlabRequests.length;
+      this.gitlabRequests.push(request);
+      if (request.path === '/api/v4/user') {
+        return envelope({ status: 200, body: JSON.stringify({ username: this.username }) });
+      }
+      if (!this.gitlabHandler) return envelope({ status: 200, body: '[]' });
+      const response = await this.gitlabHandler(request, index);
+      return envelope({ status: response.status, body: response.body });
+    }
+    return { status: 404, body: JSON.stringify({ error: 'not found' }) };
   }
 
   async readFile(path: string): Promise<{ content: string }> {

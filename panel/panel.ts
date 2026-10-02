@@ -1,7 +1,7 @@
-import type { GuestConnection, HostReadyContext, StartSessionSent } from '@openchamber/sdk';
+import type { HostReadyContext, StartSessionSent } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
 
-import { API_ORIGIN, HOST_BODY_CAP, LOG_MAX_LINES, LIVE_TICK_MS, PANEL_ID, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH } from './config';
+import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
   canExpand,
@@ -18,7 +18,7 @@ import {
   fetchJobs,
   fetchPipelines,
   fetchTrace,
-  fromHostPort,
+  fetchUser,
   projectFromRedirectTarget,
   type ClientFailure,
   type Requester,
@@ -27,7 +27,6 @@ import { buildHandoff, isHandoffJob } from './handoff';
 import type { HostPort } from './host-port';
 import { nextPollDelay, shouldPoll } from './poll';
 import {
-  hostOfOrigin,
   isLinkedWorktree,
   resolveProject,
   samePath,
@@ -36,6 +35,14 @@ import {
   type ProjectResolution,
   type ResolveInput,
 } from './project-resolver';
+import {
+  hasToken,
+  normalizeHostInput,
+  parseConfigEnvelope,
+  parseProxyEnvelope,
+  serviceErrorMessage,
+  type ServiceConfig,
+} from './service-config';
 import { groupJobsByStage, type StageGroup } from './stage-groups';
 import { isActiveStatus, jobStatusInfo, statusInfo, type StatusInfo } from './status';
 import type { Bridge, Job, Pipeline, Scope } from './types';
@@ -58,7 +65,6 @@ export const defaultTimers: Timers = {
 };
 
 export type PanelOptions = {
-  apiOrigin: string;
   timers?: Timers;
 };
 
@@ -72,11 +78,10 @@ export type PanelHandle = {
 type Problem = {
   kind:
     | ProjectFailureKind
-    | 'disconnected'
+    | 'no-token'
     | 'unauthorized'
     | 'not-found'
-    | 'custom-host'
-    | 'custom-token'
+    | 'invalid-host'
     | 'service'
     | 'moved'
     | 'redirected';
@@ -86,7 +91,12 @@ type Problem = {
   detail?: string;
   /** An optional outbound action, e.g. opening the project in GitLab. */
   action?: { label: string; url: string };
+  /** Whether the state offers the configuration form as its fix. */
+  configure?: boolean;
 };
+
+/** A configuration write's outcome: the saved view, or the reason it failed. */
+type ConfigResult = { ok: true; config: ServiceConfig } | { ok: false; error: string };
 
 /** Redirects followed in one refresh before a move chain is treated as runaway. */
 const MAX_REDIRECT_HOPS = 5;
@@ -161,6 +171,8 @@ const CHEVRON =
   '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor"><path d="M12 13.17l4.95-4.95 1.41 1.41L12 16 5.64 9.63 7.05 8.22z"/></svg>';
 const CLOSE_ICON =
   '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor"><path d="M18.4 7.0l-1.4-1.4L12 10.6 7.0 5.6 5.6 7.0l4.9 5-4.9 5 1.4 1.4 5-4.9 5 4.9 1.4-1.4-4.9-5z"/></svg>';
+const GEAR_ICON =
+  '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="currentColor"><path d="M12 8.5A3.5 3.5 0 1 0 12 15.5 3.5 3.5 0 0 0 12 8.5zm0 5.5a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-1-2 3.4L4.6 11a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7.6 7.6 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5zM12 17a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"/></svg>';
 
 // ---------------------------------------------------------------------------
 // Tiny DOM helpers
@@ -188,15 +200,30 @@ function clearNode(node: Element): void {
 class PipelinesPanel implements PanelHandle {
   private readonly root: HTMLElement;
   private readonly port: HostPort;
-  private readonly options: PanelOptions;
   private readonly timers: Timers;
 
   private directory: string | null = null;
-  private settingsProject = '';
-  private settingsHost = '';
-  private settingsToken = '';
   private started = false;
   private disposed = false;
+
+  /** The service-owned configuration, or null until it is first read. */
+  private config: ServiceConfig | null = null;
+  /** Whether the configuration form is open. */
+  private configOpen = false;
+  /** Whether a configuration save is in flight. */
+  private configBusy = false;
+  /** The configuration form's validation or save error, if any. */
+  private configError: string | null = null;
+  /**
+   * The form's in-progress values. Kept so a background render cannot wipe a
+   * half-typed host or Project override; the token lives only here and in the
+   * input, never read back from the service.
+   */
+  private configDraft: { host: string; project: string; token: string } | null = null;
+  /** The authenticated username for the Configured host, once known. */
+  private username: string | null = null;
+  /** The host the username belongs to, so a switch re-reads it. */
+  private usernameHost: string | null = null;
 
   private scope: Scope = 'branch';
   private phase: 'init' | 'loading' | 'ready' | 'problem' = 'init';
@@ -245,18 +272,15 @@ class PipelinesPanel implements PanelHandle {
 
   private readonly handles: Array<{ dispose(): void }> = [];
   private unsubReady: (() => void) | null = null;
-  private unsubConnection: (() => void) | null = null;
 
   constructor(root: HTMLElement, port: HostPort, options: PanelOptions) {
     this.root = root;
     this.port = port;
-    this.options = options;
     this.timers = options.timers ?? defaultTimers;
   }
 
   start(): PanelHandle {
     this.unsubReady = this.port.onReady((ctx) => this.handleReady(ctx));
-    this.unsubConnection = this.port.onConnection((connection) => this.handleConnection(connection));
     this.render();
     return this;
   }
@@ -265,40 +289,66 @@ class PipelinesPanel implements PanelHandle {
 
   private handleReady(ctx: HostReadyContext): void {
     applyHostReady(ctx, document.documentElement);
-    const project = ctx.settings?.project ?? '';
-    const host = ctx.settings?.host ?? '';
-    const token = ctx.settings?.token ?? '';
-    const changed =
-      ctx.directory !== this.directory ||
-      project !== this.settingsProject ||
-      host !== this.settingsHost ||
-      token !== this.settingsToken ||
-      !this.started;
+    const changed = ctx.directory !== this.directory || !this.started;
     this.directory = ctx.directory;
-    this.settingsProject = project;
-    this.settingsHost = host;
-    this.settingsToken = token;
     if (changed) {
       this.started = true;
-      this.refresh();
+      void this.bootstrap();
     } else {
       this.render();
     }
   }
 
-  private handleConnection(connection: GuestConnection): void {
-    // Only the built-in path uses the host-injected token; a custom host
-    // authenticates with the `token` setting through the service.
-    if (this.isCustomHost()) return;
-    if (!connection.connected) {
-      this.problem = disconnectedProblem(this.configuredHost());
-      this.phase = 'problem';
-      this.resolved = null;
-      this.stopAllTimers();
+  /**
+   * Read the configuration from the service, then resolve and load. The
+   * configuration is the one source of truth for the host and the Project
+   * override; a failure to read it is a service state, never a silent default.
+   */
+  private async bootstrap(): Promise<void> {
+    this.phase = 'loading';
+    this.render();
+    const loaded = await this.loadConfig();
+    if (this.disposed) return;
+    if (!loaded) {
       this.render();
       return;
     }
-    if (this.problem?.kind === 'disconnected') this.refresh();
+    this.refresh();
+  }
+
+  /** Read the configuration; on success it becomes this Panel's view. Returns whether it loaded. */
+  private async loadConfig(): Promise<boolean> {
+    let response;
+    try {
+      response = await this.port.serviceRequest({ method: 'GET', path: SERVICE_CONFIG_PATH });
+    } catch {
+      this.showProblem(serviceProblem());
+      return false;
+    }
+    if (this.disposed) return false;
+    const config = response.status >= 200 && response.status < 300
+      ? parseConfigEnvelope(response.body)
+      : null;
+    if (!config) {
+      this.showProblem(serviceProblem());
+      return false;
+    }
+    this.applyConfig(config);
+    return true;
+  }
+
+  /** Adopt a configuration, dropping data from a previous host when it changed. */
+  private applyConfig(config: ServiceConfig): void {
+    if (config.host !== this.config?.host) this.forgetHostData();
+    this.config = config;
+  }
+
+  private showProblem(problem: Problem): void {
+    this.problem = problem;
+    this.phase = 'problem';
+    this.resolved = null;
+    this.stopAllTimers();
+    this.render();
   }
 
   // -- public controls ------------------------------------------------------
@@ -327,7 +377,6 @@ class PipelinesPanel implements PanelHandle {
     this.disposed = true;
     this.stopAllTimers();
     this.unsubReady?.();
-    this.unsubConnection?.();
     this.disposeHandles();
     clearNode(this.root);
     this.port.dispose();
@@ -337,43 +386,37 @@ class PipelinesPanel implements PanelHandle {
 
   private async runRefresh(gen: number): Promise<void> {
     this.error = null;
-    // A malformed setting, or a custom host with no token, never falls through to
-    // a fetch (and never silently falls back to the built-in host).
-    const badHost = this.hostSettingProblem();
-    if (badHost) {
-      this.problem = badHost;
-      this.phase = 'problem';
-      this.resolved = null;
-      this.forgetHostData();
-      this.stopAllTimers();
-      this.render();
-      return;
-    }
+    const config = this.config;
+    if (!config) return;
+    const host = config.host;
+
     // Drop the previous host's data only when the Configured host actually
     // changed, so an ordinary refresh keeps the list, expansion and open log.
-    const target = this.effectiveHost();
-    if (target !== this.lastHost) {
+    if (host !== this.lastHost) {
       this.forgetHostData();
-      this.lastHost = target;
+      this.lastHost = host;
     }
-    const override = this.settingsProject.trim();
+
+    const override = config.project.trim();
     if (!this.directory && !override) {
-      this.problem = problemFor({ ok: false, failure: 'no-project' }, this.effectiveHost());
-      this.phase = 'problem';
-      this.resolved = null;
-      this.stopAllTimers();
-      this.render();
+      this.showProblem(problemFor({ ok: false, failure: 'no-project' }, host));
       return;
     }
     if (this.pipelines.length === 0) this.phase = 'loading';
     this.render();
 
-    const resolution = await this.deriveProject();
+    const resolution = await this.deriveProject(host);
     if (this.disposed || gen !== this.generation) return;
     if (!resolution.ok) {
-      this.problem = problemFor(resolution, this.effectiveHost());
+      this.showProblem(problemFor(resolution, host));
+      return;
+    }
+    // A host with no Access token is its own state, distinct from a failed
+    // request: the service would refuse the call, so do not attempt it. The
+    // resolved project stays in the header so the state keeps its context.
+    if (!hasToken(config, host)) {
+      this.problem = noTokenProblem(host);
       this.phase = 'problem';
-      this.resolved = null;
       this.stopAllTimers();
       this.render();
       return;
@@ -382,22 +425,26 @@ class PipelinesPanel implements PanelHandle {
     this.derivedProject = resolution.project;
     this.redirectHops = 0;
     this.resolved = this.applyHealedProject(resolution);
+    await this.loadUsername(gen, host);
+    if (this.disposed || gen !== this.generation) return;
     await this.loadPipelines(gen, this.resolved, true);
   }
 
   /**
-   * The typed failure for the `host`/`token` settings, or null when they are
-   * usable. A setting that cannot be a base URL is a hard failure, never a
-   * silent fallback to the built-in host (US29).
+   * The authenticated user for the Configured host, read by proxying
+   * `/api/v4/user`, which doubles as a token check. Best-effort: a failure
+   * leaves the username unknown rather than blocking the list.
    */
-  private hostSettingProblem(): Problem | null {
-    const raw = this.settingsHost.trim();
-    if (raw === '') return null;
-    const base = resolveCustomBase(raw);
-    if (base == null) return customHostProblem(raw);
-    if (hostOfBase(base) === this.configuredHost()) return null; // same-host shortcut: built-in path
-    if (this.settingsToken.trim() === '') return customTokenProblem(hostOfBase(base));
-    return null;
+  private async loadUsername(gen: number, host: string): Promise<void> {
+    if (this.usernameHost === host && this.username != null) return;
+    this.usernameHost = host;
+    const result = await fetchUser(this.requester());
+    if (this.disposed || gen !== this.generation) return;
+    this.username = result.ok ? (result.data.username ?? null) : null;
+    // A failed read (expired or invalid token) is retried on the next refresh,
+    // so replacing the token updates the username without a reload.
+    if (!result.ok) this.usernameHost = null;
+    this.render();
   }
 
   /**
@@ -420,10 +467,12 @@ class PipelinesPanel implements PanelHandle {
     this.redirectHops = 0;
     this.pendingHealNotice = null;
     this.healNotice = null;
+    this.username = null;
+    this.usernameHost = null;
   }
 
-  private async deriveProject(): Promise<ProjectResolution> {
-    const override = this.settingsProject.trim();
+  private async deriveProject(host: string): Promise<ProjectResolution> {
+    const override = this.config?.project.trim() ?? '';
     const directory = this.directory;
 
     let gitConfig: string | null = null;
@@ -476,9 +525,9 @@ class PipelinesPanel implements PanelHandle {
 
     return resolveProject({
       directory,
-      // Resolve against the Configured host, not the baked one, or a custom
-      // host's own remote reads as a mismatch (ADR-0002).
-      apiOrigin: this.isCustomHost() ? (this.customBase() ?? this.options.apiOrigin) : this.options.apiOrigin,
+      // Resolve against the Configured host the service owns; the remote's host
+      // is compared against it for `host-mismatch` (ADR-0006).
+      apiOrigin: `https://${host}`,
       projectOverride: override,
       gitConfig,
       gitFile,
@@ -570,12 +619,12 @@ class PipelinesPanel implements PanelHandle {
 
   private handleFailure(failure: ClientFailure): void {
     if (
-      failure.kind === 'disconnected' ||
+      failure.kind === 'no-token' ||
       failure.kind === 'unauthorized' ||
       failure.kind === 'not-found' ||
       failure.kind === 'service'
     ) {
-      this.problem = failureProblem(failure, this.effectiveHost());
+      this.problem = failureProblem(failure, this.configuredHost());
       this.phase = 'problem';
       this.resolved = null;
       this.stopAllTimers();
@@ -621,7 +670,7 @@ class PipelinesPanel implements PanelHandle {
     target: string | null,
   ): boolean {
     if (target == null || this.redirectHops >= MAX_REDIRECT_HOPS) return false;
-    const project = projectFromRedirectTarget(target, this.effectiveHost());
+    const project = projectFromRedirectTarget(target, this.configuredHost());
     if (project == null) return false;
     this.redirectHops += 1;
     const from = this.derivedProject ?? resolution.project;
@@ -653,7 +702,7 @@ class PipelinesPanel implements PanelHandle {
 
   /** The origin a project's web page lives on, for opening a link in GitLab. */
   private webOrigin(): string {
-    return this.customBase() ?? this.options.apiOrigin.replace(/\/+$/, '');
+    return this.baseUrl().replace(/\/+$/, '');
   }
 
   private togglePipeline(id: number): void {
@@ -1030,63 +1079,137 @@ class PipelinesPanel implements PanelHandle {
 
   // -- rendering ------------------------------------------------------------
 
-  // -- transport mode -------------------------------------------------------
+  // -- configuration --------------------------------------------------------
 
-  /**
-   * A **Configured host** is either the **Built-in host** (empty setting, or one
-   * naming the built-in host) or a custom GitLab from the `host` setting. See
-   * ADR-0002.
-   */
+  /** The Configured host the service owns. */
   private configuredHost(): string {
-    return hostOfOrigin(this.options.apiOrigin);
+    return this.config?.host ?? DEFAULT_HOST;
   }
 
-  /** The base URL for a custom host, or null when the setting is unusable. */
-  private customBase(): string | null {
-    return resolveCustomBase(this.settingsHost);
+  /** The base URL for the Configured host. */
+  private baseUrl(): string {
+    return `https://${this.configuredHost()}`;
   }
 
-  /** Whether a custom host is set and usable: a valid base that is not the built-in host. */
-  private isCustomHost(): boolean {
-    const base = this.customBase();
-    if (base == null) return false;
-    return hostOfBase(base) !== this.configuredHost();
+  private openConfig(): void {
+    this.configOpen = true;
+    this.configError = null;
+    this.configDraft = {
+      host: this.config?.host ?? DEFAULT_HOST,
+      project: this.config?.project ?? '',
+      token: '',
+    };
+    this.render();
   }
 
-  /** The GitLab the Panel is actually talking to, built-in or custom. */
-  private effectiveHost(): string {
-    const base = this.customBase();
-    return base != null && this.isCustomHost() ? hostOfBase(base) : this.configuredHost();
+  private closeConfig(): void {
+    this.configOpen = false;
+    this.configError = null;
+    this.configDraft = null;
+    this.render();
   }
 
   /**
-   * The one call every GitLab fetch makes. Built-in mode uses the host request
-   * bridge (host-injected token); custom-host mode goes through the proxy
-   * service, carrying the base URL and the `token` setting in the service
-   * request's body. (Only the base URL rides in the query, for the service's
-   * logs; the token never leaves the body.)
+   * Persist the configuration form. The host and Project override go to
+   * `/config`; a non-empty Access token goes to `/token` in a second request and
+   * is never read back. A malformed host is refused here, so no request is made.
+   */
+  private async submitConfig(input: { host: string; project: string; token: string }): Promise<void> {
+    if (this.configBusy) return;
+    // An empty host clears back to the default rather than being malformed.
+    const raw = input.host.trim();
+    const host = raw === '' ? DEFAULT_HOST : normalizeHostInput(raw);
+    if (!host) {
+      this.configError = 'Enter a bare host like gitlab.example.com, or a full https:// origin.';
+      this.render();
+      return;
+    }
+    this.configBusy = true;
+    this.configError = null;
+    this.render();
+    try {
+      const saved = await this.postConfig(SERVICE_CONFIG_PATH, { host, project: input.project.trim() });
+      if (!saved.ok) {
+        this.configError = saved.error;
+        return;
+      }
+      // Adopt the saved host/override even if the token write below fails, so
+      // the Panel and the service never disagree about the host.
+      this.applyConfig(saved.config);
+      if (input.token.trim()) {
+        const stored = await this.postConfig(SERVICE_TOKEN_PATH, {
+          host,
+          token: input.token.trim(),
+        });
+        if (!stored.ok) {
+          this.configError = stored.error;
+          return;
+        }
+        this.applyConfig(stored.config);
+      }
+      this.configOpen = false;
+      this.configDraft = null;
+      this.refresh();
+    } finally {
+      this.configBusy = false;
+      this.render();
+    }
+  }
+
+  /** Clear the Access token for a host, then reload. */
+  private async clearTokenFor(host: string): Promise<void> {
+    if (this.configBusy) return;
+    this.configBusy = true;
+    this.configError = null;
+    this.render();
+    try {
+      const result = await this.postConfig(SERVICE_TOKEN_PATH, { host, token: null });
+      if (!result.ok) {
+        this.configError = result.error;
+        return;
+      }
+      this.applyConfig(result.config);
+      this.refresh();
+    } finally {
+      this.configBusy = false;
+      this.render();
+    }
+  }
+
+  private async postConfig(path: string, body: Record<string, unknown>): Promise<ConfigResult> {
+    let response;
+    try {
+      response = await this.port.serviceRequest({ method: 'POST', path, body: JSON.stringify(body) });
+    } catch (error) {
+      return { ok: false, error: serviceErrorMessage(error) };
+    }
+    const config =
+      response.status >= 200 && response.status < 300 ? parseConfigEnvelope(response.body) : null;
+    if (!config) return { ok: false, error: 'The configuration could not be saved.' };
+    return { ok: true, config };
+  }
+
+  /**
+   * The one call every GitLab fetch makes: the Proxy service resolves the
+   * Access token for the request's host and attaches it, so the Panel never
+   * holds one. Only the base URL rides in the query, for the service's logs.
    */
   private requester(): Requester {
-    const base = this.isCustomHost() ? this.customBase() : null;
-    if (base != null) {
-      const token = this.settingsToken.trim();
-      return async (request) => {
-        const response = await this.port.serviceRequest({
+    const base = this.baseUrl();
+    return async (request) => {
+      const response = await this.port.serviceRequest({
+        method: 'POST',
+        path: SERVICE_PATH,
+        query: { baseUrl: base },
+        body: JSON.stringify({
+          baseUrl: base,
           method: request.method ?? 'GET',
-          path: SERVICE_PATH,
-          query: { baseUrl: base },
-          body: JSON.stringify({
-            baseUrl: base,
-            token,
-            method: request.method ?? 'GET',
-            path: request.path,
-            query: request.query ?? {},
-          }),
-        });
-        return proxyResponse(response);
-      };
-    }
-    return fromHostPort(this.port);
+          path: request.path,
+          query: request.query ?? {},
+        }),
+      });
+      return parseProxyEnvelope(response);
+    };
   }
 
   private disposeHandles(): void {
@@ -1106,6 +1229,7 @@ class PipelinesPanel implements PanelHandle {
     this.root.append(progress);
 
     this.root.append(this.renderHeader());
+    if (this.configOpen) this.root.append(this.renderConfigForm());
     const handoffNotice = this.renderHandoffNotice();
     if (handoffNotice) this.root.append(handoffNotice);
     const healNotice = this.renderHealNotice();
@@ -1165,6 +1289,15 @@ class PipelinesPanel implements PanelHandle {
     }
     row.append(updated);
 
+    const config = el('button', 'gp-iconbtn gp-config-open');
+    config.type = 'button';
+    config.setAttribute('aria-label', 'Configure');
+    config.title = 'Configure';
+    config.innerHTML = GEAR_ICON;
+    if (this.configOpen) config.setAttribute('aria-expanded', 'true');
+    config.addEventListener('click', () => (this.configOpen ? this.closeConfig() : this.openConfig()));
+    row.append(config);
+
     const refresh = el('button', 'gp-iconbtn');
     refresh.type = 'button';
     refresh.setAttribute('aria-label', 'Refresh');
@@ -1176,11 +1309,6 @@ class PipelinesPanel implements PanelHandle {
     head.append(row);
 
     const projectPath = el('div', 'gp-project');
-    if (this.isCustomHost()) {
-      const tag = el('span', 'gp-host-tag', 'Custom host');
-      tag.dataset.mode = 'custom';
-      projectPath.append(tag);
-    }
     const pathText = el('span', 'gp-project-path');
     if (this.resolved) {
       pathText.textContent = `${this.resolved.host}/${this.resolved.project}`;
@@ -1188,11 +1316,102 @@ class PipelinesPanel implements PanelHandle {
       pathText.hidden = true;
     }
     projectPath.append(pathText);
-    if (!this.resolved && !this.isCustomHost()) projectPath.hidden = true;
+    if (!this.resolved) projectPath.hidden = true;
     head.append(projectPath);
 
     head.append(this.renderScope());
     return head;
+  }
+
+  /**
+   * The configuration form: Configured host, Project override and Access token.
+   * The token field is masked, starts empty and is posted once — the Panel never
+   * reads a token back, so an existing token shows only as a placeholder.
+   */
+  private renderConfigForm(): HTMLElement {
+    const config = this.config;
+    const host = config?.host ?? DEFAULT_HOST;
+    const tokenSet = config ? hasToken(config, host) : false;
+
+    const form = document.createElement('form');
+    form.className = 'gp-config';
+
+    const field = (labelText: string, input: HTMLInputElement): HTMLElement => {
+      const wrap = el('label', 'gp-config-field');
+      wrap.append(el('span', 'gp-config-label', labelText), input);
+      return wrap;
+    };
+
+    const draft = this.configDraft ?? { host, project: config?.project ?? '', token: '' };
+
+    const hostInput = document.createElement('input');
+    hostInput.className = 'gp-config-host';
+    hostInput.name = 'host';
+    hostInput.type = 'text';
+    hostInput.value = draft.host;
+    hostInput.placeholder = DEFAULT_HOST;
+    hostInput.addEventListener('input', () => {
+      if (this.configDraft) this.configDraft.host = hostInput.value;
+    });
+    form.append(field('Configured host', hostInput));
+
+    const projectInput = document.createElement('input');
+    projectInput.className = 'gp-config-project';
+    projectInput.name = 'project';
+    projectInput.type = 'text';
+    projectInput.value = draft.project;
+    projectInput.placeholder = 'group/project';
+    projectInput.addEventListener('input', () => {
+      if (this.configDraft) this.configDraft.project = projectInput.value;
+    });
+    form.append(field('Project override', projectInput));
+
+    const tokenInput = document.createElement('input');
+    tokenInput.className = 'gp-config-token';
+    tokenInput.name = 'token';
+    tokenInput.type = 'password';
+    tokenInput.value = draft.token;
+    tokenInput.autocomplete = 'off';
+    tokenInput.placeholder = tokenSet ? 'A token is saved' : 'read_api token';
+    tokenInput.addEventListener('input', () => {
+      if (this.configDraft) this.configDraft.token = tokenInput.value;
+    });
+    form.append(field('Access token', tokenInput));
+
+    if (this.configError) form.append(el('p', 'gp-config-error', this.configError));
+
+    const actions = el('div', 'gp-config-actions');
+    const save = el('button', 'gp-config-save');
+    save.type = 'submit';
+    save.textContent = this.configBusy ? 'Saving…' : 'Save';
+    save.disabled = this.configBusy;
+    actions.append(save);
+
+    if (tokenSet) {
+      const clear = el('button', 'gp-config-clear');
+      clear.type = 'button';
+      clear.textContent = 'Clear token';
+      clear.disabled = this.configBusy;
+      clear.addEventListener('click', () => void this.clearTokenFor(host));
+      actions.append(clear);
+    }
+
+    const cancel = el('button', 'gp-config-cancel');
+    cancel.type = 'button';
+    cancel.textContent = 'Cancel';
+    cancel.addEventListener('click', () => this.closeConfig());
+    actions.append(cancel);
+    form.append(actions);
+
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      void this.submitConfig({
+        host: hostInput.value,
+        project: projectInput.value,
+        token: tokenInput.value,
+      });
+    });
+    return form;
   }
 
   private renderScope(): HTMLElement {
@@ -1261,6 +1480,18 @@ class PipelinesPanel implements PanelHandle {
     if (problem.detail) state.append(el('p', 'gp-state-detail', problem.detail));
     if (problem.hint) state.append(el('p', 'gp-state-hint', problem.hint));
     const actions = el('div', 'gp-state-actions');
+    if (problem.configure) {
+      const configureRoot = el('div');
+      this.handles.push(
+        mountButton(configureRoot, {
+          label: 'Configure',
+          variant: 'default',
+          size: 'sm',
+          onClick: () => this.openConfig(),
+        }),
+      );
+      actions.append(configureRoot);
+    }
     if (problem.action) {
       const openRoot = el('div');
       const { label, url } = problem.action;
@@ -1666,7 +1897,7 @@ class PipelinesPanel implements PanelHandle {
   /** The one-time notice after a heal, naming the old path and the target. */
   private renderHealNotice(): HTMLElement | null {
     if (!this.healNotice) return null;
-    const host = this.effectiveHost();
+    const host = this.configuredHost();
     const { from, to } = this.healNotice;
     const notice = el('div', 'gp-notice');
     notice.setAttribute('role', 'status');
@@ -1747,11 +1978,8 @@ class PipelinesPanel implements PanelHandle {
   private renderFooter(): HTMLElement {
     const foot = el('div', 'gp-foot');
     foot.append(el('span', '', 'Read-only'));
-    if (this.isCustomHost()) {
-      // Beside the built-in Connect flow, name the mode so it is clear which
-      // credential the Panel is using.
-      foot.append(el('span', 'gp-foot-host', `Custom host: ${this.effectiveHost()}`));
-    }
+    foot.append(el('span', 'gp-foot-host', this.configuredHost()));
+    if (this.username) foot.append(el('span', 'gp-foot-user', this.username));
     return foot;
   }
 }
@@ -1779,58 +2007,6 @@ export function isAtBottom(
   threshold = 24,
 ): boolean {
   return metrics.scrollHeight - metrics.scrollTop - metrics.clientHeight <= threshold;
-}
-
-/**
- * Resolve the `host` setting to a base URL, or null when it is not usable.
- * `https://` is accepted; a bare host is taken as https; any other scheme, an
- * embedded credential or a path is a hard no — never a silent coercion, so a
- * typo cannot send the token anywhere unintended (US11/US29).
- *
- * Returns the base URL (scheme + host + optional port), e.g. `https://gitlab.example.com`.
- */
-export function resolveCustomBase(value: string): string | null {
-  const raw = value.trim();
-  if (!raw) return null;
-  if (raw.includes('://')) {
-    const scheme = raw.slice(0, raw.indexOf('://')).toLowerCase();
-    if (scheme !== 'https') return null;
-    let url: URL;
-    try {
-      url = new URL(raw);
-    } catch {
-      return null;
-    }
-    if (url.username || url.password) return null;
-    if (url.pathname !== '/' && url.pathname !== '') return null;
-    if (url.search || url.hash) return null;
-    return url.origin;
-  }
-  if (!/^[a-z0-9.-]+(:\d+)?$/i.test(raw)) return null;
-  return `https://${raw}`;
-}
-
-/** The host (with port) of a base URL, for display and comparison. */
-export function hostOfBase(base: string): string {
-  return base.replace(/^https:\/\//, '').replace(/\/+$/, '');
-}
-
-/** The proxy answers with its own envelope; turn it back into a host response. */
-function proxyResponse(response: { status: number; body: string }): { status: number; body: string } {
-  try {
-    const parsed = JSON.parse(response.body) as { status?: number; body?: string; error?: string };
-    if (typeof parsed.status === 'number') return { status: parsed.status, body: parsed.body ?? '' };
-    // The shell answers a proxy failure with a 502 envelope carrying `error`.
-    // Raise it so the client maps it to a network failure, not an HTTP one.
-    if (parsed.error) throw new Error(parsed.error);
-  } catch (error) {
-    if (error instanceof SyntaxError) {
-      // Not our envelope; fall through to the raw response shape.
-    } else {
-      throw error;
-    }
-  }
-  return { status: response.status, body: response.body };
 }
 
 /** Why the shown log is shorter than the job's trace, if it is. */
@@ -1913,11 +2089,23 @@ function problemFor(resolution: Extract<ProjectResolution, { ok: false }>, confi
   }
 }
 
-function disconnectedProblem(configuredHost: string): Problem {
+function noTokenProblem(configuredHost: string): Problem {
   return {
-    kind: 'disconnected',
-    title: 'GitLab not connected',
-    body: `No personal access token is stored for ${configuredHost}. Connect one to read pipelines.`,
+    kind: 'no-token',
+    title: 'No Access token',
+    body: `No Access token is stored for ${configuredHost}, so its pipelines cannot be read.`,
+    hint: 'Add a personal access token with the read_api scope in the configuration form.',
+    configure: true,
+  };
+}
+
+/** The Proxy service, which owns the configuration and reaches GitLab, is unavailable. */
+function serviceProblem(): Problem {
+  return {
+    kind: 'service',
+    title: 'Proxy service unavailable',
+    body: 'This extension reaches GitLab through its Proxy service, which is not running. It may not be granted yet, or it failed to start.',
+    hint: 'Open Settings → Extensions and allow this extension’s service, then refresh.',
   };
 }
 
@@ -1943,47 +2131,22 @@ function redirectedProblem(url: string | null): Problem {
   };
 }
 
-function failureProblem(failure: ClientFailure, effectiveHost: string): Problem {
-  if (failure.kind === 'disconnected') return disconnectedProblem(effectiveHost);
+function failureProblem(failure: ClientFailure, configuredHost: string): Problem {
+  if (failure.kind === 'no-token') return noTokenProblem(configuredHost);
   if (failure.kind === 'unauthorized') {
     return {
       kind: 'unauthorized',
       title: 'GitLab token rejected',
-      body: 'The stored token cannot read this project. A personal access token with the read_api scope is required.',
+      body: 'The stored Access token cannot read this project. It may be invalid or expired, or lack the read_api scope.',
+      hint: 'Replace it in the configuration form.',
+      configure: true,
     };
   }
-  if (failure.kind === 'service') {
-    return {
-      kind: 'service',
-      title: 'Proxy service unavailable',
-      body: 'The local proxy that reaches a custom GitLab host is not running. It may not be granted yet, or it failed to start.',
-      hint: 'Open Settings → Extensions and allow this extension’s service, then refresh.',
-    };
-  }
+  if (failure.kind === 'service') return serviceProblem();
   return {
     kind: 'not-found',
     title: 'Project not found',
-    body: 'GitLab could not find this project, or the token cannot see it.',
-  };
-}
-
-/** A custom host is set but its `token` setting is empty. */
-function customTokenProblem(host: string): Problem {
-  return {
-    kind: 'custom-token',
-    title: 'No token for this host',
-    body: `The Panel reaches ${host} through the proxy service and needs a personal access token for it.`,
-    hint: 'Set the “Access token” setting to a personal access token with the read_api scope.',
-  };
-}
-
-/** The `host` setting is set but is not a usable host. */
-function customHostProblem(value: string): Problem {
-  return {
-    kind: 'custom-host',
-    title: 'Invalid GitLab host',
-    body: `“${value}” is not a usable host. Enter a bare host like gitlab.example.com, or a full https:// origin.`,
-    hint: 'Fix the “GitLab host” setting, or clear it to use the built-in instance.',
+    body: 'GitLab could not find this project, or the Access token cannot see it.',
   };
 }
 
@@ -1991,9 +2154,6 @@ function customHostProblem(value: string): Problem {
  * Mount the Pipelines panel. `port` is the only host dependency; tests pass a
  * fake.
  */
-export function mountPanel(root: HTMLElement, port: HostPort, options: PanelOptions): PanelHandle {
-  return new PipelinesPanel(root, port, {
-    ...options,
-    apiOrigin: options.apiOrigin || API_ORIGIN,
-  }).start();
+export function mountPanel(root: HTMLElement, port: HostPort, options: PanelOptions = {}): PanelHandle {
+  return new PipelinesPanel(root, port, options).start();
 }

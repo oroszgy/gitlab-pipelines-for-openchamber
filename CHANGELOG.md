@@ -7,6 +7,32 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-02
+
+### Added
+
+- `gitlab.com` as the default GitLab host, so a fresh install reads a gitlab.com project with no
+  host configuration.
+- A configuration form in the Panel (Configured host, Project override, Access token) whose token
+  field is masked and posted once to the extension's Proxy service; the Panel never reads the token
+  back.
+- One Access token per host, held by the Proxy service in a `0600` file, so switching between
+  `gitlab.com` and a self-managed instance keeps each token.
+- The authenticated username, read through the Proxy service, in the Panel footer.
+
+### Changed
+
+- Every GitLab call now goes through the extension's Proxy service, which resolves and attaches the
+  Access token itself; the Panel no longer uses OpenChamber's host request bridge or connection
+  state.
+- The Extension no longer declares an Integration, so it does not appear in Settings → Integrations
+  and shows no Connect flow.
+- The Proxy service must now be granted for any GitLab access, `gitlab.com` included.
+
+### Removed
+
+- The baked-in `apiOrigin` and the `host` / `token` integration settings.
+
 ## [0.6.1] - 2026-10-01
 
 ### Fixed

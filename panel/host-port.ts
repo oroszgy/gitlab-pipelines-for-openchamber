@@ -1,6 +1,5 @@
 import { connectHost } from '@openchamber/sdk';
 import type {
-  GuestConnection,
   GuestProjectsSnapshot,
   GuestWorktreesSnapshot,
   HostReadyContext,
@@ -13,6 +12,9 @@ import type {
  * host state or call to the host is expressed here (the UI kit is a
  * presentation library, not a host API); the real adapter wraps
  * `connectHost()` and the tests substitute a fake.
+ *
+ * There is deliberately no `request` bridge: every GitLab call goes through the
+ * Proxy service, so the Panel never reaches GitLab itself. See ADR-0006.
  */
 
 export type HostRequest = {
@@ -29,8 +31,7 @@ export type HostResponse = {
 };
 
 export type HostPort = {
-  request(input: HostRequest): Promise<HostResponse>;
-  /** The local proxy service, for a custom GitLab host. */
+  /** The local Proxy service: GitLab calls, git config and the extension's configuration. */
   serviceRequest(input: HostRequest): Promise<HostResponse>;
   readFile(path: string): Promise<{ content: string }>;
   listProjects(): Promise<GuestProjectsSnapshot>;
@@ -39,7 +40,6 @@ export type HostPort = {
   startSession(request: StartSessionRequest): Promise<StartSessionResult>;
   openUrl(url: string): Promise<void>;
   onReady(listener: (context: HostReadyContext) => void): () => void;
-  onConnection(listener: (connection: GuestConnection) => void): () => void;
   dispose(): void;
 };
 
@@ -47,13 +47,6 @@ export type HostPort = {
 export function createHostPort(): HostPort {
   const host = connectHost();
   return {
-    request: (input) =>
-      host.request({
-        method: input.method ?? 'GET',
-        path: input.path,
-        ...(input.query ? { query: input.query } : {}),
-        ...(input.body != null ? { body: input.body } : {}),
-      }),
     serviceRequest: (input) =>
       host.serviceRequest({
         method: input.method ?? 'GET',
@@ -67,7 +60,6 @@ export function createHostPort(): HostPort {
     startSession: (request) => host.startSession(request),
     openUrl: (url) => host.openUrl(url),
     onReady: (listener) => host.onReady(listener),
-    onConnection: (listener) => host.onConnection(listener),
     dispose: () => host.dispose(),
   };
 }

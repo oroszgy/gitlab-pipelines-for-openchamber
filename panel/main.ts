@@ -1,4 +1,3 @@
-import { API_ORIGIN } from './config';
 import { createHostPort } from './host-port';
 import { mountPanel } from './panel';
 import { PANEL_CSS } from './styles';
@@ -13,6 +12,6 @@ const root = document.getElementById('root');
 if (root) {
   injectStyle(PANEL_CSS);
   const hostPort = createHostPort();
-  const panel = mountPanel(root, hostPort, { apiOrigin: API_ORIGIN });
+  const panel = mountPanel(root, hostPort, {});
   window.addEventListener('beforeunload', () => panel.dispose());
 }

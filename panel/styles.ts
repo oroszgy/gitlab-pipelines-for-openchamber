@@ -330,6 +330,47 @@ html { font-size: 16px !important; }
 .gp-drawer-notice { flex: 0 0 auto; padding: 6px 10px; border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-warning-text, #e0b567); font-size: 0.75rem; }
 
 .gp-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-muted, GrayText); font-size: 0.75rem; }
+.gp-foot-host { font-family: var(--oc-mono, ui-monospace, monospace); }
+.gp-foot-user { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.gp-config {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
+  background: var(--oc-muted-surface, var(--oc-hover, rgba(127, 127, 127, 0.08)));
+}
+.gp-config-field { display: flex; flex-direction: column; gap: 3px; }
+.gp-config-label { color: var(--oc-muted, GrayText); font-size: 0.75rem; }
+.gp-config input {
+  width: 100%;
+  padding: 6px 8px;
+  border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
+  border-radius: var(--oc-radius, 9px);
+  background: var(--oc-bg, Canvas);
+  color: var(--oc-fg, CanvasText);
+  font: inherit;
+  font-size: 0.8125rem;
+}
+.gp-config input:focus { outline: 2px solid var(--oc-focus, #5b8def); outline-offset: -1px; }
+.gp-config-error { margin: 0; color: var(--oc-error-text, #e08a8a); font-size: 0.75rem; }
+.gp-config-actions { display: flex; align-items: center; gap: 8px; }
+.gp-config-actions button {
+  padding: 5px 10px;
+  border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
+  border-radius: var(--oc-radius, 9px);
+  background: var(--oc-bg, Canvas);
+  color: var(--oc-fg, CanvasText);
+  font: inherit;
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.gp-config-actions button:hover { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); }
+.gp-config-actions button:disabled { opacity: 0.6; cursor: default; }
+.gp-config-save { background: var(--oc-primary, #5b8def); color: var(--oc-primary-fg, #ffffff); border-color: transparent; }
+.gp-config-clear { margin-left: auto; color: var(--oc-error-text, #e08a8a); }
 
 .gp-skel { display: flex; flex-direction: column; gap: 8px; padding: 4px 2px; }
 .gp-skel-row { display: flex; gap: 8px; }

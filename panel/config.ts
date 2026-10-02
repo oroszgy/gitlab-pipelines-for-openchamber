@@ -1,33 +1,40 @@
 /**
  * Static configuration for the panel.
  *
- * `API_ORIGIN` must match `openchamber.contributes.integration.token.apiOrigin`
- * in `package.json`: OpenChamber pins every `host.request` to that single
- * origin, so a project whose remote is on a different host is reported as
- * `host-mismatch` rather than silently called. See ADR-0001.
+ * The GitLab host is no longer baked into the manifest: the Proxy service owns
+ * the configuration, and `gitlab.com` is its default. Every GitLab call goes
+ * through the service's `/proxy` route. See ADR-0006.
  *
  * The rail/settings icon ships as `icon.svg` (a package SVG), not a Remixicon
  * name: a name outside the host's reduced palette renders blank. See
  * `docs/research/openchamber-extension-research.md` §2.3.1.
  */
 export const PANEL_ID = "gitlab-pipelines";
-export const API_ORIGIN = "https://sdlc.webcloud.ec.europa.eu";
 
-/** Pipelines requested per page. Kept modest: `host.request` caps the body at 256 000 chars. */
+/** The Configured host the service defaults to when nothing is stored. */
+export const DEFAULT_HOST = "gitlab.com";
+
+/** Pipelines requested per page. Kept modest: the service caps the body at 256 000 chars. */
 export const PER_PAGE = 20;
 
-/** The proxy service's one route. */
+/** The proxy service's route for a GitLab call. */
 export const SERVICE_PATH = "/proxy";
+
+/** The proxy service's route that reads and writes the configuration. */
+export const SERVICE_CONFIG_PATH = "/config";
+
+/** The proxy service's route that sets or clears an Access token. */
+export const SERVICE_TOKEN_PATH = "/token";
 
 /** The proxy service's route that returns a repository's git config. */
 export const SERVICE_GIT_CONFIG_PATH = "/git-config";
 
-/** Safety cap on lines rendered in the log drawer; the host also caps a response at 256 000 chars. */
+/** Safety cap on lines rendered in the log drawer; the service also caps a response at 256 000 chars. */
 export const LOG_MAX_LINES = 20_000;
 
 /**
- * The host's response-body cap (`docs/research/openchamber-extension-research.md:185`). A trace body
- * at or above this came back truncated, and the host gives no explicit signal for it.
+ * The service's response-body cap (`docs/research/openchamber-extension-research.md:185`). A trace body
+ * at or above this came back truncated, and the service gives no explicit signal for it.
  */
 export const HOST_BODY_CAP = 256_000;
 
