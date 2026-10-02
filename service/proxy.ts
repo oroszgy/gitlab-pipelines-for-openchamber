@@ -35,6 +35,9 @@ export const PROXY_BODY_MAX = 256_000;
 
 const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE'] as const;
 
+/** The refusal shared by base-URL normalization and stored-host validation. */
+export const HOST_ERROR = 'The GitLab host must be an https origin with no credentials or path.';
+
 /**
  * A base URL is accepted as a bare host or a full origin, and refused unless it
  * is `https` with no embedded credentials and no path beyond the root.
@@ -78,7 +81,7 @@ function redact(text: string, token: string): string {
 export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch): Promise<ProxyResult> {
   const origin = normalizeBaseUrl(request.baseUrl);
   if (!origin) {
-    return { ok: false, error: 'The GitLab host must be an https origin with no credentials or path.' };
+    return { ok: false, error: HOST_ERROR };
   }
   if (!METHODS.includes(request.method)) {
     return { ok: false, error: `Unsupported method ${request.method}.` };
