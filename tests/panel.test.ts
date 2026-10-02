@@ -77,12 +77,9 @@ function openConfig(root: HTMLElement): void {
   (root.querySelector('.gp-config-open') as HTMLElement).click();
 }
 
-/** Submit the configuration form, as its Save button would. */
+/** Submit the configuration form the way the sandboxed panel must: by clicking Save. */
 function submitConfig(root: HTMLElement): void {
-  const form = root.querySelector('.gp-config') as HTMLFormElement;
-  // happy-dom's Event constructor, not Node's, so the event is dispatchable.
-  const EventCtor = (form.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
-  form.dispatchEvent(new EventCtor('submit', { bubbles: true, cancelable: true }));
+  (root.querySelector('.gp-config-save') as HTMLButtonElement).click();
 }
 
 /** Set a form field's value and fire `input`, the way typing would. */
@@ -211,20 +208,28 @@ describe('a linked worktree resolved through the service', () => {
   });
 });
 
-describe('the brand mark', () => {
-  test('uses the gitlab-line glyph', async () => {
+describe('the panel header', () => {
+  test('does not repeat the host-provided title', async () => {
     const host = configuredHost();
     host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
-    const path = root.querySelector('.gp-brand-mark svg path');
-    expect(path?.getAttribute('d')?.startsWith('M5.54429')).toBe(true);
+    // The host's title bar already draws the GitLab icon and "GitLab Pipelines";
+    // the panel header must not draw them a second time.
+    expect(root.querySelector('.gp-brand, .gp-brand-mark, .gp-brand-title')).toBeNull();
+    const head = root.querySelector('.gp-head') as HTMLElement;
+    expect(text(head)).not.toContain('GitLab Pipelines');
   });
 
-  test('titles the panel with the full name', async () => {
+  test('keeps the project path and freshness on one line', async () => {
     const host = configuredHost();
     host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
-    expect(root.querySelector('.gp-brand-title')?.textContent).toBe('GitLab Pipelines');
+    const row = root.querySelector('.gp-head-row') as HTMLElement;
+    // The context (`host/project · user`) and the freshness/controls share a row.
+    expect(row.querySelector('.gp-project')).not.toBeNull();
+    expect(row.querySelector('.gp-updated')).not.toBeNull();
+    // The scope controls stay on their own row below.
+    expect(row.querySelector('.gp-scope')).toBeNull();
   });
 });
 
@@ -737,6 +742,16 @@ describe('the configuration form', () => {
     // The form closes and the Panel reloads from the new configuration.
     expect(root.querySelector('.gp-config')).toBeNull();
     expect(text(root)).toContain('gitlab.example.com/group/pinned');
+    panel.dispose();
+  });
+
+  test('Save is a button, not a native form submit the sandbox blocks', async () => {
+    const host = formHost();
+    const { root, panel } = await open(host);
+    // The panel runs with `sandbox="allow-scripts"` (no `allow-forms`), so a
+    // native submit never fires; Save must be an explicit button click.
+    expect((root.querySelector('.gp-config-save') as HTMLButtonElement).type).toBe('button');
+    expect((root.querySelector('.gp-config') as HTMLElement).tagName).not.toBe('FORM');
     panel.dispose();
   });
 

@@ -60,9 +60,6 @@ html { font-size: 16px !important; }
   border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
 }
 .gp-head-row { display: flex; align-items: center; gap: 8px; }
-.gp-brand { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-weight: 500; }
-.gp-brand-mark { display: inline-flex; flex: 0 0 auto; color: var(--oc-fg, CanvasText); }
-.gp-brand-title { letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gp-spacer { flex: 1 1 auto; }
 
 .gp-updated { display: inline-flex; align-items: center; gap: 5px; color: var(--oc-muted, GrayText); font-size: 0.75rem; white-space: nowrap; }

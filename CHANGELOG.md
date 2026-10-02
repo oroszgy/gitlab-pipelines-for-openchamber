@@ -7,6 +7,23 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-10-02
+
+### Fixed
+
+- The Panel no longer repeats the GitLab icon and “GitLab Pipelines” heading that the host’s panel
+  title bar already draws; the header keeps only the status and the Configure/Refresh controls.
+- The header context line is now a single row — `host/project · user` on the left, freshness and the
+  Configure/Refresh controls on the right — instead of two stacked rows.
+
+## [0.7.3] - 2026-10-02
+
+### Fixed
+
+- The configuration form’s Save button now saves. The panel runs in an iframe sandboxed with
+  `allow-scripts` only, so a native form submit never fired and the form sat there with no feedback;
+  Save is now an explicit button click (Enter in a field also saves).
+
 ## [0.7.2] - 2026-10-02
 
 ### Fixed
