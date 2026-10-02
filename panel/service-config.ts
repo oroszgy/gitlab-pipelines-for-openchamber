@@ -44,11 +44,6 @@ export function normalizeHostInput(value: string): string | null {
   return url.host;
 }
 
-/** The authority of a base URL, for display and comparison. */
-export function hostOfBase(base: string): string {
-  return base.replace(/^https:\/\//, '').replace(/\/+$/, '');
-}
-
 /**
  * The configuration out of a `/config` response body, or null when the body is
  * not the service's envelope. A host absent from `hasToken` has no token.

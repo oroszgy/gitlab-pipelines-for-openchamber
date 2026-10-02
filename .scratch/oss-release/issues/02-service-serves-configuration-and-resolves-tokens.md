@@ -15,8 +15,8 @@ as a fallback so the shipped Panel keeps working.
 - [x] Writing the Configured host and Project override persists them; a later read returns them.
 - [x] Setting a token stores it for the named host; clearing it removes it.
 - [x] `/proxy` resolves the token for the request's host and attaches it with no body token supplied.
-- [x] `/proxy` still works when a body token is supplied (transitional fallback), preferring the
-      configured token.
+- [x] `/proxy` no longer reads a token from the body (contracted in 06); the service attaches the
+      configured token only.
 - [x] A request for a host with no token is a typed error, never an empty result.
 - [x] A malformed or non-`https` host is refused before any call.
 - [x] The token is never logged and is stripped from any returned body or error.

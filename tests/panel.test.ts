@@ -603,7 +603,7 @@ describe('configuration through the service', () => {
       const body = JSON.parse(request.body ?? '{}') as { path?: string };
       return body.path?.endsWith('/pipelines') ?? false;
     });
-    expect(proxy?.query?.baseUrl).toBe('https://gitlab.com');
+    expect(proxy?.query?.baseUrl).toBeUndefined();
     const body = JSON.parse(proxy?.body ?? '{}') as { baseUrl?: string; path?: string; token?: unknown };
     expect(body.baseUrl).toBe('https://gitlab.com');
     expect(body.path).toBe('/api/v4/projects/group%2Fproject/pipelines');
@@ -629,6 +629,35 @@ describe('configuration through the service', () => {
     const { root } = await mount(host, new FakeTimers());
     expect(text(root)).toContain('Proxy service unavailable');
     expect(text(root)).toContain('Extensions');
+  });
+
+  test('Refresh recovers after the service is granted', async () => {
+    const host = configuredHost();
+    let ungranted = true;
+    const defaultService = (request: HostRequest): Promise<HostResponse> =>
+      FakeHost.prototype.serviceRequest.call(host, request);
+    host.serviceHandler = (request, index) => {
+      if (request.path === '/config' && ungranted) {
+        const error = new Error('no service') as Error & { code: string };
+        error.code = 'NO_SERVICE';
+        throw error;
+      }
+      host.serviceHandler = null;
+      return defaultService(request);
+    };
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Proxy service unavailable');
+
+    // Granting the service and pressing Refresh re-reads the configuration.
+    ungranted = false;
+    const refresh = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Refresh',
+    );
+    refresh?.click();
+    await flush();
+    expect(text(root)).toContain('Passed');
+    panel.dispose();
   });
 
   test('a failed proxy request is an error, not an empty list', async () => {
@@ -864,6 +893,32 @@ describe('configuration states and host switching', () => {
     timers.advance(5000);
     await flush();
     expect((root.querySelector('.gp-config-project') as HTMLInputElement).value).toBe('typed/override');
+    panel.dispose();
+  });
+
+  test('switching to a host with no token never shows the old host resolution', async () => {
+    const host = new FakeHost();
+    host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n');
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    host.tokens['gitlab.com'] = 'pat';
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('gitlab.com/group/project');
+
+    // Switch to a host with no token and a Project override, so the new host
+    // resolves a project even though the checkout's remote no longer matches.
+    openConfig(root);
+    await flush();
+    setField(root, 'gp-config-host', 'other.example.com');
+    setField(root, 'gp-config-project', 'group/project');
+    submitConfig(root);
+    await flush();
+    expect(text(root)).toContain('No Access token');
+    // The header names the new Configured host, not the one the data came from.
+    expect(text(root)).toContain('other.example.com/group/project');
+    expect(text(root)).not.toContain('gitlab.com/group/project');
     panel.dispose();
   });
 

@@ -76,12 +76,12 @@ export type PanelHandle = {
 };
 
 type Problem = {
+  /** Config-write state flows through `gp-config-error`; no Panel-wide kind. */
   kind:
     | ProjectFailureKind
     | 'no-token'
     | 'unauthorized'
     | 'not-found'
-    | 'invalid-host'
     | 'service'
     | 'moved'
     | 'redirected';
@@ -355,6 +355,13 @@ class PipelinesPanel implements PanelHandle {
 
   refresh(): void {
     if (this.disposed) return;
+    // Before the first successful configuration read there is nothing to
+    // resolve against, so retry the read itself — this is what makes the
+    // service state's Refresh recover after a grant.
+    if (!this.config) {
+      void this.bootstrap();
+      return;
+    }
     const gen = ++this.generation;
     void this.runRefresh(gen);
   }
@@ -411,9 +418,13 @@ class PipelinesPanel implements PanelHandle {
       this.showProblem(problemFor(resolution, host));
       return;
     }
+    this.problem = null;
+    this.derivedProject = resolution.project;
+    this.redirectHops = 0;
+    this.resolved = this.applyHealedProject(resolution);
     // A host with no Access token is its own state, distinct from a failed
     // request: the service would refuse the call, so do not attempt it. The
-    // resolved project stays in the header so the state keeps its context.
+    // freshly resolved project stays in the header so the state has context.
     if (!hasToken(config, host)) {
       this.problem = noTokenProblem(host);
       this.phase = 'problem';
@@ -421,10 +432,6 @@ class PipelinesPanel implements PanelHandle {
       this.render();
       return;
     }
-    this.problem = null;
-    this.derivedProject = resolution.project;
-    this.redirectHops = 0;
-    this.resolved = this.applyHealedProject(resolution);
     await this.loadUsername(gen, host);
     if (this.disposed || gen !== this.generation) return;
     await this.loadPipelines(gen, this.resolved, true);
@@ -1200,7 +1207,6 @@ class PipelinesPanel implements PanelHandle {
       const response = await this.port.serviceRequest({
         method: 'POST',
         path: SERVICE_PATH,
-        query: { baseUrl: base },
         body: JSON.stringify({
           baseUrl: base,
           method: request.method ?? 'GET',
