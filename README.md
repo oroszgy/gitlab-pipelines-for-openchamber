@@ -4,7 +4,7 @@ A read-only [OpenChamber](https://openchamber.dev) extension that shows the GitL
 the project you have open — its Jobs by Stage, each Job's Trace in a log drawer, and the Downstream
 pipelines its Trigger jobs start — without leaving the workspace.
 
-![the Pipelines panel](icon.svg)
+![the GitLab Pipelines panel](icon.svg)
 
 ## Install
 
@@ -35,7 +35,7 @@ One Access token is kept **per host**, so switching between `gitlab.com` and a s
 does not lose either token. The form's **Configured host** also decides `host-mismatch`: a project
 whose remote points at another GitLab is reported rather than silently read.
 
-A correct token is confirmed by the username shown in the panel footer.
+A correct token is confirmed by the username shown in the panel header.
 
 ## Security
 

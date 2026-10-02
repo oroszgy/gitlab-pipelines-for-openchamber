@@ -7,6 +7,22 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.7.2] - 2026-10-02
+
+### Fixed
+
+- The “Different GitLab host” state now points at the Configured host — which is the real fix —
+  instead of the Project setting, and offers a Configure button that opens the form with the
+  detected host pre-filled.
+
+## [0.7.1] - 2026-10-02
+
+### Changed
+
+- The extension now shows as "GitLab Pipelines" in the rail, the document title and the panel header,
+  and the authenticated username appears in the header instead of the footer.
+- The Configure control uses a standard settings (cog) icon.
+
 ## [0.7.0] - 2026-10-02
 
 ### Added

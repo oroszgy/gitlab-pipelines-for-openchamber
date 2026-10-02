@@ -93,6 +93,8 @@ type Problem = {
   action?: { label: string; url: string };
   /** Whether the state offers the configuration form as its fix. */
   configure?: boolean;
+  /** The Configured host to pre-fill when the Configure button opens the form. */
+  configureHost?: string;
 };
 
 /** A configuration write's outcome: the saved view, or the reason it failed. */
@@ -171,8 +173,9 @@ const CHEVRON =
   '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor"><path d="M12 13.17l4.95-4.95 1.41 1.41L12 16 5.64 9.63 7.05 8.22z"/></svg>';
 const CLOSE_ICON =
   '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor"><path d="M18.4 7.0l-1.4-1.4L12 10.6 7.0 5.6 5.6 7.0l4.9 5-4.9 5 1.4 1.4 5-4.9 5 4.9 1.4-1.4-4.9-5z"/></svg>';
+/** Heroicons `cog-6-tooth` (solid): a standard settings gear with a punched-out centre. */
 const GEAR_ICON =
-  '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="currentColor"><path d="M12 8.5A3.5 3.5 0 1 0 12 15.5 3.5 3.5 0 0 0 12 8.5zm0 5.5a2 2 0 1 1 0-4 2 2 0 0 1 0 4z"/><path d="M19.4 13a7.6 7.6 0 0 0 0-2l2-1.5-2-3.4-2.3 1a7.6 7.6 0 0 0-1.7-1l-.3-2.5h-4l-.3 2.5a7.6 7.6 0 0 0-1.7 1l-2.3-1-2 3.4L4.6 11a7.6 7.6 0 0 0 0 2l-2 1.5 2 3.4 2.3-1a7.6 7.6 0 0 0 1.7 1l.3 2.5h4l.3-2.5a7.6 7.6 0 0 0 1.7-1l2.3 1 2-3.4-2-1.5zM12 17a5 5 0 1 1 0-10 5 5 0 0 1 0 10z"/></svg>';
+  '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z"/></svg>';
 
 // ---------------------------------------------------------------------------
 // Tiny DOM helpers
@@ -1098,11 +1101,11 @@ class PipelinesPanel implements PanelHandle {
     return `https://${this.configuredHost()}`;
   }
 
-  private openConfig(): void {
+  private openConfig(host?: string): void {
     this.configOpen = true;
     this.configError = null;
     this.configDraft = {
-      host: this.config?.host ?? DEFAULT_HOST,
+      host: host ?? this.config?.host ?? DEFAULT_HOST,
       project: this.config?.project ?? '',
       token: '',
     };
@@ -1278,7 +1281,7 @@ class PipelinesPanel implements PanelHandle {
     const brand = el('span', 'gp-brand');
     const mark = el('span', 'gp-brand-mark');
     mark.innerHTML = GITLAB_LINE;
-    brand.append(mark, el('span', 'gp-brand-title', 'Pipelines'));
+    brand.append(mark, el('span', 'gp-brand-title', 'GitLab Pipelines'));
     row.append(brand, el('span', 'gp-spacer'));
 
     const updated = el('span', 'gp-updated');
@@ -1322,6 +1325,7 @@ class PipelinesPanel implements PanelHandle {
       pathText.hidden = true;
     }
     projectPath.append(pathText);
+    if (this.username) projectPath.append(el('span', 'gp-head-user', this.username));
     if (!this.resolved) projectPath.hidden = true;
     head.append(projectPath);
 
@@ -1493,7 +1497,7 @@ class PipelinesPanel implements PanelHandle {
           label: 'Configure',
           variant: 'default',
           size: 'sm',
-          onClick: () => this.openConfig(),
+          onClick: () => this.openConfig(problem.configureHost),
         }),
       );
       actions.append(configureRoot);
@@ -1984,8 +1988,6 @@ class PipelinesPanel implements PanelHandle {
   private renderFooter(): HTMLElement {
     const foot = el('div', 'gp-foot');
     foot.append(el('span', '', 'Read-only'));
-    foot.append(el('span', 'gp-foot-host', this.configuredHost()));
-    if (this.username) foot.append(el('span', 'gp-foot-user', this.username));
     return foot;
   }
 }
@@ -2082,16 +2084,21 @@ function problemFor(resolution: Extract<ProjectResolution, { ok: false }>, confi
       if (resolution.detectedRef) problem.detail = `Current ref: ${resolution.detectedRef}`;
       return problem;
     }
-    case 'host-mismatch':
+    case 'host-mismatch': {
+      const detected = resolution.detectedHost ?? 'another host';
       return {
         kind: 'host-mismatch',
         title: 'Different GitLab host',
-        body: `This remote points at ${resolution.detectedHost}, but this extension only talks to ${configuredHost}.`,
+        body: resolution.detectedHost
+          ? `This remote points at ${detected}, but the Configured host is ${configuredHost}. To read this project, set Configured host to ${detected} and add an Access token for it.`
+          : `This remote points at ${detected}, but the Configured host is ${configuredHost}. To read this project, set Configured host to the remote’s GitLab host and add an Access token for it.`,
         detail: resolution.detectedPath
-          ? `${resolution.detectedHost}/${resolution.detectedPath}`
-          : resolution.detectedHost,
-        hint: 'Set the “Project” setting to a project path on this extension’s GitLab host.',
+          ? `${detected}/${resolution.detectedPath}`
+          : detected,
+        configure: true,
+        configureHost: resolution.detectedHost,
       };
+    }
   }
 }
 

@@ -219,6 +219,13 @@ describe('the brand mark', () => {
     const path = root.querySelector('.gp-brand-mark svg path');
     expect(path?.getAttribute('d')?.startsWith('M5.54429')).toBe(true);
   });
+
+  test('titles the panel with the full name', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root } = await mount(host, new FakeTimers());
+    expect(root.querySelector('.gp-brand-title')?.textContent).toBe('GitLab Pipelines');
+  });
 });
 
 describe('pipeline list', () => {
@@ -616,7 +623,7 @@ describe('configuration through the service', () => {
     host.username = 'octocat';
     host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root } = await mount(host, new FakeTimers());
-    expect(root.querySelector('.gp-foot-user')?.textContent).toBe('octocat');
+    expect(root.querySelector('.gp-head-user')?.textContent).toBe('octocat');
   });
 
   test('an ungranted service is a service state pointing at Settings', async () => {
@@ -830,6 +837,31 @@ describe('configuration states and host switching', () => {
     expect(text(root)).toContain('gitlab.com');
   });
 
+  test('host-mismatch offers Configure and pre-fills the detected host', async () => {
+    const host = configuredHost();
+    host.files.set(
+      '.git/config',
+      '[remote "origin"]\n\turl = git@gitlab.example.com:group/project.git\n',
+    );
+    host.gitlabHandler = handlerFor({});
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('Different GitLab host');
+    // The fix names the Configured host, not the Project setting it used to.
+    expect(text(root)).toContain('set Configured host to gitlab.example.com');
+    expect(text(root)).not.toContain('extension only talks to');
+    expect(text(root)).not.toContain('on this extension’s GitLab host');
+    const configure = Array.from(root.querySelectorAll('button')).find(
+      (button) => button.textContent === 'Configure',
+    );
+    expect(configure).toBeDefined();
+    configure?.click();
+    await flush();
+    expect((root.querySelector('.gp-config-host') as HTMLInputElement).value).toBe(
+      'gitlab.example.com',
+    );
+    panel.dispose();
+  });
+
   test('the Project override is used instead of the derived project', async () => {
     const host = new FakeHost();
     host.config.project = 'group/pinned';
@@ -958,7 +990,7 @@ describe('configuration states and host switching', () => {
     host.username = 'first-user';
     host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
     const { root, panel } = await mount(host, new FakeTimers());
-    expect(root.querySelector('.gp-foot-user')?.textContent).toBe('first-user');
+    expect(root.querySelector('.gp-head-user')?.textContent).toBe('first-user');
 
     // Move both the remote and the Configured host to gitlab.com.
     host.files.set('.git/config', '[remote "origin"]\n\turl = git@gitlab.com:group/project.git\n');
@@ -968,7 +1000,7 @@ describe('configuration states and host switching', () => {
     setField(root, 'gp-config-host', 'gitlab.com');
     submitConfig(root);
     await flush();
-    expect(root.querySelector('.gp-foot-user')?.textContent).toBe('second-user');
+    expect(root.querySelector('.gp-head-user')?.textContent).toBe('second-user');
     panel.dispose();
   });
 });

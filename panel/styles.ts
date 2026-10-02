@@ -60,9 +60,9 @@ html { font-size: 16px !important; }
   border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
 }
 .gp-head-row { display: flex; align-items: center; gap: 8px; }
-.gp-brand { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
-.gp-brand-mark { display: inline-flex; color: var(--oc-fg, CanvasText); }
-.gp-brand-title { letter-spacing: 0.01em; }
+.gp-brand { display: inline-flex; align-items: center; gap: 6px; min-width: 0; font-weight: 500; }
+.gp-brand-mark { display: inline-flex; flex: 0 0 auto; color: var(--oc-fg, CanvasText); }
+.gp-brand-title { letter-spacing: 0.01em; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .gp-spacer { flex: 1 1 auto; }
 
 .gp-updated { display: inline-flex; align-items: center; gap: 5px; color: var(--oc-muted, GrayText); font-size: 0.75rem; white-space: nowrap; }
@@ -89,6 +89,8 @@ html { font-size: 16px !important; }
 
 .gp-project { display: flex; min-width: 0; }
 .gp-project-path {
+  flex: 1 1 auto;
+  min-width: 0;
   color: var(--oc-muted, GrayText);
   font-family: var(--oc-mono, ui-monospace, monospace);
   font-size: 0.75rem;
@@ -97,6 +99,13 @@ html { font-size: 16px !important; }
   text-overflow: ellipsis;
 }
 .gp-project-path[hidden] { display: none; }
+.gp-head-user {
+  flex: 0 0 auto;
+  color: var(--oc-muted, GrayText);
+  font-size: 0.75rem;
+  white-space: nowrap;
+}
+.gp-head-user::before { content: '·'; margin: 0 6px; }
 
 .gp-scope { display: flex; align-items: center; gap: 8px; }
 .gp-scope[hidden] { display: none; }
@@ -330,8 +339,6 @@ html { font-size: 16px !important; }
 .gp-drawer-notice { flex: 0 0 auto; padding: 6px 10px; border-bottom: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-warning-text, #e0b567); font-size: 0.75rem; }
 
 .gp-foot { flex: 0 0 auto; display: flex; align-items: center; gap: 6px; padding: 6px 10px; border-top: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35)); color: var(--oc-muted, GrayText); font-size: 0.75rem; }
-.gp-foot-host { font-family: var(--oc-mono, ui-monospace, monospace); }
-.gp-foot-user { margin-left: auto; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 .gp-config {
   flex: 0 0 auto;

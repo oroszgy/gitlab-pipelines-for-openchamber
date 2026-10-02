@@ -33,3 +33,6 @@ whole-file reformat in a diff is a mistake, not a preference.
 
 - **Use `GLOSSARY.md` terms**, and avoid their `_Avoid_` synonyms (e.g. say _Job_, not _task_; _Trace_,
   not _log output_; _Ref_, not _branch_).
+- **The extension is "GitLab Pipelines"** — always with a capital `L`, matching GitLab's own brand. That
+  exact name is the manifest `panel.name`, the panel document title and the in-panel header title; the
+  short "Pipelines" is only for prose that already names the extension.

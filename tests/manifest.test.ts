@@ -25,11 +25,11 @@ describe('package manifest', () => {
     expect(parsed.manifest.apiVersion).toBe(1);
   });
 
-  test('declares the Pipelines panel', () => {
+  test('declares the GitLab Pipelines panel', () => {
     if (!parsed.ok) throw new Error('manifest did not parse');
     const panel = parsed.manifest.contributes.panel;
     expect(panel.id).toBe(PANEL_ID);
-    expect(panel.name).toBe('Pipelines');
+    expect(panel.name).toBe('GitLab Pipelines');
     expect(panel.icon).toBe('icon.svg');
     expect(panel.entry).toBe('panel/index.html');
   });
