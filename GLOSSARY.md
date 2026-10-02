@@ -16,11 +16,6 @@ _Avoid_: plugin, add-on, connector, guest (that is OpenChamber's internal name)
 The sandboxed iframe on OpenChamber's right-hand rail where an extension's UI runs.
 _Avoid_: widget, view, tab
 
-**Integration**:
-The manifest block declaring an extension's relationship to one external service: its authentication
-scheme, the single origin it may call, and its user settings.
-_Avoid_: connector, account, provider
-
 **Pipeline**:
 A single GitLab CI/CD run against one ref at one commit, identified by a global `id` and a
 per-project `iid`.
@@ -68,9 +63,8 @@ GitLab's lifecycle state for a pipeline or job (`created`, `pending`, `running`,
 _Avoid_: state, result
 
 **Self-managed**:
-A GitLab instance hosted on its own domain rather than on `gitlab.com`. Because an extension's
-`apiOrigin` is a static manifest field, supporting one is a deliberate design decision, not a config
-detail.
+A GitLab instance hosted on its own domain rather than on `gitlab.com`. It is a value of the same
+Configured-host setting that holds `gitlab.com`.
 _Avoid_: on-prem, private
 
 **Linked worktree**:
@@ -83,20 +77,26 @@ way to read its pipelines.
 _Avoid_: secondary checkout, submodule (a different thing)
 
 **Proxy service**:
-The extension's host-runtime process, used to reach what the sandboxed Panel cannot: a custom GitLab
-host, and the primary repository of a **Linked worktree**. The Panel sends it a request over a loopback
-socket; it runs with the user's rights, so the install shows a service grant.
+The Extension's host-runtime process: it owns the Extension's configuration and performs every GitLab
+HTTPS call and the **Linked worktree**'s git-config read. The sandboxed Panel cannot hold a token or
+reach outside the open project, so it asks the service over a loopback socket; the service runs with the
+user's rights, so the install shows a service grant.
 _Avoid_: backend, daemon
 
-**Built-in host**:
-The single GitLab origin baked into the Extension's manifest (`apiOrigin`). Requests to it go over the
-host's request bridge with the host-injected token, which never reaches the Panel.
-_Avoid_: default instance, primary host
-
 **Configured host**:
-The GitLab host the Panel resolves a project against: the built-in host by default, or the `host`
-setting when one is set. A project whose remote is on any other host is `host-mismatch`.
+The GitLab host the Panel talks to for the open project, held in the Extension's configuration and
+defaulting to `gitlab.com`. A project whose remote is on any other host is `host-mismatch`.
 _Avoid_: target host, base URL
+
+**Access token**:
+A GitLab personal access token the Extension reads a host with. The **Proxy service** holds one per
+host and attaches it to its own requests; the Panel never sees it.
+_Avoid_: PAT, credential
+
+**Project override**:
+The GitLab project the Panel reads, set by hand in the Extension's configuration, for an open project
+whose git remote does not resolve to one.
+_Avoid_: pinned project, project setting
 
 **Moved project**:
 A GitLab project whose location has changed — renamed, or transferred to another namespace — so the path the Panel holds for it no longer resolves. GitLab does not serve the old path; it names the project's new location, and the project keeps its identity across the move.

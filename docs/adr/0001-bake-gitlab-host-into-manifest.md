@@ -1,8 +1,9 @@
 # Bake the GitLab host into the manifest; support one instance
 
-> **Superseded by [ADR-0002](0002-service-transport-for-custom-hosts.md) for custom hosts.** The
-> built-in host still works as described here; a host set in the `host` setting is reached through the
-> service transport instead.
+> **Superseded by [ADR-0006](0006-gitlab-com-default-and-service-owned-config.md).** There is no
+> built-in host any more: `gitlab.com` is the default Configured host and every host, it included, is
+> reached through the service. This ADR is kept for why the single-origin transport was chosen, which
+> ADR-0002 then extended and ADR-0006 reverses.
 
 OpenChamber's `integration.token.apiOrigin` is a static string in the manifest, so an extension can
 reach exactly one origin. We need a self-managed GitLab. Rather than add a local `service` to reach an

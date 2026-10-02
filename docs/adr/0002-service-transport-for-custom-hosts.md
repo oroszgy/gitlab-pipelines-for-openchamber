@@ -1,5 +1,9 @@
 # Add a local service transport for a runtime GitLab host
 
+> **Superseded by [ADR-0006](0006-gitlab-com-default-and-service-owned-config.md).** The built-in/proxy
+> split no longer exists: the manifest declares no integration, and the service owns configuration and
+> tokens for every host. This ADR is kept for why a runtime host needed a service at all.
+
 ADR-0001 baked a single GitLab host into `integration.token.apiOrigin` and accepted that the extension
 works against exactly one instance. The requirement has changed: the extension should reach any
 self-managed GitLab, one host at a time, without a rebuild. Nothing in the shipped OpenChamber SDK

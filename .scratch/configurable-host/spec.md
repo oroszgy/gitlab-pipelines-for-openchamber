@@ -1,6 +1,6 @@
 # Spec: A configurable GitLab host
 
-Status: ready-for-agent
+Status: superseded by [`.scratch/oss-release/spec.md`](../oss-release/spec.md) — the built-in/proxy split is replaced by service-owned configuration with `gitlab.com` as the default host.
 Feature: `configurable-host`
 
 ## Problem Statement
