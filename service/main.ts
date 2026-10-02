@@ -1,22 +1,34 @@
 /**
  * The proxy service's loopback shell. A thin wrapper around the pure handlers:
  * it reads the host-issued port and bearer, enforces the bearer on every
- * request, and delegates to `handleProxy` and `resolveGitConfig`. It holds no
- * GitLab knowledge.
+ * request, and delegates to `handleProxy`, `resolveGitConfig` and the
+ * configuration routes. It holds no GitLab knowledge.
  *
  * Contract: `@openchamber/sdk/GUEST_SERVICES.md` — bind 127.0.0.1 on
  * `OPENCHAMBER_SERVICE_PORT`, require `Authorization: Bearer
  * <OPENCHAMBER_SERVICE_TOKEN>` on every request including health, and answer
- * one health route, one git-config route and one proxy route.
+ * one health route, one git-config route, one configuration route, one token
+ * route and one proxy route.
  */
-import { readFile, stat } from 'node:fs/promises';
+import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { configPath, type ConfigFs } from './config';
 import { resolveGitConfig, type GitConfigFs } from './git-config';
-import { handleProxy, type ProxyRequest } from './proxy';
+import {
+  proxyWithConfig,
+  readConfigRoute,
+  writeConfigRoute,
+  writeTokenRoute,
+  type ProxyRouteRequest,
+} from './routes';
 
 const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT ?? 0);
 const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
-const GIT_CONFIG_PATH = '/git-config';
+const CONFIG_PATH = configPath(process.env);
+const GIT_CONFIG_ROUTE = '/git-config';
+const CONFIG_ROUTE = '/config';
+const TOKEN_ROUTE = '/token';
+const PROXY_ROUTE = '/proxy';
 
 const gitConfigFs: GitConfigFs = {
   async stat(path) {
@@ -30,6 +42,16 @@ const gitConfigFs: GitConfigFs = {
     }
   },
   readFile: (path) => readFile(path, 'utf8'),
+};
+
+/** The configuration store's filesystem, over real node fs. */
+const configFs: ConfigFs = {
+  readFile: (path) => readFile(path, 'utf8'),
+  writeFile: (path, content, mode) => writeFile(path, content, { mode }),
+  chmod: (path, mode) => chmod(path, mode),
+  async mkdir(path) {
+    await mkdir(path, { recursive: true });
+  },
 };
 
 function authorized(request: IncomingMessage): boolean {
@@ -47,6 +69,16 @@ async function readBody(request: IncomingMessage): Promise<string> {
   return Buffer.concat(chunks).toString('utf8');
 }
 
+/** Parse a JSON request body, or `null` when it is not a JSON object. */
+async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
+  try {
+    const parsed = JSON.parse(await readBody(request)) as unknown;
+    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}
+
 const server = createServer((request, response) => {
   void (async () => {
     if (!authorized(request)) {
@@ -58,7 +90,41 @@ const server = createServer((request, response) => {
       send(response, 200, '{"status":"ok"}');
       return;
     }
-    if (url.pathname === GIT_CONFIG_PATH) {
+    if (url.pathname === CONFIG_ROUTE) {
+      if (request.method === 'GET') {
+        send(response, 200, JSON.stringify({ config: await readConfigRoute(configFs, CONFIG_PATH) }));
+        return;
+      }
+      const body = await readJson(request);
+      if (!body) {
+        send(response, 400, '{"error":"invalid request body"}');
+        return;
+      }
+      const result = await writeConfigRoute(configFs, CONFIG_PATH, body);
+      if (!result.ok) {
+        send(response, 400, JSON.stringify({ error: result.error }));
+        return;
+      }
+      send(response, 200, JSON.stringify({ config: result.view }));
+      return;
+    }
+    if (url.pathname === TOKEN_ROUTE) {
+      const body = await readJson(request);
+      if (!body) {
+        send(response, 400, '{"error":"invalid request body"}');
+        return;
+      }
+      const result = await writeTokenRoute(configFs, CONFIG_PATH, body);
+      if (!result.ok) {
+        send(response, 400, JSON.stringify({ error: result.error }));
+        return;
+      }
+      send(response, 200, JSON.stringify({ config: result.view }));
+      return;
+    }
+    if (url.pathname === GIT_CONFIG_ROUTE) {
+      // Unchanged from before the configuration routes: parse the body
+      // directly, so this route's contract stays as ADR-0005 froze it.
       let body: { directory?: unknown };
       try {
         body = JSON.parse(await readBody(request)) as { directory?: unknown };
@@ -75,21 +141,19 @@ const server = createServer((request, response) => {
       send(response, 200, JSON.stringify({ config: result.config }));
       return;
     }
-    if (url.pathname !== '/proxy') {
+    if (url.pathname !== PROXY_ROUTE) {
       send(response, 404, '{"error":"not found"}');
       return;
     }
-    let proxyRequest: ProxyRequest;
-    try {
-      proxyRequest = JSON.parse(await readBody(request)) as ProxyRequest;
-    } catch {
+    const body = await readJson(request);
+    if (!body) {
       send(response, 400, '{"error":"invalid request body"}');
       return;
     }
-    const result = await handleProxy(proxyRequest, fetch);
+    const result = await proxyWithConfig(configFs, CONFIG_PATH, body as ProxyRouteRequest, fetch);
     if (!result.ok) {
-      // The error is already redacted of the token by the handler.
-      send(response, 502, JSON.stringify({ error: result.error }));
+      // The error is already redacted of any token by the handler.
+      send(response, 502, JSON.stringify({ error: result.error, ...(result.code ? { code: result.code } : {}) }));
       return;
     }
     send(response, 200, JSON.stringify({ status: result.status, body: result.body, truncated: result.truncated }));

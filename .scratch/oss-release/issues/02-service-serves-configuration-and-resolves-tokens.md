@@ -9,17 +9,17 @@ as a fallback so the shipped Panel keeps working.
 
 **Blocked by:** 01 — Service configuration module
 
-**Status:** ready-for-agent
+**Status:** done
 
-- [ ] The read route never returns a token, only whether one exists per host.
-- [ ] Writing the Configured host and Project override persists them; a later read returns them.
-- [ ] Setting a token stores it for the named host; clearing it removes it.
-- [ ] `/proxy` resolves the token for the request's host and attaches it with no body token supplied.
-- [ ] `/proxy` still works when a body token is supplied (transitional fallback), preferring the
+- [x] The read route never returns a token, only whether one exists per host.
+- [x] Writing the Configured host and Project override persists them; a later read returns them.
+- [x] Setting a token stores it for the named host; clearing it removes it.
+- [x] `/proxy` resolves the token for the request's host and attaches it with no body token supplied.
+- [x] `/proxy` still works when a body token is supplied (transitional fallback), preferring the
       configured token.
-- [ ] A request for a host with no token is a typed error, never an empty result.
-- [ ] A malformed or non-`https` host is refused before any call.
-- [ ] The token is never logged and is stripped from any returned body or error.
-- [ ] Every route, health included, still requires the host-issued bearer and binds only loopback.
-- [ ] Service tests cover the configuration routes and the token-resolving proxy through the pure
+- [x] A request for a host with no token is a typed error, never an empty result.
+- [x] A malformed or non-`https` host is refused before any call.
+- [x] The token is never logged and is stripped from any returned body or error.
+- [x] Every route, health included, still requires the host-issued bearer and binds only loopback.
+- [x] Service tests cover the configuration routes and the token-resolving proxy through the pure
       handlers; `bun run check` stays green.
