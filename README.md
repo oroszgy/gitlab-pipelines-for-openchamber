@@ -1,10 +1,8 @@
-# GitLab Pipelines for OpenChamber
+# <picture><source media="(prefers-color-scheme: dark)" srcset="icon-dark.svg"><img src="icon.svg" alt="" width="32" height="32"></picture> GitLab Pipelines for OpenChamber
 
 A read-only [OpenChamber](https://openchamber.dev) extension that shows the GitLab CI/CD Pipelines of
 the project you have open — its Jobs by Stage, each Job's Trace in a log drawer, and the Downstream
 pipelines its Trigger jobs start — without leaving the workspace.
-
-![the GitLab Pipelines panel](icon.svg)
 
 ## Install
 
