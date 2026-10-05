@@ -21,9 +21,12 @@ Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
 - **Feature specs** — `docs/specs/<feature>.md`, with their implementation tickets on GitHub Issues,
   mapped in `docs/specs/README.md`.
 - **Coding standards** (read at review): `CODING_STANDARDS.md`.
-- **Generated bundles** — `panel/main.js` and `service/main.js` are built by `bun run build`, are
-  gitignored and never committed. Rebuild after touching their sources; skip them in searches and review.
-- **Before committing** — `bun run check` (typecheck + build + tests). A Husky pre-commit hook runs it.
+- **Built bundles** — `panel/main.js` and `service/main.js` are built by `bun run build` and
+  **committed**, because OpenChamber never compiles an extension and installs it straight from the
+  repo URL. Regenerate and commit them with any source change (the pre-commit hook stages them);
+  never hand-edit them, and skim their diff at review only to confirm they were regenerated.
+- **Before committing** — `bun run check` (typecheck + build + tests). A Husky pre-commit hook runs it
+  and stages the rebuilt bundles.
 
 ## Versioning
 
@@ -34,5 +37,8 @@ change:
   extension when its version changes, so the bump is what makes a new manifest take effect.
 - Add the entry under a new version heading in `CHANGELOG.md`, using `Added` / `Changed` / `Fixed` /
   `Removed` and a `YYYY-MM-DD` date.
+
+The bump commit must carry regenerated bundles: `bun run build` rewrites `panel/main.js` and
+`service/main.js`, and the pre-commit hook stages them, so a release is installable as pushed.
 
 Docs- and chore-only changes no user can observe leave the version alone.

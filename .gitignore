@@ -8,7 +8,3 @@ skills-lock.json
 
 # OpenChamber browser-tool scratch output
 .openchamber/
-
-# Generated bundles (rebuilt by `bun run build`, never committed)
-panel/main.js
-service/main.js

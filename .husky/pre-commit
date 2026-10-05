@@ -1,1 +1,2 @@
 bun run check
+git add panel/main.js service/main.js
