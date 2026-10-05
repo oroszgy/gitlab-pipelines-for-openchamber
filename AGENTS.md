@@ -4,7 +4,8 @@ Important: ALWAYS use OpenCode's question tool to ask questions!
 
 ### Issue tracker
 
-Issues live as markdown files under `.scratch/`. See `docs/agents/issue-tracker.md`.
+Issues live on GitHub: <https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues>. See
+`docs/agents/issue-tracker.md`.
 
 ### Triage labels
 
@@ -17,8 +18,8 @@ Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
 ## Repo map
 
 - **Verified findings** — host API, icon rendering, project/ref resolution: `docs/research/`.
-- **Feature specs** — `.scratch/<feature>/spec.md`, with implementation issues beside them at
-  `issues/NN-*.md`.
+- **Feature specs** — `docs/specs/<feature>.md`, with their implementation tickets on GitHub Issues,
+  mapped in `docs/specs/README.md`.
 - **Coding standards** (read at review): `CODING_STANDARDS.md`.
 - **Generated bundles** — `panel/main.js` and `service/main.js` are built by `bun run build`, are
   gitignored and never committed. Rebuild after touching their sources; skip them in searches and review.

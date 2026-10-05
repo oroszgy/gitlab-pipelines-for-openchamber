@@ -34,4 +34,4 @@ A downstream count on collapsed rows costs one `/bridges` call per listed Pipeli
 that only active or already-expanded Pipelines are refetched. Jobs and Traces are keyed by
 `(project, pipeline id)`, since a Downstream pipeline may live in another project. Reverses the
 "Nested or child Pipeline rendering" and, for trigger edges, the "cross-project view" bullets that
-`.scratch/pipelines-panel/spec.md` put out of scope.
+`docs/specs/pipelines-panel.md` put out of scope.

@@ -1,39 +1,41 @@
-# Issue tracker: Local Markdown
+# Issue tracker: GitHub Issues
 
-Issues and specs for this repo live as markdown files in `.scratch/`.
+Issues and tickets for this repo live in GitHub Issues:
 
-> _This repo currently tracks issues locally. If it later moves to GitHub or GitLab Issues, re-run `/setup-matt-pocock-skills` to swap this file for the corresponding tracker config._
+<https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues>
+
+Specs live in the repo at `docs/specs/<feature>.md`. The spec is authoritative: when a ticket and its
+spec disagree, the **spec wins** — read its Problem, Solution and Implementation Decisions before
+building a ticket, and treat a detail the checklist omits as still in scope.
 
 ## Conventions
 
-- One feature per directory: `.scratch/<feature-slug>/`
-- The spec is `.scratch/<feature-slug>/spec.md`
-- Implementation issues are one file per ticket at `.scratch/<feature-slug>/issues/<NN>-<slug>.md`, numbered from `01`, never a single combined tickets file
-- Triage state is recorded as a `Status:` line near the top of each issue file (see `triage-labels.md` for the role strings)
-- Comments and conversation history append to the bottom of the file under a `## Comments` heading
-
-## The spec is authoritative
-
-A ticket's checklist is a summary, not the whole contract. When a ticket and its `spec.md` disagree,
-the **spec wins**: read the spec's Problem, Solution and Implementation Decisions before building a
-ticket, and treat a detail the checklist omits as still in scope. A ticket that drops a spec detail is
-a bug in the ticket, not a licence to drop it.
+- **Fetch a ticket:** `gh issue view <number>` (`--comments` for the conversation).
+- **Publish a ticket:** `gh issue create --title "<feature>/<NN>: <title>" --body-file <file>
+  --label <labels> --milestone <feature>`.
+- **Titles** are prefixed `<feature>/<NN>` so the ticket's stable id survives GitHub renumbering;
+  `docs/specs/README.md` maps each id to its GitHub issue number.
+- **Triage** uses the five roles in [`triage-labels.md`](triage-labels.md); a ticket's state is its
+  label plus open/closed. Closed tickets carry no triage label.
+- **Blocking** is a `Blocked by #<n>` line near the top of the body. A ticket is unblocked when every
+  issue it lists is closed.
+- **Areas** are labelled `area:<feature>` and grouped under one milestone per feature.
 
 ## When a skill says "publish to the issue tracker"
 
-Create a new file under `.scratch/<feature-slug>/` (creating the directory if needed).
+Create a GitHub issue with `gh issue create`, using the `<feature>/<NN>` title prefix and the labels
+and milestone above.
 
 ## When a skill says "fetch the relevant ticket"
 
-Read the file at the referenced path. The user will normally pass the path or the issue number directly.
+Run `gh issue view <number>`. The user will normally pass the issue number or URL directly.
 
 ## Wayfinding operations
 
-Used by `/wayfinder`. The **map** is a file with one **child** file per ticket.
+Used by `/wayfinder`. The **map** is a tracking issue; each **child** is a GitHub issue that links
+back to it.
 
-- **Map**: `.scratch/<effort>/map.md` (the Notes / Decisions-so-far / Fog body).
-- **Child ticket**: `.scratch/<effort>/issues/NN-<slug>.md`, numbered from `01`, with the question in the body. A `Type:` line records the ticket type (`research`/`prototype`/`grilling`/`task`); a `Status:` line records `claimed`/`resolved`.
-- **Blocking**: a `Blocked by: NN, NN` line near the top. A ticket is unblocked when every file it lists is `resolved`.
-- **Frontier**: scan `.scratch/<effort>/issues/` for files that are open, unblocked, and unclaimed; first by number wins.
-- **Claim**: set `Status: claimed` and save before any work.
-- **Resolve**: append the answer under an `## Answer` heading, set `Status: resolved`, then append a context pointer (gist + link) to the map's Decisions-so-far in `map.md`.
+- **Frontier**: list open issues, drop any whose body still has an open `Blocked by #<n>`; lowest
+  `<feature>/<NN>` wins.
+- **Claim**: assign yourself and set `Status: claimed` in the body.
+- **Resolve**: comment the answer, set `Status: resolved`, close the issue, and link it from the map.

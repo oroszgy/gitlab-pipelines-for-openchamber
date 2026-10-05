@@ -5,6 +5,21 @@
   "description": "Read-only OpenChamber panel showing GitLab CI/CD pipelines for the open project.",
   "license": "MIT",
   "type": "module",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/oroszgy/gitlab-pipelines-for-openchamber.git"
+  },
+  "homepage": "https://github.com/oroszgy/gitlab-pipelines-for-openchamber#readme",
+  "bugs": {
+    "url": "https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues"
+  },
+  "keywords": [
+    "openchamber",
+    "gitlab",
+    "pipelines",
+    "ci",
+    "extension"
+  ],
   "scripts": {
     "build": "bun run build:panel && bun run build:service",
     "build:panel": "openchamber-guest-bundle panel/main.ts panel/main.js",

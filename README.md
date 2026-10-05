@@ -8,9 +8,11 @@ pipelines its Trigger jobs start — without leaving the workspace.
 
 ## Install
 
-The extension is a folder. Build the bundles, then install the folder in OpenChamber:
+The extension is a folder. Clone it, build the bundles, then install the folder in OpenChamber:
 
 ```sh
+git clone https://github.com/oroszgy/gitlab-pipelines-for-openchamber.git
+cd gitlab-pipelines-for-openchamber
 bun install
 bun run build      # writes the gitignored panel/main.js and service/main.js
 ```

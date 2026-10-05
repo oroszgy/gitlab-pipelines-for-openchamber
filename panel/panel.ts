@@ -844,7 +844,7 @@ class PipelinesPanel implements PanelHandle {
    * Whether this Job offers **Start session**. Handoff seeds a session in the open checkout, so a
    * Job of a Downstream pipeline in *another* project is deliberately excluded: the checkout cannot
    * fix that project. Only the root Pipeline and its same-project child pipelines qualify. See the
-   * Handoff section of `.scratch/downstream-pipelines/spec.md`.
+   * Handoff section of `docs/specs/downstream-pipelines.md`.
    */
   private canHandoffJob(project: string): boolean {
     return this.resolved != null && samePath(project, this.resolved.project);

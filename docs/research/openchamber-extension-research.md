@@ -47,7 +47,7 @@ not affiliated with the OpenCode team." Desktop "bundles the matching OpenCode C
 
 **Concrete local evidence of the architecture** (installed AppImage, mounted read-only at
 `/tmp/.mount_openchUPJI5m`; the AppImage itself is
-`/home/gorosz/Applications/openchamber_ae8965d6bb106d58bec26979739c47a9.appimage`, 277,829,829 bytes):
+`~/Applications/openchamber.appimage`, 277,829,829 bytes):
 
 - The app is an **Electron application**. `resources/app.asar` has top-level entries `package.json`,
   `dist-bundle/` (`entry.mjs`, `main.mjs`), `preload.mjs`, and `node_modules/`; there is also
@@ -132,7 +132,7 @@ and the [docs manifest table](https://docs.openchamber.dev/sdk/#manifest):
 
 ```json
 {
-  "name": "@ec/gitlab-pipelines",
+  "name": "gitlab-pipelines",
   "version": "0.1.0",
   "openchamber": {
     "apiVersion": 1,
@@ -264,7 +264,7 @@ OpenCode. Use them only if you want the **agent** to have GitLab tools, not a us
   ([docs.openchamber.dev/skills/](https://docs.openchamber.dev/skills/)).
 
 How OpenChamber injects its own plugin: `~/.config/openchamber/opencode.managed.json` contains
-`"plugins": ["-opencode.browser", "/home/gorosz/.config/openchamber/agent-tool/openchamber-agent-tool"]`
+`"plugins": ["-opencode.browser", "~/.config/openchamber/agent-tool/openchamber-agent-tool"]`
 — i.e. OpenChamber merges plugins into the managed OpenCode config (and disables the built-in
 `opencode.browser` plugin in favour of its own tool). This confirms the docs' claim that extensions
 "are not the same thing as OpenCode plugins" while OpenChamber itself uses OpenCode plugins internally.
@@ -431,7 +431,7 @@ setting and proxies the API. I list this under open questions.
 ## 5. Local environment findings
 
 - **OpenChamber** installed as an AppImage:
-  `/home/gorosz/Applications/openchamber_ae8965d6bb106d58bec26979739c47a9.appimage`.
+  `~/Applications/openchamber.appimage`.
   Running instance mounted at `/tmp/.mount_openchUPJI5m` (read-only). `openchamber --version` / `--help`
   returned no text (the binary is the Electron launcher); version comes from the bundle instead
   (`@openchamber/electron` 2.0.3).
@@ -445,16 +445,14 @@ setting and proxies the API. I list this under open questions.
   (v2 `Plugin.define` shape, adds the `openchamber` and `openchamber_web` tools) and
   `~/.config/openchamber/agent-tool/openchamber-plugin.js` (v1 shape). Wired in via
   `~/.config/openchamber/opencode.managed.json`:
-  `{"plugins":["-opencode.browser","/home/gorosz/.config/openchamber/agent-tool/openchamber-agent-tool"]}`.
+  `{"plugins":["-opencode.browser","~/.config/openchamber/agent-tool/openchamber-agent-tool"]}`.
 - **OpenCode**: CLI `~/.opencode/bin/opencode` → `opencode v2.0.16`; config `~/.config/opencode/opencode.json`
   with a `glab` **local MCP server** (`["/usr/bin/glab","mcp","serve"]`, enabled). `glab 1.114.0` is
   installed. `~/.config/opencode/package.json` pins `@opencode-ai/plugin` 1.3.9. There is **no**
   `~/.config/opencode/plugins/` directory and no `.opencode/plugins/` in this repo.
-- **This repo** (`/home/gorosz/workspace/ec/gitlab-extension-for-openchamber`): currently only
-  `.agents/skills/` (38 skills vendored from `mattpocock/skills`, per `skills-lock.json`) and
-  `skills-lock.json`. There is **no** `opencode` skill file in `.agents/skills` on disk — the harness
-  supplies the `opencode` and other skills; the repo only has the Matt Pocock set. No `docs/` existed
-  before this file.
+- **This repo**: the GitLab Pipelines extension for OpenChamber. `docs/` holds the verified findings,
+  ADRs and feature specs; implementation issues are tracked on GitHub (see
+  `docs/agents/issue-tracker.md`).
 
 ---
 
@@ -530,7 +528,7 @@ GitLab
 
 Local primary artifacts (this machine)
 
-- AppImage: `/home/gorosz/Applications/openchamber_ae8965d6bb106d58bec26979739c47a9.appimage`
+- AppImage: `~/Applications/openchamber.appimage`
 - Mounted app: `/tmp/.mount_openchUPJI5m/` (`resources/app.asar`, `resources/web-dist/`,
   `resources/opencode-cli/opencode`)
 - `app.asar` → `package.json` (`@openchamber/electron` 2.0.3, `opencodeCli.version` 2.0.18)

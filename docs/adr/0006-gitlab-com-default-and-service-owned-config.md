@@ -16,7 +16,7 @@ file in the user's config dir holding the **Configured host** (default `gitlab.c
 override, and a personal access token per host. The Panel renders a masked configuration form and posts
 it to the service; it never receives a token back. On each proxied request the service looks up the token
 for the request's host and attaches it itself, so the PAT never enters the sandboxed Panel or its page
-memory. `gitlab.com` is simply the default Configured host; the EC instance and any other GitLab are
+memory. `gitlab.com` is simply the default Configured host; a self-managed instance and any other GitLab are
 values of the same setting.
 
 **Considered options.** Keeping the **built-in host for gitlab.com** and the setting for self-managed
