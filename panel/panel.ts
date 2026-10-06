@@ -145,8 +145,10 @@ const LOG_LINE_HEIGHT = 18;
 const LOG_WRAP_CHARS = 80;
 /** Viewport height assumed before layout exists (and under a test DOM). */
 const LOG_VIEWPORT_FALLBACK = 320;
-/** Lines rendered beyond the visible window on each side. */
-const LOG_OVERSCAN = 6;
+/** Lines rendered even when no viewport can be measured, so a tall panel still fills. */
+const LOG_MIN_WINDOW_LINES = 40;
+/** Lines rendered beyond the visible window on each side, to keep it filled. */
+const LOG_OVERSCAN = 40;
 /** How long a typed find query waits before it is run over the index. */
 const LOG_FIND_DEBOUNCE_MS = 120;
 /** A monospace glyph's advance at the drawer's 0.75rem font, before measurement. */
@@ -401,6 +403,8 @@ class PipelinesPanel implements PanelHandle {
   private readonly traceHeights = new Map<number, number>();
   /** The characters-per-row the measured heights were taken at, to invalidate on resize. */
   private traceWrap = LOG_WRAP_CHARS;
+  /** The last scroll offset a paint set, so our own scroll event is not read as the user's. */
+  private traceScrollSet = -1;
   /** The measured monospace advance width, once computed. */
   private traceCharWidthPx: number | null = null;
   /** The open log's incremental line index. */
@@ -1868,10 +1872,11 @@ class PipelinesPanel implements PanelHandle {
     this.root.append(this.renderFooter());
     if (this.openJob) this.root.append(this.renderDrawer(this.openJob));
     // The drawer was painted while detached, where layout is unavailable; repaint
-    // now that it is in the document, so the first view uses the real viewport and
-    // width and measures its rows.
+    // now, and once more after the next layout, so the first view uses the real
+    // viewport and width and measures its rows.
     if (this.openJob && this.drawerEl && this.traceLines.length > 0) {
       this.paintTrace(this.drawerEl);
+      this.afterLayout(() => this.repaintTrace());
     }
 
     if (this.scrollEl) this.scrollEl.scrollTop = this.scrollTop;
@@ -2706,8 +2711,12 @@ class PipelinesPanel implements PanelHandle {
     if (entry.truncated) drawer.append(truncationNotice(entry.truncated));
     const body = el('div', 'gp-drawer-body');
     body.addEventListener('scroll', () => {
-      this.drawerScrollTop = body.scrollTop;
-      this.followTail = this.traceAtBottom(body.scrollTop);
+      const top = body.scrollTop;
+      // Ignore the scroll event our own paint caused, so follow-tail is not
+      // switched off by a programmatic scroll.
+      if (top === this.traceScrollSet) return;
+      this.drawerScrollTop = top;
+      this.followTail = this.traceAtBottom(top);
       // Windowed rendering: the rows for the newly visible range must be
       // rendered as the user scrolls, or the log shows only its first window.
       if (this.traceLines.length > 0) this.repaintTrace();
@@ -2742,11 +2751,28 @@ class PipelinesPanel implements PanelHandle {
 
   /** Repaint when the drawer's size changes: the window and wrapping depend on it. */
   private watchTraceResize(body: HTMLElement): void {
-    const Observer = body.ownerDocument.defaultView?.ResizeObserver;
-    if (!Observer) return;
-    const observer = new Observer(() => this.repaintTrace());
-    observer.observe(body);
-    this.handles.push({ dispose: () => observer.disconnect() });
+    const view = body.ownerDocument.defaultView;
+    const Observer = view?.ResizeObserver;
+    if (Observer) {
+      const observer = new Observer(() => this.repaintTrace());
+      observer.observe(body);
+      this.handles.push({ dispose: () => observer.disconnect() });
+    }
+    // A belt-and-braces trigger for a host that resizes the panel without
+    // resizing the body's content box (or where ResizeObserver is unavailable).
+    if (view) {
+      const onResize = (): void => this.repaintTrace();
+      view.addEventListener('resize', onResize);
+      this.handles.push({ dispose: () => view.removeEventListener('resize', onResize) });
+    }
+  }
+
+  /** Run once after the next layout, so a just-attached element measures correctly. */
+  private afterLayout(callback: () => void): void {
+    const view = this.root.ownerDocument.defaultView;
+    if (!view?.requestAnimationFrame) return;
+    const handle = view.requestAnimationFrame(() => callback());
+    this.handles.push({ dispose: () => view.cancelAnimationFrame(handle) });
   }
 
   private idleScheduler(): IdleScheduler {
@@ -3034,8 +3060,13 @@ class PipelinesPanel implements PanelHandle {
   }
 
   private traceViewport(): number {
-    const measured = this.drawerEl?.clientHeight ?? 0;
-    return measured > 0 ? measured : LOG_VIEWPORT_FALLBACK;
+    const body = this.drawerEl?.clientHeight ?? 0;
+    // The drawer body can read as zero before layout has run (it is painted
+    // detached, and the panel may be resized just after). The panel's own height
+    // is a far better lower bound than a bare fallback.
+    const panel = this.root.clientHeight;
+    const derived = panel > 0 ? Math.max(LOG_VIEWPORT_FALLBACK, Math.floor(panel * 0.62) - 90) : 0;
+    return Math.max(body, derived, LOG_VIEWPORT_FALLBACK);
   }
 
   /**
@@ -3072,14 +3103,20 @@ class PipelinesPanel implements PanelHandle {
     }
     const heights = this.traceLines.map((_, index) => this.traceLineHeight(index));
     const viewport = this.traceViewport();
+    // Render at least a full screenful even if the viewport could not be measured,
+    // so a mis-read zero never leaves a tall panel mostly empty.
+    const windowHeight = Math.max(viewport, LOG_MIN_WINDOW_LINES * LOG_LINE_HEIGHT);
     const total = heights.reduce((sum, height) => sum + height, 0);
     this.traceTotal = total;
-    const maxScroll = Math.max(0, total - viewport);
-    // Follow-tail pins to the estimated bottom; a scrolled position is used as
-    // read, never clamped by the estimate, so a real layout that is taller than
-    // estimated cannot yank the view back up.
-    const scroll = this.followTail ? maxScroll : Math.max(0, this.drawerScrollTop);
-    const view = windowFor(heights, scroll, viewport, LOG_OVERSCAN);
+    // Follow-tail pins to the element's real bottom when layout provides one, so
+    // a mismatch between the summed heights and the real content height cannot
+    // leave the view short of the end. A scrolled position is used as read.
+    const realBottom =
+      body.scrollHeight > 0 && body.clientHeight > 0
+        ? Math.max(0, body.scrollHeight - body.clientHeight)
+        : Math.max(0, total - viewport);
+    const scroll = this.followTail ? realBottom : Math.max(0, this.drawerScrollTop);
+    const view = windowFor(heights, scroll, windowHeight, LOG_OVERSCAN);
 
     const content = el('div', 'gp-log');
     if (view.top > 0) {
@@ -3099,7 +3136,8 @@ class PipelinesPanel implements PanelHandle {
     }
     body.append(content);
     body.scrollTop = scroll;
-    this.drawerScrollTop = scroll;
+    this.traceScrollSet = body.scrollTop;
+    this.drawerScrollTop = body.scrollTop;
     this.measureTraceRows(content);
   }
 

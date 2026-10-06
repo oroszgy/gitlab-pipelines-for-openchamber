@@ -7,6 +7,16 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.10.3] - 2026-10-06
+
+### Fixed
+
+- The log drawer no longer renders a short window into a tall panel, leaving a
+  large empty area above or below the lines. When the drawer cannot yet measure
+  its own height — it is painted before layout, and the host may resize the panel
+  just after — it now falls back to the panel's height, always paints at least a
+  full screenful, and repaints after layout and on resize.
+
 ## [0.10.2] - 2026-10-06
 
 ### Fixed

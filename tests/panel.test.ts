@@ -375,7 +375,7 @@ describe('expanding a pipeline', () => {
 describe('the job log drawer', () => {
   test('opens a window of the log wrapped, with a full-log link, and closes back', async () => {
     const host = configuredHost();
-    const trace = Array.from({ length: 45 }, (_, index) => `line ${index + 1}`).join('\n');
+    const trace = Array.from({ length: 500 }, (_, index) => `line ${index + 1}`).join('\n');
     host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
@@ -385,11 +385,12 @@ describe('the job log drawer', () => {
 
     const drawer = root.querySelector('.gp-drawer');
     expect(drawer).not.toBeNull();
-    // Only the visible window is in the DOM, and follow-tail lands on the end.
-    const rendered = root.querySelectorAll('.gp-log-line');
+    // Only a window is in the DOM, and follow-tail lands on the end.
+    const rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
     expect(rendered.length).toBeGreaterThan(0);
-    expect(rendered.length).toBeLessThan(45);
-    expect([...rendered].some((line) => line.textContent === 'line 45')).toBe(true);
+    expect(rendered.length).toBeLessThan(500);
+    expect(rendered.some((line) => line.textContent === 'line 500')).toBe(true);
+    expect(rendered.some((line) => line.textContent === 'line 1')).toBe(false);
     expect(root.querySelector('.gp-log-find')).not.toBeNull();
     expect(root.querySelector('.gp-log-copy')).not.toBeNull();
     expect(root.querySelector('.gp-drawer-link')?.textContent).toContain('View full log in GitLab');
@@ -798,7 +799,8 @@ describe('the log drawer tools', () => {
 
     const rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
     expect(rendered.length).toBeGreaterThan(0);
-    expect(Number(rendered[0]!.dataset.line)).toBeGreaterThan(10);
+    // The scrolled position survived the rebuild, and the view did not jump to the tail.
+    expect((root.querySelector('.gp-drawer-body') as HTMLElement).scrollTop).toBe(360);
     expect(rendered.some((line) => line.dataset.line === '200')).toBe(false);
   });
 });

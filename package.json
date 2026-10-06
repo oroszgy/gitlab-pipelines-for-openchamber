@@ -1,6 +1,6 @@
 {
   "name": "gitlab-pipelines",
-  "version": "0.10.2",
+  "version": "0.10.3",
   "private": false,
   "description": "OpenChamber panel showing GitLab CI/CD pipelines for the open project, with capability-gated pipeline actions.",
   "license": "MIT",

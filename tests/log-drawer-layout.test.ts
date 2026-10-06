@@ -32,12 +32,15 @@ const originals = {
 };
 
 let scrollTopValue = 0;
+/** When set, the drawer body reports this height instead of BODY_H (to force the fallback). */
+let forcedBodyHeight: number | null = null;
 
 beforeAll(() => {
   Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
     configurable: true,
     get(this: HTMLElement) {
-      return this.isConnected && this.classList.contains('gp-drawer-body') ? BODY_H : 0;
+      if (!this.isConnected || !this.classList.contains('gp-drawer-body')) return 0;
+      return forcedBodyHeight ?? BODY_H;
     },
   });
   Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
@@ -170,6 +173,20 @@ describe('the windowed log drawer under real layout', () => {
     const root = await openDrawer(configuredHost(huge), new FakeTimers());
     const rendered = root.querySelectorAll('.gp-log-line').length;
     expect(rendered).toBeGreaterThan(0);
-    expect(rendered).toBeLessThan(100);
+    // A window plus overscan, not the whole 20 000-line Trace.
+    expect(rendered).toBeLessThan(160);
+  });
+
+  test('fills a tall panel even when the body height cannot be read', async () => {
+    // The failure mode: the drawer is painted before layout, so its own height
+    // reads as zero. The window must still be tall enough to fill the panel.
+    forcedBodyHeight = 0;
+    try {
+      const root = await openDrawer(configuredHost(trace), new FakeTimers());
+      const extent = renderedExtent(root);
+      expect(extent.bottom - extent.top).toBeGreaterThanOrEqual(BODY_H * 2);
+    } finally {
+      forcedBodyHeight = null;
+    }
   });
 });
