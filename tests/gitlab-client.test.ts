@@ -106,6 +106,22 @@ describe('parseMoveTarget', () => {
   });
 });
 
+describe('the trace truncation signal', () => {
+  test('passes the service truncation flag through', async () => {
+    const requester: Requester = async () => ({ status: 200, body: 'log', truncated: true });
+    const result = await fetchTrace(requester, 'g/p', 34);
+    expect(result).toEqual({ ok: true, data: 'log', truncated: true });
+  });
+
+  test('leaves it absent when the service did not report it', async () => {
+    const requester: Requester = async () => ({ status: 200, body: 'log' });
+    const result = await fetchTrace(requester, 'g/p', 34);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.truncated).toBeUndefined();
+  });
+});
+
 describe('clientFailureFromError', () => {
   test('maps the no-token service error to its own kind', async () => {
     const noToken: Requester = () => {

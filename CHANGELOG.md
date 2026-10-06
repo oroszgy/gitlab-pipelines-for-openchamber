@@ -7,6 +7,15 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.7.7] - 2026-10-06
+
+### Fixed
+
+- The log drawer trusts the Proxy service's truncation signal instead of guessing from the body length,
+  so a log that happens to be exactly the cap is no longer wrongly labelled as capped.
+- A remote whose scp-style host is capitalised (`git@GitLab.com:…`) now matches the configured
+  `gitlab.com` instead of reporting “Different GitLab host”.
+
 ## [0.7.6] - 2026-10-06
 
 ### Fixed

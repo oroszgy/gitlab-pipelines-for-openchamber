@@ -22,6 +22,8 @@ describe('parseRemoteUrl', () => {
     ['https://gitlab.com/group/project', { host: 'gitlab.com', path: 'group/project' }],
     ['https://gitlab.com/group/project/', { host: 'gitlab.com', path: 'group/project' }],
     ['git://gitlab.com/group/project.git', { host: 'gitlab.com', path: 'group/project' }],
+    ['git@GitLab.com:group/project.git', { host: 'gitlab.com', path: 'group/project' }],
+    ['ssh://git@GitLab.Example.com:2222/group/project.git', { host: 'gitlab.example.com:2222', path: 'group/project' }],
   ];
 
   for (const [remote, expected] of cases) {
@@ -161,6 +163,17 @@ describe('resolveProject', () => {
       detectedHost: 'github.com',
       detectedPath: 'me/proj',
     });
+  });
+
+  test('a capitalised scp-style remote still matches the configured host', () => {
+    expect(
+      resolveProject({
+        directory: '/repo',
+        apiOrigin,
+        gitConfig: '[remote "origin"]\n\turl = git@GitLab.com:group/project.git\n',
+        head: 'ref: refs/heads/main\n',
+      }),
+    ).toEqual({ ok: true, host: 'gitlab.com', project: 'group/project', ref: 'main', source: 'derived' });
   });
 
   test('a project override wins even with no directory', () => {

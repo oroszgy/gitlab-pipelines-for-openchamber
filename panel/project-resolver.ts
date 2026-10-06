@@ -77,13 +77,15 @@ export function parseRemoteUrl(remote: string): Remote | null {
     } catch {
       return null;
     }
-    host = url.host;
+    host = url.host.toLowerCase();
     rawPath = url.pathname;
   } else {
     const colon = raw.indexOf(':');
     if (colon < 0) return null;
     const authority = raw.slice(0, colon).replace(/^[^@]*@/, '');
-    host = authority;
+    // Match `URL.host` semantics: an scp authority is case-insensitive, so a
+    // capitalised remote must not read as a different host from the config.
+    host = authority.toLowerCase();
     rawPath = raw.slice(colon + 1);
     // `host:/group/proj.git` — a leading slash is allowed in the scp-like path.
     rawPath = rawPath.replace(/^\/+/, '');

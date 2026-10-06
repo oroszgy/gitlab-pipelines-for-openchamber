@@ -36,6 +36,7 @@ function handlerFor(data: {
   jobs?: Job[];
   bridges?: Bridge[];
   trace?: string;
+  traceTruncated?: boolean;
   fail?: HostResponse;
 }): (request: HostRequest) => HostResponse {
   return (request) => {
@@ -50,7 +51,11 @@ function handlerFor(data: {
       return { status: 200, body: JSON.stringify(data.bridges ?? []) };
     }
     if (request.path.endsWith('/trace')) {
-      return { status: 200, body: data.trace ?? '' };
+      return {
+        status: 200,
+        body: data.trace ?? '',
+        ...(data.traceTruncated != null ? { truncated: data.traceTruncated } : {}),
+      };
     }
     return { status: 404, body: '' };
   };
@@ -405,6 +410,56 @@ describe('the job log drawer', () => {
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
     expect(root.querySelector('.gp-drawer-notice')?.textContent).toContain('capped log');
+  });
+
+  test('a short log the service marks truncated says GitLab capped it', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace: 'a short capped log',
+      traceTruncated: true,
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-notice')?.textContent).toContain('capped log');
+  });
+
+  test('a log the service marks not truncated shows no capped notice even at the cap', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace: 'x'.repeat(HOST_BODY_CAP),
+      traceTruncated: false,
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-notice')).toBeNull();
+  });
+
+  test('an uncapped log at the cap still honours the panel line cap', async () => {
+    const host = configuredHost();
+    let trace = Array.from({ length: LOG_MAX_LINES + 1 }, (_, index) => `line ${index + 1}`).join('\n');
+    trace += 'x'.repeat(HOST_BODY_CAP - trace.length);
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace,
+      traceTruncated: false,
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(root.querySelector('.gp-drawer-notice')?.textContent).toContain('Older lines not shown');
   });
 
   test('closing the drawer restores the list scroll position', async () => {

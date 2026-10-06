@@ -20,7 +20,7 @@ export type ClientFailure =
  */
 export type Requester = (request: HostRequest) => Promise<HostResponse>;
 
-export type ClientResult<T> = { ok: true; data: T } | { ok: false; failure: ClientFailure };
+export type ClientResult<T> = { ok: true; data: T; truncated?: boolean } | { ok: false; failure: ClientFailure };
 
 export type BuiltRequest = {
   path: string;
@@ -152,7 +152,9 @@ export function clientFailureFromError(error: unknown): ClientFailure {
   return { kind: 'network' };
 }
 
-type CallResult = { ok: true; status: number; body: string } | { ok: false; failure: ClientFailure };
+type CallResult =
+  | { ok: true; status: number; body: string; truncated?: boolean }
+  | { ok: false; failure: ClientFailure };
 
 async function call(requester: Requester, request: HostRequest): Promise<CallResult> {
   let response;
@@ -169,7 +171,12 @@ async function call(requester: Requester, request: HostRequest): Promise<CallRes
     }
     return { ok: false, failure };
   }
-  return { ok: true, status: response.status, body: response.body };
+  return {
+    ok: true,
+    status: response.status,
+    body: response.body,
+    ...(response.truncated != null ? { truncated: response.truncated } : {}),
+  };
 }
 
 function parseJson<T>(body: string, status: number): ClientResult<T> {
@@ -237,5 +244,9 @@ export async function fetchTrace(
     if (result.failure.kind === 'not-found') return { ok: true, data: '' };
     return result;
   }
-  return { ok: true, data: result.body };
+  return {
+    ok: true,
+    data: result.body,
+    ...(result.truncated != null ? { truncated: result.truncated } : {}),
+  };
 }

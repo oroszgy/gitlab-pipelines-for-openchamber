@@ -126,7 +126,11 @@ export class FakeHost implements HostPort {
       }
       if (!this.gitlabHandler) return envelope({ status: 200, body: '[]' });
       const response = await this.gitlabHandler(request, index);
-      return envelope({ status: response.status, body: response.body });
+      return envelope({
+        status: response.status,
+        body: response.body,
+        ...(response.truncated != null ? { truncated: response.truncated } : {}),
+      });
     }
     return { status: 404, body: JSON.stringify({ error: 'not found' }) };
   }

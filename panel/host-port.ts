@@ -28,6 +28,12 @@ export type HostResponse = {
   status: number;
   /** The host leaves the body as text; callers parse JSON where they need it. */
   body: string;
+  /**
+   * Set when the Proxy service reports that it stopped reading the upstream
+   * body at its size cap. Absent for older responses, where the length is the
+   * only signal.
+   */
+  truncated?: boolean;
 };
 
 export type HostPort = {

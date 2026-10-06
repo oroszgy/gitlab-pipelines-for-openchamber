@@ -793,7 +793,7 @@ class PipelinesPanel implements PanelHandle {
       // A failed fetch is not a missing log; keep the two apart.
       this.traces.set(key, { state: 'error', text: '', truncated: null });
     } else {
-      this.traces.set(key, traceStateOf(result.data ?? ''));
+      this.traces.set(key, traceStateOf(result.data ?? '', result.truncated));
     }
     this.render();
   }
@@ -922,7 +922,7 @@ class PipelinesPanel implements PanelHandle {
     const result = await fetchTrace(this.requester(), project, job.id);
     if (!result.ok) return null;
     const text = result.data ?? '';
-    this.traces.set(key, traceStateOf(text));
+    this.traces.set(key, traceStateOf(text, result.truncated));
     return text;
   }
 
@@ -2022,16 +2022,19 @@ export function isAtBottom(
 }
 
 /** Why the shown log is shorter than the job's trace, if it is. */
-function traceTruncation(text: string): TraceTruncation {
-  if (text.length >= HOST_BODY_CAP) return 'host';
+function traceTruncation(text: string, serviceTruncated?: boolean): TraceTruncation {
+  // Trust the service's explicit signal when present; only fall back to the
+  // body length for an older response that carries none.
+  const hostCapped = serviceTruncated ?? text.length >= HOST_BODY_CAP;
+  if (hostCapped) return 'host';
   if (logLines(text).length > LOG_MAX_LINES) return 'cap';
   return null;
 }
 
 /** A successful trace fetch's cache entry: `ready` with the text, or `missing` when empty. */
-function traceStateOf(text: string): TraceState {
+function traceStateOf(text: string, serviceTruncated?: boolean): TraceState {
   return text.trim()
-    ? { state: 'ready', text, truncated: traceTruncation(text) }
+    ? { state: 'ready', text, truncated: traceTruncation(text, serviceTruncated) }
     : { state: 'missing', text: '', truncated: null };
 }
 

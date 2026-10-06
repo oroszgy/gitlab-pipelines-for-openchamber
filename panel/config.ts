@@ -34,7 +34,8 @@ export const LOG_MAX_LINES = 20_000;
 
 /**
  * The service's response-body cap (`docs/research/openchamber-extension-research.md:185`). A trace body
- * at or above this came back truncated, and the service gives no explicit signal for it.
+ * at or above this came back truncated. The service now reports truncation on the response; this is the
+ * fallback for a response that does not.
  */
 export const HOST_BODY_CAP = 256_000;
 
