@@ -149,6 +149,8 @@ const LOG_VIEWPORT_FALLBACK = 320;
 const LOG_OVERSCAN = 6;
 /** How long a typed find query waits before it is run over the index. */
 const LOG_FIND_DEBOUNCE_MS = 120;
+/** A monospace glyph's advance at the drawer's 0.75rem font, before measurement. */
+const DEFAULT_CHAR_WIDTH = 7.2;
 
 /** How long a successful action's notice stays before it dismisses itself. */
 const ACTION_NOTICE_MS = 5000;
@@ -395,9 +397,12 @@ class PipelinesPanel implements PanelHandle {
   private traceErrors: number[] = [];
   /** The full accumulated Trace, ANSI-stripped, for Copy. */
   private traceCopyText = '';
-  /** Row heights by line index (measured where layout allows, else estimated). */
+  /** Measured row heights by line index; only rows actually rendered are measured. */
   private readonly traceHeights = new Map<number, number>();
-  private readonly traceMeasured = new Set<number>();
+  /** The characters-per-row the measured heights were taken at, to invalidate on resize. */
+  private traceWrap = LOG_WRAP_CHARS;
+  /** The measured monospace advance width, once computed. */
+  private traceCharWidthPx: number | null = null;
   /** The open log's incremental line index. */
   private traceIndexer: TraceIndexer | null = null;
   /** Whether the index was complete on the last update, to repaint once on completion. */
@@ -1862,6 +1867,12 @@ class PipelinesPanel implements PanelHandle {
 
     this.root.append(this.renderFooter());
     if (this.openJob) this.root.append(this.renderDrawer(this.openJob));
+    // The drawer was painted while detached, where layout is unavailable; repaint
+    // now that it is in the document, so the first view uses the real viewport and
+    // width and measures its rows.
+    if (this.openJob && this.drawerEl && this.traceLines.length > 0) {
+      this.paintTrace(this.drawerEl);
+    }
 
     if (this.scrollEl) this.scrollEl.scrollTop = this.scrollTop;
     this.updateLive();
@@ -2703,6 +2714,7 @@ class PipelinesPanel implements PanelHandle {
     });
     this.drawerEl = body;
     drawer.append(body);
+    this.watchTraceResize(body);
     if (entry.state === 'missing') {
       body.append(el('div', 'gp-drawer-empty', 'No log output yet — the job has not started.'));
     } else {
@@ -2728,6 +2740,15 @@ class PipelinesPanel implements PanelHandle {
     this.handles.push({ dispose: () => document.removeEventListener('keydown', onKey) });
   }
 
+  /** Repaint when the drawer's size changes: the window and wrapping depend on it. */
+  private watchTraceResize(body: HTMLElement): void {
+    const Observer = body.ownerDocument.defaultView?.ResizeObserver;
+    if (!Observer) return;
+    const observer = new Observer(() => this.repaintTrace());
+    observer.observe(body);
+    this.handles.push({ dispose: () => observer.disconnect() });
+  }
+
   private idleScheduler(): IdleScheduler {
     return {
       request: (callback) => this.timers.requestIdleCallback(callback),
@@ -2751,14 +2772,12 @@ class PipelinesPanel implements PanelHandle {
     if (this.traceText && !display.startsWith(this.traceText)) {
       // The held text was replaced, not extended: earlier heights and index void.
       this.traceHeights.clear();
-      this.traceMeasured.clear();
       this.traceErrors = [];
       this.traceIndexed = false;
     } else if (display.length > this.traceText.length && this.traceLines.length > 0) {
       // An append can lengthen the previously partial last line.
       const last = this.traceLines.length - 1;
       this.traceHeights.delete(last);
-      this.traceMeasured.delete(last);
     }
     this.traceLines = lines;
     this.traceText = display;
@@ -2787,7 +2806,6 @@ class PipelinesPanel implements PanelHandle {
     this.traceMatchAt = -1;
     this.traceErrors = [];
     this.traceHeights.clear();
-    this.traceMeasured.clear();
     this.traceIndexed = false;
     this.clearTraceRefs();
   }
@@ -2969,26 +2987,50 @@ class PipelinesPanel implements PanelHandle {
    * many fallback-width rows its text wraps to.
    */
   private traceLineHeight(index: number): number {
-    const cached = this.traceHeights.get(index);
-    if (cached != null) return cached;
+    const measured = this.traceHeights.get(index);
+    if (measured != null) return measured;
+    // No measured height yet: estimate from the line's wrap at the current width.
     const text = this.traceIndexer?.lineAt(index)?.text ?? this.traceLines[index] ?? '';
-    const height =
-      text.length === 0
-        ? LOG_LINE_HEIGHT
-        : Math.ceil(text.length / this.traceWrapChars()) * LOG_LINE_HEIGHT;
-    this.traceHeights.set(index, height);
-    return height;
+    return text.length === 0
+      ? LOG_LINE_HEIGHT
+      : Math.ceil(text.length / this.traceWrapChars()) * LOG_LINE_HEIGHT;
   }
 
   /**
-   * Characters per rendered row. The drawer's width is read when layout provides
-   * it — a monospace glyph is about 0.6em at the drawer's 0.75rem font — and a
-   * fixed fallback is used otherwise, so the estimate is close before a row has
-   * been measured.
+   * Characters per rendered row, from the drawer's real width and the monospace
+   * advance width at its font. A row is only estimated before it has been
+   * measured, so the closer this is the less the spacers drift as rows mount.
    */
   private traceWrapChars(): number {
-    const width = this.drawerEl?.clientWidth ?? 0;
-    return width > 0 ? Math.max(20, Math.floor(width / 7.5)) : LOG_WRAP_CHARS;
+    const el = this.drawerEl;
+    if (!el || el.clientWidth <= 0) return LOG_WRAP_CHARS;
+    const style = el.ownerDocument.defaultView?.getComputedStyle(el);
+    const padding = style
+      ? (Number.parseFloat(style.paddingLeft) || 0) + (Number.parseFloat(style.paddingRight) || 0)
+      : 0;
+    const available = Math.max(1, el.clientWidth - padding - 1);
+    return Math.max(1, Math.floor(available / this.traceCharWidth(el)));
+  }
+
+  /** The monospace advance width in CSS pixels, measured once and cached. */
+  private traceCharWidth(el: HTMLElement): number {
+    if (this.traceCharWidthPx != null) return this.traceCharWidthPx;
+    let width = DEFAULT_CHAR_WIDTH;
+    try {
+      const canvas = el.ownerDocument.createElement('canvas');
+      const ctx = canvas.getContext('2d');
+      const view = el.ownerDocument.defaultView;
+      if (ctx && view) {
+        const style = view.getComputedStyle(el);
+        ctx.font = `${style.fontStyle} ${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
+        const sample = ctx.measureText('x'.repeat(50)).width / 50;
+        if (sample > 0) width = sample;
+      }
+    } catch {
+      // No canvas: the fallback advance is close enough to keep the estimate useful.
+    }
+    this.traceCharWidthPx = width;
+    return width;
   }
 
   private traceViewport(): number {
@@ -3020,6 +3062,14 @@ class PipelinesPanel implements PanelHandle {
   /** Render the visible window into `body`, with spacers standing in for the rest. */
   private paintTrace(body: HTMLElement): void {
     clearNode(body);
+    // A width change re-wraps every row, so heights measured at the old width no
+    // longer hold. This is also how the detached first paint's fallback width is
+    // discarded once the drawer is in the document.
+    const wrap = this.traceWrapChars();
+    if (wrap !== this.traceWrap) {
+      this.traceWrap = wrap;
+      this.traceHeights.clear();
+    }
     const heights = this.traceLines.map((_, index) => this.traceLineHeight(index));
     const viewport = this.traceViewport();
     const total = heights.reduce((sum, height) => sum + height, 0);
@@ -3080,11 +3130,10 @@ class PipelinesPanel implements PanelHandle {
     let changed = false;
     for (const node of content.querySelectorAll<HTMLElement>('.gp-log-line')) {
       const index = Number(node.dataset.line);
-      if (!Number.isFinite(index) || this.traceMeasured.has(index)) continue;
+      if (!Number.isFinite(index)) continue;
       const height = node.getBoundingClientRect().height || node.offsetHeight;
       if (height > 0 && height !== this.traceHeights.get(index)) {
         this.traceHeights.set(index, height);
-        this.traceMeasured.add(index);
         changed = true;
       }
     }

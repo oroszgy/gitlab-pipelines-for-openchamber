@@ -7,6 +7,17 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-10-06
+
+### Fixed
+
+- The log drawer no longer leaves gaps above and below the visible lines. The
+  first paint happened before the drawer had a size, and those guessed row
+  heights were kept, so a long wrapped Trace had a scroll geometry that drifted
+  as more lines were measured. Row heights are now estimated from the drawer's
+  real width and font, re-estimated when it resizes, and the drawer repaints
+  once it is laid out.
+
 ## [0.10.1] - 2026-10-06
 
 ### Fixed
