@@ -2201,6 +2201,36 @@ describe('pipeline actions', () => {
     expect(writes[0]?.query).toEqual({ ref: 'main' });
   });
 
+  test('the pipeline row activates by keyboard, and a nested control does not', async () => {
+    const { root } = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 9 })],
+    });
+    const row = root.querySelector('.gp-row') as HTMLElement;
+    const trigger = root.querySelector('.gp-row .gp-actions button') as HTMLButtonElement;
+    trigger.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await flush();
+    expect((root.querySelector('.gp-item') as HTMLElement).dataset.open).toBe('false');
+    row.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }));
+    await flush();
+    expect((root.querySelector('.gp-item') as HTMLElement).dataset.open).toBe('true');
+  });
+
+  test('a Pipeline action refetches the affected Pipeline at once', async () => {
+    const { root, host, writes } = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 1 })],
+    });
+    clickMenu(root.querySelector('.gp-row') as HTMLElement, 'Retry pipeline');
+    await flush();
+    expect(writes[0]?.path).toBe(`${PROJECT_PATH}/pipelines/7/retry`);
+    const postIndex = host.gitlabRequests.findIndex((request) => request.method === 'POST');
+    const bridgesAfter = host.gitlabRequests
+      .slice(postIndex + 1)
+      .some((request) => request.method !== 'POST' && request.path.endsWith('/bridges'));
+    expect(bridgesAfter).toBe(true);
+  });
+
   test('clicking Retry posts the action and shows a success notice that auto-dismisses', async () => {
     const timers = new FakeTimers();
     const host = configuredHost();

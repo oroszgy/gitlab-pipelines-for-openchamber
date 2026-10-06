@@ -66,6 +66,21 @@ export function cancelRoleOf(value: string | null | undefined): CancelRole {
   return 'developer';
 }
 
+/** The `permissions` slice of a project, as GitLab returns it. */
+export type ProjectPermissions = {
+  project_access?: { access_level?: number } | null;
+  group_access?: { access_level?: number } | null;
+} | null | undefined;
+
+/** The user's effective access level: `max(project_access, group_access)`, or null. */
+export function accessLevelOf(permissions: ProjectPermissions): number | null {
+  const level = Math.max(
+    permissions?.project_access?.access_level ?? 0,
+    permissions?.group_access?.access_level ?? 0,
+  );
+  return level > 0 ? level : null;
+}
+
 function roleAtLeast(capability: Capability, level: number): boolean {
   return capability.accessLevel != null && capability.accessLevel >= level;
 }

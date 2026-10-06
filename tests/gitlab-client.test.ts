@@ -11,6 +11,7 @@ import {
   fetchProject,
   fetchTokenScopes,
   fetchTrace,
+  forceCancelJob,
   jobsRequest,
   mapHttpStatus,
   parseMoveTarget,
@@ -468,12 +469,12 @@ describe('write requests', () => {
     expect(a.seen.every((request) => request.body == null)).toBe(true);
   });
 
-  test('cancel sends a force body only when asked', async () => {
+  test('plain cancel sends no body; force cancel sends the flag', async () => {
     const plain = capture();
     await cancelJob(plain.requester, 'g/p', 9);
     expect(plain.seen[0]?.body).toBeUndefined();
     const forced = capture();
-    await cancelJob(forced.requester, 'g/p', 9, true);
+    await forceCancelJob(forced.requester, 'g/p', 9);
     expect(forced.seen[0]?.body).toBe(JSON.stringify({ force: true }));
   });
 

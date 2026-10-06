@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test';
 import {
+  accessLevelOf,
   allowedActions,
   canCancel,
   canRunPipeline,
@@ -25,6 +26,23 @@ describe('cancelRoleOf', () => {
     expect(cancelRoleOf(null)).toBe('developer');
     expect(cancelRoleOf(undefined)).toBe('developer');
     expect(cancelRoleOf('something-else')).toBe('developer');
+  });
+});
+
+describe('accessLevelOf', () => {
+  test('takes the higher of a project and a group membership', () => {
+    expect(accessLevelOf({ project_access: { access_level: 10 }, group_access: { access_level: 40 } })).toBe(40);
+    expect(accessLevelOf({ project_access: { access_level: 40 }, group_access: { access_level: 10 } })).toBe(40);
+  });
+
+  test('is null when the user has neither membership', () => {
+    expect(accessLevelOf({ project_access: null, group_access: null })).toBeNull();
+    expect(accessLevelOf(null)).toBeNull();
+    expect(accessLevelOf(undefined)).toBeNull();
+  });
+
+  test('reads a single membership', () => {
+    expect(accessLevelOf({ project_access: { access_level: 30 } })).toBe(30);
   });
 });
 

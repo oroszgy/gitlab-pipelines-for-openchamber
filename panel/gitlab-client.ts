@@ -355,14 +355,18 @@ export function playJob(requester: Requester, project: string, jobId: number): P
   return send(requester, playJobRequest(project, jobId));
 }
 
-/** `force` finishes a Job already stuck in `canceling`; it needs Maintainer. */
-export function cancelJob(
+/** Cancel a Job; the call takes no body. */
+export function cancelJob(requester: Requester, project: string, jobId: number): Promise<WriteResult> {
+  return send(requester, cancelJobRequest(project, jobId));
+}
+
+/** Finish off a Job already stuck in `canceling`; needs Maintainer. */
+export function forceCancelJob(
   requester: Requester,
   project: string,
   jobId: number,
-  force = false,
 ): Promise<WriteResult> {
-  return send(requester, cancelJobRequest(project, jobId), force ? JSON.stringify({ force: true }) : undefined);
+  return send(requester, cancelJobRequest(project, jobId), JSON.stringify({ force: true }));
 }
 
 export function retryPipeline(

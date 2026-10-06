@@ -118,7 +118,8 @@ each is absent. The rules:
 
 The access level is `max(project_access.access_level, group_access.access_level)`, absent → none.
 Developer is 30, Maintainer 40. `ci_restrict_pipeline_cancellation_role` is `developer` (default),
-`maintainer` or `no_one`; `no_one` removes Cancel entirely. GitLab's protected branches and
+`maintainer` or `no_one`; `no_one` removes Cancel — and Force cancel, which is a cancellation too —
+entirely. GitLab's protected branches and
 environments can restrict a specific action further; that is not pre-checkable, so a post-check
 `403` is the backstop.
 

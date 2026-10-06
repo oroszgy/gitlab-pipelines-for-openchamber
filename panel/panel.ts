@@ -1,7 +1,7 @@
 import type { HostReadyContext, StartSessionSent } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountMenu, mountTabs } from '@openchamber/sdk/ui';
 
-import { canRunPipeline, cancelRoleOf, menuState, type ActionId, type Capability } from './actions';
+import { accessLevelOf, canRunPipeline, cancelRoleOf, menuState, type ActionId, type Capability } from './actions';
 import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
@@ -24,6 +24,7 @@ import {
   fetchTokenScopes,
   fetchTrace,
   fetchUser,
+  forceCancelJob,
   playJob,
   projectFromRedirectTarget,
   retryJob,
@@ -533,13 +534,8 @@ class PipelinesPanel implements PanelHandle {
     const result = await fetchProject(this.requester(), project);
     if (this.disposed || gen !== this.generation) return;
     if (!result.ok) return;
-    const permissions = result.data.permissions;
-    const accessLevel = Math.max(
-      permissions?.project_access?.access_level ?? 0,
-      permissions?.group_access?.access_level ?? 0,
-    );
     this.capabilities.set(project, {
-      accessLevel: accessLevel > 0 ? accessLevel : null,
+      accessLevel: accessLevelOf(result.data.permissions),
       canWrite: this.tokenCanWrite,
       cancelRole: cancelRoleOf(result.data.ci_restrict_pipeline_cancellation_role),
     });
@@ -1087,9 +1083,9 @@ class PipelinesPanel implements PanelHandle {
       case 'play-job':
         return playJob(requester, project, jobId);
       case 'cancel-job':
-        return cancelJob(requester, project, jobId, false);
+        return cancelJob(requester, project, jobId);
       case 'force-cancel-job':
-        return cancelJob(requester, project, jobId, true);
+        return forceCancelJob(requester, project, jobId);
       case 'retry-pipeline':
         return retryPipeline(requester, project, pipelineId);
       case 'cancel-pipeline':
@@ -1113,10 +1109,26 @@ class PipelinesPanel implements PanelHandle {
     this.actionBusy = false;
     if (result.ok) {
       this.showActionNotice('success', ACTION_SUCCESS[id]);
-      this.refresh();
+      void this.refreshAfterAction(project, pipelineId);
     } else {
       this.showActionNotice('error', this.actionFailureText(id, result.failure));
     }
+  }
+
+  /**
+   * Refetch the affected Pipeline at once rather than waiting for the next poll:
+   * its Jobs and Bridges where they are already cached, then the list, so a retry
+   * or cancel is reflected immediately — including on a Downstream card.
+   */
+  private async refreshAfterAction(project: string, pipelineId: number): Promise<void> {
+    const gen = this.generation;
+    const key = pipelineKey(project, pipelineId);
+    const pending: Array<Promise<void>> = [];
+    if (this.bridges.has(key)) pending.push(this.loadBridges(gen, project, pipelineId, true));
+    if (Array.isArray(this.jobs.get(key))) pending.push(this.loadJobs(gen, project, pipelineId, true));
+    await Promise.all(pending);
+    if (this.disposed) return;
+    this.refresh();
   }
 
   private showActionNotice(kind: 'success' | 'error', text: string): void {
@@ -2226,82 +2238,76 @@ class PipelinesPanel implements PanelHandle {
     return button;
   }
 
+  /** The shared shape of every panel notice: text and one Dismiss control. */
+  private notice(
+    text: string,
+    options: { role: 'status' | 'alert'; tone?: string; onDismiss: () => void },
+  ): HTMLElement {
+    const notice = el('div', 'gp-notice');
+    if (options.tone) notice.dataset.tone = options.tone;
+    notice.setAttribute('role', options.role);
+    notice.append(el('span', 'gp-notice-text', text));
+    const dismiss = el('button', 'gp-notice-close');
+    dismiss.type = 'button';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', options.onDismiss);
+    notice.append(dismiss);
+    return notice;
+  }
+
   /** The one-time notice after a heal, naming the old path and the target. */
   private renderHealNotice(): HTMLElement | null {
     if (!this.healNotice) return null;
     const host = this.configuredHost();
     const { from, to } = this.healNotice;
-    const notice = el('div', 'gp-notice');
-    notice.setAttribute('role', 'status');
-    notice.append(el('span', 'gp-notice-text', `Showing ${host}/${from} as ${host}/${to}.`));
-    const dismiss = el('button', 'gp-notice-close');
-    dismiss.type = 'button';
-    dismiss.textContent = 'Dismiss';
-    dismiss.addEventListener('click', () => {
-      this.healNotice = null;
-      this.render();
+    return this.notice(`Showing ${host}/${from} as ${host}/${to}.`, {
+      role: 'status',
+      onDismiss: () => {
+        this.healNotice = null;
+        this.render();
+      },
     });
-    notice.append(dismiss);
-    return notice;
   }
 
   private renderHandoffNotice(): HTMLElement | null {
     if (!this.handoffError) return null;
-    const notice = el('div', 'gp-notice');
-    notice.setAttribute('role', 'alert');
-    notice.append(el('span', 'gp-notice-text', this.handoffError));
-    const dismiss = el('button', 'gp-notice-close');
-    dismiss.type = 'button';
-    dismiss.textContent = 'Dismiss';
-    dismiss.addEventListener('click', () => this.finishHandoff(null));
-    notice.append(dismiss);
-    return notice;
+    return this.notice(this.handoffError, {
+      role: 'alert',
+      onDismiss: () => this.finishHandoff(null),
+    });
   }
 
   /** A one-time note that the token is read-only, so a withheld menu has its reason on screen. */
   private renderScopeNotice(): HTMLElement | null {
     if (this.tokenCanWrite !== false || this.scopeNoticeDismissed) return null;
-    const notice = el('div', 'gp-notice');
-    notice.dataset.tone = 'info';
-    notice.setAttribute('role', 'status');
-    notice.append(
-      el(
-        'span',
-        'gp-notice-text',
-        'Pipeline actions need a token with the api scope. This token is read-only.',
-      ),
+    return this.notice(
+      'Pipeline actions need a token with the api scope. This token is read-only.',
+      {
+        role: 'status',
+        tone: 'info',
+        onDismiss: () => {
+          this.scopeNoticeDismissed = true;
+          this.render();
+        },
+      },
     );
-    const dismiss = el('button', 'gp-notice-close');
-    dismiss.type = 'button';
-    dismiss.textContent = 'Dismiss';
-    dismiss.addEventListener('click', () => {
-      this.scopeNoticeDismissed = true;
-      this.render();
-    });
-    notice.append(dismiss);
-    return notice;
   }
 
   /** The last action's outcome: success auto-dismisses, failure stays until dismissed. */
   private renderActionNotice(): HTMLElement | null {
     if (!this.actionNotice) return null;
-    const notice = el('div', 'gp-notice');
-    notice.dataset.tone = this.actionNotice.kind;
-    notice.setAttribute('role', this.actionNotice.kind === 'error' ? 'alert' : 'status');
-    notice.append(el('span', 'gp-notice-text', this.actionNotice.text));
-    const dismiss = el('button', 'gp-notice-close');
-    dismiss.type = 'button';
-    dismiss.textContent = 'Dismiss';
-    dismiss.addEventListener('click', () => {
-      if (this.actionNoticeTimer != null) {
-        this.timers.clearTimeout(this.actionNoticeTimer);
-        this.actionNoticeTimer = null;
-      }
-      this.actionNotice = null;
-      this.render();
+    return this.notice(this.actionNotice.text, {
+      role: this.actionNotice.kind === 'error' ? 'alert' : 'status',
+      tone: this.actionNotice.kind,
+      onDismiss: () => {
+        if (this.actionNoticeTimer != null) {
+          this.timers.clearTimeout(this.actionNoticeTimer);
+          this.actionNoticeTimer = null;
+        }
+        this.actionNotice = null;
+        this.render();
+      },
     });
-    notice.append(dismiss);
-    return notice;
   }
 
   private renderDrawer(reference: OpenJob): HTMLElement {
