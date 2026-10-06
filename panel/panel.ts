@@ -403,6 +403,8 @@ class PipelinesPanel implements PanelHandle {
   private traceWrap = LOG_WRAP_CHARS;
   /** The last scroll offset a paint set, so our own scroll event is not read as the user's. */
   private traceScrollSet = -1;
+  /** The last rendered window start, so a scroll within the window need not repaint. */
+  private traceWindowStart = -1;
   /** The measured monospace advance width, once computed. */
   private traceCharWidthPx: number | null = null;
   /** The open log's incremental line index. */
@@ -2800,6 +2802,7 @@ class PipelinesPanel implements PanelHandle {
       this.traceHeights.clear();
       this.traceErrors = [];
       this.traceIndexed = false;
+      this.traceWindowStart = -1;
     } else if (display.length > this.traceText.length && this.traceLines.length > 0) {
       // An append can lengthen the previously partial last line.
       const last = this.traceLines.length - 1;
@@ -2833,6 +2836,7 @@ class PipelinesPanel implements PanelHandle {
     this.traceErrors = [];
     this.traceHeights.clear();
     this.traceIndexed = false;
+    this.traceWindowStart = -1;
     this.clearTraceRefs();
   }
 
@@ -2841,6 +2845,7 @@ class PipelinesPanel implements PanelHandle {
     this.disposeTraceIndexer();
     this.traceRawText = null;
     this.traceIndexed = false;
+    this.traceWindowStart = -1;
     this.clearTraceRefs();
   }
 
@@ -2945,6 +2950,8 @@ class PipelinesPanel implements PanelHandle {
     if (complete && !this.traceIndexed) {
       // The index now knows every line: repaint so heights and highlights are exact.
       this.traceIndexed = true;
+      // New highlights need a repaint even if the window has not moved.
+      this.traceWindowStart = -1;
       this.repaintTrace(this.followTail);
     } else if (!complete) {
       this.traceIndexed = false;
@@ -3098,6 +3105,9 @@ class PipelinesPanel implements PanelHandle {
    * the content changes fights the user and the view can never settle.
    */
   private paintTrace(body: HTMLElement, reposition: boolean): void {
+    // Read the scroll before clearing: clearing the content collapses the
+    // scroller, and the browser resets `scrollTop` to zero.
+    const previous = body.scrollTop;
     clearNode(body);
     // A width change re-wraps every row, so heights measured at the old width no
     // longer hold. This is also how the detached first paint's fallback width is
@@ -3112,23 +3122,21 @@ class PipelinesPanel implements PanelHandle {
     const count = heights.length;
     const total = heights.reduce((sum, height) => sum + height, 0);
     this.traceTotal = total;
-    // Follow-tail pins to the element's real bottom when layout provides one, so
-    // a mismatch between the summed heights and the real content height cannot
-    // leave the view short of the end. A scrolled position is used as read.
-    const realBottom =
-      body.scrollHeight > 0 && body.clientHeight > 0
-        ? Math.max(0, body.scrollHeight - body.clientHeight)
-        : Math.max(0, total - viewport);
-    const scroll = this.followTail ? realBottom : Math.max(0, this.drawerScrollTop);
+    // Follow-tail pins to the end; a scrolled position is preserved exactly as
+    // the browser held it, so a repaint never fights the user's scrolling.
+    const scroll = reposition
+      ? this.followTail
+        ? Math.max(0, total - viewport)
+        : Math.max(0, this.drawerScrollTop)
+      : Math.max(0, previous);
 
     // A fixed number of lines, led by the anchor, so the window never depends on a
     // viewport that may have been read as zero before layout. At >= 18px a line,
     // the lines below the anchor always cover more than any panel is tall.
-    const anchor = lineAtOffset(heights, scroll);
+    const start = this.traceStartFor(heights, scroll);
     const windowLines = Math.min(LOG_WINDOW_LINES, count);
-    const lead = Math.floor(LOG_WINDOW_LINES / 10);
-    const start = Math.max(0, Math.min(anchor - lead, count - windowLines));
     const end = Math.min(count, start + windowLines);
+    this.traceWindowStart = start;
     let top = 0;
     for (let index = 0; index < start; index++) top += heights[index]!;
     let bottom = 0;
@@ -3151,11 +3159,9 @@ class PipelinesPanel implements PanelHandle {
       content.append(spacer);
     }
     body.append(content);
-    if (reposition) {
-      body.scrollTop = scroll;
-      this.traceScrollSet = body.scrollTop;
-      this.drawerScrollTop = body.scrollTop;
-    }
+    body.scrollTop = scroll;
+    this.traceScrollSet = body.scrollTop;
+    this.drawerScrollTop = body.scrollTop;
     this.measureTraceRows(content);
   }
 
@@ -3195,13 +3201,30 @@ class PipelinesPanel implements PanelHandle {
     }
     if (changed && !this.traceSettling) {
       this.traceSettling = true;
+      this.traceWindowStart = -1;
       this.repaintTrace(false);
       this.traceSettling = false;
     }
   }
 
   private repaintTrace(reposition: boolean): void {
-    if (this.drawerEl) this.paintTrace(this.drawerEl, reposition);
+    const body = this.drawerEl;
+    if (!body) return;
+    // A scroll that stays within the rendered window needs no rebuild; rebuilding
+    // on every scroll event is what makes the scrollbar stutter.
+    if (!reposition && this.traceWrapChars() === this.traceWrap) {
+      const heights = this.traceLines.map((_, index) => this.traceLineHeight(index));
+      if (this.traceStartFor(heights, Math.max(0, body.scrollTop)) === this.traceWindowStart) return;
+    }
+    this.paintTrace(body, reposition);
+  }
+
+  /** The window start for a scroll offset: a fixed span led by the anchor line. */
+  private traceStartFor(heights: readonly number[], scroll: number): number {
+    const count = heights.length;
+    const windowLines = Math.min(LOG_WINDOW_LINES, count);
+    const anchor = lineAtOffset(heights, scroll);
+    return Math.max(0, Math.min(anchor - Math.floor(LOG_WINDOW_LINES / 10), count - windowLines));
   }
 
   private renderFooter(): HTMLElement {

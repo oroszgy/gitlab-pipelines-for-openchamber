@@ -7,6 +7,17 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.10.6] - 2026-10-06
+
+### Fixed
+
+- Scrolling the log drawer no longer sticks at the top. Repainting clears the
+  scroller's content, which resets its offset to zero; the offset is now captured
+  before the clear and restored after, so a repaint neither loses the position
+  nor fights the user's scrolling.
+- Scrolling is smoother: a scroll that stays within the rendered window no longer
+  rebuilds it.
+
 ## [0.10.5] - 2026-10-06
 
 ### Fixed

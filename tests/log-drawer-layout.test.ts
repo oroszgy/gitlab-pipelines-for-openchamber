@@ -160,9 +160,11 @@ describe('the windowed log drawer under real layout', () => {
       scrollTo(target);
       // The content height is stable: the estimates agree with the measured rows.
       expect(body.scrollHeight).toBe(initialHeight);
+      // The offset survives the repaint (it is not reset to zero), clamped to the end.
+      const expected = Math.min(target, initialHeight - BODY_H);
+      expect(body.scrollTop).toBe(expected);
       // The viewport is covered by rendered rows at every position.
       const extent = renderedExtent(root);
-      expect(body.scrollTop).toBeGreaterThanOrEqual(target - ROW_H);
       expect(extent.top).toBeLessThanOrEqual(body.scrollTop);
       expect(extent.bottom).toBeGreaterThanOrEqual(body.scrollTop + BODY_H);
     }
