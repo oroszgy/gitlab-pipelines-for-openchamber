@@ -19,7 +19,8 @@ Single-context: root `GLOSSARY.md` + `docs/adr/`. See `docs/agents/domain.md`.
 
 - **Verified findings** — host API, icon rendering, project/ref resolution: `docs/research/`.
 - **Feature specs** — `docs/specs/<feature>.md`, with their implementation tickets on GitHub Issues,
-  mapped in `docs/specs/README.md`.
+  mapped in `docs/specs/README.md`. When a feature ships, set its spec's `Status` to `implemented`
+  and close its tickets, so the index never points at work that is done.
 - **Coding standards** (read at review): `CODING_STANDARDS.md`.
 - **Built bundles** — `panel/main.js` and `service/main.js` are built by `bun run build` and
   **committed**, because OpenChamber never compiles an extension and installs it straight from the
