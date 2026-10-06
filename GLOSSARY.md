@@ -109,9 +109,9 @@ _Avoid_: numeric id, internal id
 
 **Session handoff**:
 Starting a new OpenChamber session from a failed Job, seeded with that Job's identity, links and Trace
-tail so an agent can investigate the failure in the open project. The Extension's only outbound
-action; it never writes to GitLab. Only a Job of the open project can seed one — a Job of a Downstream
-pipeline in another project is not in the checkout the session runs in.
+tail so an agent can investigate the failure in the open project. The Extension's only action that
+creates a session; it never writes to GitLab. Only a Job of the open project can seed one — a Job of a
+Downstream pipeline in another project is not in the checkout the session runs in.
 _Avoid_: hand-off, escalation, fix-it button
 
 **Pipeline action**:
@@ -120,3 +120,21 @@ force-cancel), or trigger a new Pipeline on the current Ref. Offered only when t
 `api` scope and the user's project role allow it, gated per row by Status, and sent as `POST` under
 `/api/v4/`. Never confirmed, and parameterless.
 _Avoid_: command, mutation, operation
+
+**Watched Ref**:
+The one Ref of a project the user has asked the Extension to watch, so that its Terminal events are
+noticed. A watch is opt-in and one per project.
+_Avoid_: subscribed branch, favourite, pinned ref
+
+**Terminal event**:
+A Pipeline on a Watched Ref reaching a settled Status — success, failed or canceled.
+_Avoid_: completion, finish, result
+
+**Unseen event**:
+A Terminal event that has happened since the user last looked at the Panel.
+_Avoid_: unread, pending notification, new event
+
+**Status section**:
+The Extension's compact area in OpenChamber's Work Status panel, showing its Watched Ref, the latest
+Status and any Unseen events, and toggling the watch.
+_Avoid_: status bar, widget, mini panel

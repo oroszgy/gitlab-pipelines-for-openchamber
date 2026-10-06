@@ -12,6 +12,10 @@ Issues titled `<feature>/<NN>: <title>`; this table maps each stable ticket id t
 - [`downstream-pipelines`](downstream-pipelines.md) — Downstream pipelines
 - [`session-handoff`](session-handoff.md) — Session handoff
 - [`pipeline-actions`](pipeline-actions.md) — Pipeline and Job actions
+- [`caching-and-transport`](caching-and-transport.md) — Caching and transport speedups
+- [`smart-defaults`](smart-defaults.md) — Smart defaults
+- [`log-drawer`](log-drawer.md) — Log drawer usability
+- [`notifications`](notifications.md) — Notifications
 
 ## Tickets
 
@@ -55,3 +59,24 @@ Issues titled `<feature>/<NN>: <title>`; this table maps each stable ticket id t
 | `pipeline-actions/05` | Capability gating and the header action | [#47](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/47) |
 | `pipeline-actions/06` | Outcome notice and refresh | [#48](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/48) |
 | `pipeline-actions/07` | Docs, glossary and the posture ADR | [#49](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/49) |
+| `caching-and-transport/01` | Header allowlist through the service | [#50](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/50) |
+| `caching-and-transport/02` | Conditional GET reuses unchanged data | [#51](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/51) |
+| `caching-and-transport/03` | Load more Pipelines | [#52](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/52) |
+| `caching-and-transport/04` | Rate-limit pause and notice | [#53](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/53) |
+| `caching-and-transport/05` | Incremental Trace deltas | [#54](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/54) |
+| `smart-defaults/01` | Remember the scope | [#55](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/55) |
+| `smart-defaults/02` | Remember expansion and open drawer | [#56](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/56) |
+| `smart-defaults/03` | Auto-expand the newest active Pipeline | [#57](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/57) |
+| `smart-defaults/04` | Automatic All-refs fallback | [#58](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/58) |
+| `log-drawer/01` | Windowed drawer rendering | [#59](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/59) |
+| `log-drawer/02` | Line index, ANSI stripping, idle indexing | [#60](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/60) |
+| `log-drawer/03` | Find in log | [#61](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/61) |
+| `log-drawer/04` | Highlight and jump to error | [#62](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/62) |
+| `log-drawer/05` | Copy the Trace | [#63](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/63) |
+| `notifications/01` | Service watch store and `/watch` route | [#64](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/64) |
+| `notifications/02` | Service poller and event log | [#65](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/65) |
+| `notifications/03` | `/events` route and watermark | [#66](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/66) |
+| `notifications/04` | Rail panel badge, failure toasts, watch toggle | [#67](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/67) |
+| `notifications/05` | Status section contribution | [#68](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/68) |
+| `notifications/06` | Badge lifecycle | [#69](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/69) |
+| `notifications/07` | Older-service degradation | [#70](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/70) |
