@@ -1111,7 +1111,10 @@ describe('session handoff', () => {
     const { root } = await mount(host, new FakeTimers());
     (root.querySelector('.gp-row') as HTMLElement).click();
     await flush();
-    expect(root.querySelector('.gp-job .gp-handoff')).not.toBeNull();
+    const rowAction = root.querySelector('.gp-job .gp-handoff') as HTMLElement;
+    expect(rowAction).not.toBeNull();
+    expect(rowAction.textContent).toBe('Debug this job');
+    expect(rowAction.querySelector('svg')).not.toBeNull();
 
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
@@ -1784,7 +1787,7 @@ describe('downstream pipelines', () => {
     expect(panel.isPolling()).toBe(false);
   });
 
-  test('Start session is absent on a multi-project downstream job, present on a child’s', async () => {
+  test('Debug this job is absent on a multi-project downstream job, present on a child’s', async () => {
     const host = configuredHost();
     const child = downstreamPipeline({
       id: 55,

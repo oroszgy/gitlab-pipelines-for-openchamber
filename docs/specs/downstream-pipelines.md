@@ -23,7 +23,7 @@ sits beneath it as a card: status, label (project path, or "child pipeline" for 
 short SHA and a link to GitLab. The card expands to that pipeline's Jobs by Stage, and its own Trigger
 jobs expand again — bounded at three generations below the root. Collapsed Pipeline rows show a
 "↳ N downstream" count. Downstream pipelines in another project are display-only beyond the card's own
-Jobs; they never offer **Start session**, because the open checkout cannot fix them.
+Jobs; they never offer **Debug this job**, because the open checkout cannot fix them.
 
 ## User Stories
 
@@ -59,7 +59,7 @@ Jobs; they never offer **Start session**, because the open checkout cannot fix t
 16. As a developer, I want an unreadable downstream project to show a per-card error distinct from "no
     jobs", so that I know it is a permission problem, not an empty pipeline.
 17. As a developer, I want a failed bridge fetch to stay contained, so that it never blanks the list.
-18. As a developer, I want **Start session** only on Jobs of the open project — including its child
+18. As a developer, I want **Debug this job** only on Jobs of the open project — including its child
     Pipelines — so that an agent is never asked to fix code it cannot see.
 19. As a developer, I want `/bridges` used now and `/trigger_jobs` on 19.2+, so that older instances keep
     working.
@@ -127,7 +127,7 @@ project may be unreadable by the token. The card still renders (its Status and l
 bridges payload); expanding its Jobs that 403s or 404s shows a per-card error saying the project cannot
 be read, kept distinct from "no jobs". This never escalates to a Panel-wide state.
 
-**Handoff stays in the open project.** `Start session` appears only for a failed Job of the root
+**Handoff stays in the open project.** `Debug this job` appears only for a failed Job of the root
 Pipeline or of a same-project child pipeline. A multi-project Downstream pipeline's Jobs render without
 it: the session runs in the open checkout, which cannot fix another project.
 
@@ -149,7 +149,7 @@ through the fake host port. Three seams:
   Job's Trace opening in the drawer against the other project; the generation cap and its "Continue in
   GitLab" link; the cycle guard; the per-card unreadable error distinct from "no jobs"; a failed bridge
   fetch leaving the list intact; polling driven by a Downstream status after the upstream settled; and
-  `Start session` absent on a multi-project Downstream job but present on a child's.
+  `Debug this job` absent on a multi-project Downstream job but present on a child's.
 
 `FakeHost` gains bridge responses keyed by `(project, pipeline id)`, so a test can make the same pipeline
 id exist in two projects.

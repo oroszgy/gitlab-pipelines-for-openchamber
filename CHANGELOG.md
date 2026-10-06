@@ -7,6 +7,13 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.7.8] - 2026-10-06
+
+### Changed
+
+- The action that starts an agent session from a failed Job is now labelled **Debug this job** and
+  carries a bug icon, so its purpose is clear at a glance rather than only in its tooltip.
+
 ## [0.7.7] - 2026-10-06
 
 ### Fixed

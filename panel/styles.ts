@@ -251,6 +251,7 @@ html { font-size: 16px !important; }
   flex: 0 0 auto;
   display: inline-flex;
   align-items: center;
+  gap: 5px;
   height: 24px;
   padding: 0 8px;
   border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
@@ -263,6 +264,7 @@ html { font-size: 16px !important; }
 }
 .gp-handoff:hover:not([disabled]) { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); }
 .gp-handoff[disabled] { color: var(--oc-muted, GrayText); opacity: 0.6; cursor: default; }
+.gp-handoff svg { flex: 0 0 auto; }
 
 .gp-notice {
   flex: 0 0 auto;

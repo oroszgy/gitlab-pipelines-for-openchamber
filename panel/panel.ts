@@ -173,6 +173,9 @@ const CLOSE_ICON =
 /** Heroicons `cog-6-tooth` (solid): a standard settings gear with a punched-out centre. */
 const GEAR_ICON =
   '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M11.078 2.25c-.917 0-1.699.663-1.85 1.567L9.05 4.889c-.02.12-.115.26-.297.348a7.493 7.493 0 0 0-.986.57c-.166.115-.334.126-.45.083L6.3 5.508a1.875 1.875 0 0 0-2.282.819l-.922 1.597a1.875 1.875 0 0 0 .432 2.385l.84.692c.095.078.17.229.154.43a7.598 7.598 0 0 0 0 1.139c.015.2-.059.352-.153.43l-.841.692a1.875 1.875 0 0 0-.432 2.385l.922 1.597a1.875 1.875 0 0 0 2.282.818l1.019-.382c.115-.043.283-.031.45.082.312.214.641.405.985.57.182.088.277.228.297.35l.178 1.071c.151.904.933 1.567 1.85 1.567h1.844c.916 0 1.699-.663 1.85-1.567l.178-1.072c.02-.12.114-.26.297-.349.344-.165.673-.356.985-.57.167-.114.335-.125.45-.082l1.02.382a1.875 1.875 0 0 0 2.28-.819l.923-1.597a1.875 1.875 0 0 0-.432-2.385l-.84-.692c-.095-.078-.17-.229-.154-.43a7.614 7.614 0 0 0 0-1.139c-.016-.2.059-.352.153-.43l.84-.692c.708-.582.891-1.59.433-2.385l-.922-1.597a1.875 1.875 0 0 0-2.282-.818l-1.02.382c-.114.043-.282.031-.449-.083a7.49 7.49 0 0 0-.985-.57c-.183-.087-.277-.227-.297-.348l-.179-1.072a1.875 1.875 0 0 0-1.85-1.567h-1.843ZM12 15.75a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5Z"/></svg>';
+/** Heroicons `bug-ant` (solid): marks the handoff as an agent debugging the failed Job. */
+const BUG_ICON =
+  '<svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" fill="currentColor" fill-rule="evenodd" clip-rule="evenodd"><path d="M8.478 1.6a.75.75 0 0 1 .273 1.026 3.72 3.72 0 0 0-.425 1.121c.058.058.118.114.18.168A4.491 4.491 0 0 1 12 2.25c1.413 0 2.673.651 3.497 1.668.06-.054.12-.11.178-.167a3.717 3.717 0 0 0-.426-1.125.75.75 0 1 1 1.298-.752 5.22 5.22 0 0 1 .671 2.046.75.75 0 0 1-.187.582c-.241.27-.505.52-.787.749a4.494 4.494 0 0 1 .216 2.1c-.106.792-.753 1.295-1.417 1.403-.182.03-.364.057-.547.081.152.227.273.476.359.742a23.122 23.122 0 0 0 3.832-.803 23.241 23.241 0 0 0-.345-2.634.75.75 0 0 1 1.474-.28c.21 1.115.348 2.256.404 3.418a.75.75 0 0 1-.516.75c-1.527.499-3.119.854-4.76 1.049-.074.38-.22.735-.423 1.05 2.066.209 4.058.672 5.943 1.358a.75.75 0 0 1 .492.75 24.665 24.665 0 0 1-1.189 6.25.75.75 0 0 1-1.425-.47 23.14 23.14 0 0 0 1.077-5.306c-.5-.169-1.009-.32-1.524-.455.068.234.104.484.104.746 0 3.956-2.521 7.5-6 7.5-3.478 0-6-3.544-6-7.5 0-.262.037-.511.104-.746-.514.135-1.022.286-1.522.455.154 1.838.52 3.616 1.077 5.307a.75.75 0 1 1-1.425.468 24.662 24.662 0 0 1-1.19-6.25.75.75 0 0 1 .493-.749 24.586 24.586 0 0 1 4.964-1.24h.01c.321-.046.644-.085.969-.118a2.983 2.983 0 0 1-.424-1.05 24.614 24.614 0 0 1-4.76-1.05.75.75 0 0 1-.516-.75c.057-1.16.194-2.302.405-3.417a.75.75 0 0 1 1.474.28c-.164.862-.28 1.74-.345 2.634 1.237.371 2.517.642 3.832.803.085-.266.207-.515.359-.742a18.698 18.698 0 0 1-.547-.08c-.664-.11-1.311-.612-1.417-1.404a4.535 4.535 0 0 1 .217-2.103 6.788 6.788 0 0 1-.788-.751.75.75 0 0 1-.187-.583 5.22 5.22 0 0 1 .67-2.04.75.75 0 0 1 1.026-.273Z"/></svg>';
 
 // ---------------------------------------------------------------------------
 // Tiny DOM helpers
@@ -813,7 +816,7 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /**
-   * The live Job behind a drawer/`Start session` reference: looked up in its own
+   * The live Job behind a drawer/`Debug this job` reference: looked up in its own
    * (project, pipeline id) Jobs entry, so a same job id in another project cannot
    * answer in its place.
    */
@@ -841,7 +844,7 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /**
-   * Whether this Job offers **Start session**. Handoff seeds a session in the open checkout, so a
+   * Whether this Job offers **Debug this job**. Handoff seeds a session in the open checkout, so a
    * Job of a Downstream pipeline in *another* project is deliberately excluded: the checkout cannot
    * fix that project. Only the root Pipeline and its same-project child pipelines qualify. See the
    * Handoff section of `docs/specs/downstream-pipelines.md`.
@@ -1727,7 +1730,7 @@ class PipelinesPanel implements PanelHandle {
           this.openJobDrawer(project, pipelineId, job.id);
         }
       });
-      // Start session stays inside the open project: a multi-project Downstream
+      // Debug this job stays inside the open project: a multi-project Downstream
       // job renders without it, since the checkout cannot fix another project.
       if (isHandoffJob(job) && this.canHandoffJob(project)) row.append(this.renderHandoffAction(project, pipelineId, job));
       stage.append(row);
@@ -1777,7 +1780,7 @@ class PipelinesPanel implements PanelHandle {
 
     // The card's own project is where the Downstream pipeline lives, read from
     // its URL. When the URL cannot be parsed there is no project to read, so the
-    // card is display-only: it never fetches jobs or offers Start session.
+    // card is display-only: it never fetches jobs or offers Debug this job.
     const projectPath = downstreamProject(downstream);
     const parent = parentNode ?? this.nodeFor(project, pipelineId);
     const cardProject = projectPath ?? '';
@@ -1885,20 +1888,21 @@ class PipelinesPanel implements PanelHandle {
     this.render();
   }
 
-  /** The "Start session" affordance for a failed Job, on its row or in the drawer. */
+  /** The "Debug this job" affordance for a failed Job, on its row or in the drawer. */
   private renderHandoffAction(project: string, pipelineId: number, job: Job): HTMLElement {
     const button = el('button', 'gp-handoff');
     button.type = 'button';
     const busy = this.handoffJobId === job.id;
     const canHandoff = this.canHandoff();
     button.disabled = !canHandoff || busy;
-    button.textContent = busy ? 'Starting…' : 'Start session';
+    const label = busy ? 'Starting…' : 'Debug this job';
+    button.innerHTML = `${BUG_ICON}<span class="gp-handoff-label">${label}</span>`;
     button.title = canHandoff
-      ? 'Start a session for this failed job'
+      ? 'Start a session to debug this failed job'
       : this.directory == null
-        ? 'Open a project to start a session — a session needs a checkout to fix.'
+        ? 'Open a project to debug this job — a session needs a checkout.'
         : 'This project could not be resolved, so a session cannot be started.';
-    button.setAttribute('aria-label', `${button.textContent} — ${job.name}`);
+    button.setAttribute('aria-label', `${label} — ${job.name}`);
     if (canHandoff && !busy) {
       button.addEventListener('click', (event) => {
         event.stopPropagation();
@@ -1948,7 +1952,7 @@ class PipelinesPanel implements PanelHandle {
     const title = el('span', 'gp-drawer-title', job ? `${job.name} · ${jobStatusInfo(job).label}` : `Job #${reference.jobId}`);
     head.append(title);
     if (job?.web_url) head.append(this.renderExternalLink('gp-drawer-link', 'View full log in GitLab', job.web_url));
-    // Start session only inside the open project, matching the row's own gating.
+    // Debug this job only inside the open project, matching the row's own gating.
     if (job && isHandoffJob(job) && this.canHandoffJob(reference.project)) {
       head.append(this.renderHandoffAction(reference.project, reference.pipelineId, job));
     }

@@ -13,14 +13,14 @@ Pipelines Panel exists to keep intact, and it is most painful precisely when CI 
 
 ## Solution
 
-A **Start session** action on a failed Job. It starts a new OpenChamber session against the open
+A **Debug this job** action on a failed Job. It starts a new OpenChamber session against the open
 project, seeded with the Job's identity, links and the tail of its Trace, and opens that session so
 the agent can investigate and fix. The action appears on the Job row and in the log drawer, two
 clicks apart. It reads nothing new from GitLab and writes nothing to GitLab.
 
 ## User Stories
 
-1. As a developer looking at a failed Job, I want a **Start session** action, so that I can hand the
+1. As a developer looking at a failed Job, I want a **Debug this job** action, so that I can hand the
    failure to an agent without leaving the workspace.
 2. As a developer, I want the action on the Job row *and* in the log drawer, so that I can act
    whether I have already opened the log or not.
