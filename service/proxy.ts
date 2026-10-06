@@ -14,11 +14,21 @@ export type ProxyRequest = {
   path: string;
   query?: Record<string, string>;
   body?: string;
+  /** The curated request headers to forward (currently only `If-None-Match`). */
+  headers?: Record<string, string>;
 };
 
 export type ProxyResult =
-  | { ok: true; status: number; body: string; truncated: boolean; error?: undefined }
-  | { ok: false; status?: undefined; body?: undefined; truncated?: undefined; error: string };
+  | {
+      ok: true;
+      status: number;
+      body: string;
+      truncated: boolean;
+      /** The allowlisted response headers, lowercased. Anything else is dropped. */
+      headers: Record<string, string>;
+      error?: undefined;
+    }
+  | { ok: false; status?: undefined; body?: undefined; truncated?: undefined; headers?: undefined; error: string };
 
 /**
  * The slice of an outbound response the proxy needs: a reader it can stop
@@ -37,7 +47,34 @@ export type ProxyFetch = (url: string, init: {
   body?: string;
   signal?: AbortSignal;
   redirect?: 'manual';
-}) => Promise<{ status: number; body?: ProxyBodyStream | null; text(): Promise<string> }>;
+}) => Promise<{
+  status: number;
+  /** The response headers, read through `get`; absent on a bodyless fake. */
+  headers?: { get(name: string): string | null };
+  body?: ProxyBodyStream | null;
+  text(): Promise<string>;
+}>;
+
+/** The request headers a Panel may send down: only `If-None-Match` today. */
+const REQUEST_HEADER_ALLOWLIST = new Set(['if-none-match']);
+
+/**
+ * The response headers a Panel may see. This is the seam's contract: a new
+ * header is a deliberate edit here, never a side effect, so the Access token
+ * and cookies can never cross. See ADR-0009.
+ */
+const RESPONSE_HEADER_ALLOWLIST = [
+  'etag',
+  'link',
+  'x-next-page',
+  'x-prev-page',
+  'x-total',
+  'x-total-pages',
+  'ratelimit-limit',
+  'ratelimit-remaining',
+  'ratelimit-reset',
+  'retry-after',
+] as const;
 
 /** The request budget. Matches the host's own ~20 s ceiling. */
 export const PROXY_TIMEOUT_MS = 20_000;
@@ -147,6 +184,29 @@ async function readCapped(response: {
   return { text, truncated };
 }
 
+/** Pick the allowlisted response headers, lowercased; drop everything else. */
+function readAllowlistedHeaders(response: {
+  headers?: { get(name: string): string | null };
+}): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (typeof response.headers?.get !== 'function') return out;
+  for (const name of RESPONSE_HEADER_ALLOWLIST) {
+    const value = response.headers.get(name);
+    if (value != null && value !== '') out[name] = value;
+  }
+  return out;
+}
+
+/** The request headers to forward: only those on the allowlist, lowercased. */
+function forwardedHeaders(headers: Record<string, string> | undefined): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    const name = key.toLowerCase();
+    if (REQUEST_HEADER_ALLOWLIST.has(name)) out[name] = value;
+  }
+  return out;
+}
+
 export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch): Promise<ProxyResult> {
   const origin = normalizeBaseUrl(request.baseUrl);
   if (!origin) {
@@ -160,7 +220,10 @@ export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch):
   if (new URL(url).origin !== origin) {
     return { ok: false, error: PATH_ERROR };
   }
-  const headers: Record<string, string> = { Authorization: `Bearer ${request.token}` };
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${request.token}`,
+    ...forwardedHeaders(request.headers),
+  };
   if (request.body != null) headers['Content-Type'] = 'application/json';
 
   const controller = new AbortController();
@@ -194,5 +257,11 @@ export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch):
     clearTimeout(timer);
   }
 
-  return { ok: true, status: response.status, body: redact(text, request.token), truncated };
+  return {
+    ok: true,
+    status: response.status,
+    body: redact(text, request.token),
+    truncated,
+    headers: readAllowlistedHeaders(response),
+  };
 }

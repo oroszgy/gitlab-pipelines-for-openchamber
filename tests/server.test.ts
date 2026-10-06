@@ -156,6 +156,44 @@ describe('the service shell answers authenticated requests', () => {
   });
 });
 
+describe('the proxy envelope carries the header allowlist', () => {
+  test('forwards a request header and returns the allowlisted response headers', async () => {
+    const configFs = fakeFs();
+    const base = deps({ configFs });
+    await handleRequest(
+      request({ method: 'POST', path: '/token', body: JSON.stringify({ host: 'gitlab.example.com', token: 't' }) }),
+      base,
+    );
+
+    const seen: Array<Record<string, string>> = [];
+    const fetchImpl = (async (_url: string, init: { headers: Record<string, string> }) => {
+      seen.push(init.headers);
+      return new Response('body', { status: 200, headers: { ETag: 'W/"a"', 'Set-Cookie': 'secret' } });
+    }) as unknown as ProxyFetch;
+
+    const result = await handleRequest(
+      request({
+        method: 'POST',
+        path: '/proxy',
+        body: JSON.stringify({
+          baseUrl: 'https://gitlab.example.com',
+          method: 'GET',
+          path: '/api/v4/x',
+          headers: { 'If-None-Match': 'W/"a"', Cookie: 'session=secret' },
+        }),
+      }),
+      { ...base, fetchImpl },
+    );
+
+    expect(result.status).toBe(200);
+    const envelope = JSON.parse(result.body) as { headers?: Record<string, string> };
+    expect(envelope.headers).toEqual({ etag: 'W/"a"' });
+    expect(seen[0]?.['if-none-match']).toBe('W/"a"');
+    expect(seen[0]?.Cookie).toBeUndefined();
+    expect(seen[0]?.cookie).toBeUndefined();
+  });
+});
+
 describe('a request body is read within a cap (#42)', () => {
   test('rejects an oversized body with 413 and stops reading it', async () => {
     const chunkSize = 1024;

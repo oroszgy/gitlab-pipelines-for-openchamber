@@ -76,7 +76,14 @@ export function parseConfigEnvelope(body: string): ServiceConfig | null {
  * token apart from a transport error.
  */
 export function parseProxyEnvelope(response: HostResponse): HostResponse {
-  let parsed: { status?: number; body?: string; error?: string; code?: string; truncated?: boolean };
+  let parsed: {
+    status?: number;
+    body?: string;
+    error?: string;
+    code?: string;
+    truncated?: boolean;
+    headers?: Record<string, string>;
+  };
   try {
     parsed = JSON.parse(response.body) as typeof parsed;
   } catch {
@@ -84,10 +91,17 @@ export function parseProxyEnvelope(response: HostResponse): HostResponse {
     return { status: response.status, body: response.body };
   }
   if (typeof parsed.status === 'number') {
+    const headers: Record<string, string> = {};
+    if (parsed.headers && typeof parsed.headers === 'object') {
+      for (const [key, value] of Object.entries(parsed.headers)) {
+        if (typeof value === 'string') headers[key] = value;
+      }
+    }
     return {
       status: parsed.status,
       body: parsed.body ?? '',
       ...(typeof parsed.truncated === 'boolean' ? { truncated: parsed.truncated } : {}),
+      ...(Object.keys(headers).length ? { headers } : {}),
     };
   }
   if (parsed.error) {

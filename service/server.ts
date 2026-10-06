@@ -155,7 +155,12 @@ async function route(request: ServiceRequest, deps: ServiceDeps): Promise<Servic
   if (!result.ok) {
     return json(502, { error: result.error, ...(result.code ? { code: result.code } : {}) });
   }
-  return json(200, { status: result.status, body: result.body, truncated: result.truncated });
+  return json(200, {
+    status: result.status,
+    body: result.body,
+    truncated: result.truncated,
+    headers: result.headers,
+  });
 }
 
 /**

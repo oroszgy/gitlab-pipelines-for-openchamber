@@ -53,12 +53,22 @@ function handlerFor(data: {
     if (request.path.endsWith('/trace')) {
       return {
         status: 200,
-        body: data.trace ?? '',
+        body: sliceTrace(data.trace ?? '', request),
         ...(data.traceTruncated != null ? { truncated: data.traceTruncated } : {}),
       };
     }
     return { status: 404, body: '' };
   };
+}
+
+/**
+ * A Trace as GitLab's `byte_offset`/`byte_limit` would return it. A settled
+ * fetch sends no range, so it gets the whole body.
+ */
+function sliceTrace(full: string, request: HostRequest): string {
+  const offset = Number(request.query?.byte_offset ?? 0);
+  const limit = Number(request.query?.byte_limit ?? full.length);
+  return full.slice(offset, offset + limit);
 }
 
 async function mount(
@@ -527,7 +537,7 @@ describe('live log while a job runs', () => {
       if (request.path.endsWith('/jobs')) {
         return { status: 200, body: JSON.stringify([job({ id: 9, status: 'running', finished_at: null })]) };
       }
-      if (request.path.endsWith('/trace')) return { status: 200, body: trace };
+      if (request.path.endsWith('/trace')) return { status: 200, body: sliceTrace(trace, request) };
       return { status: 404, body: '' };
     };
     const timers = new FakeTimers();
@@ -541,7 +551,7 @@ describe('live log while a job runs', () => {
     trace = 'line 1\nline 2';
     timers.advance(5000);
     await flush();
-    expect(root.querySelector('.gp-drawer-body')?.textContent).toContain('line 2');
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('line 1\nline 2');
   });
 
   test('does not refetch a settled job’s log, even while the pipeline polls', async () => {
@@ -2067,7 +2077,9 @@ describe('downstream pipelines', () => {
       if (request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs') {
         return { status: 200, body: JSON.stringify([job({ id: 99, name: 'e2e', stage: 'test', status: 'running', finished_at: null })]) };
       }
-      if (request.path === '/api/v4/projects/other%2Fproject/jobs/99/trace') return { status: 200, body: traceText };
+      if (request.path === '/api/v4/projects/other%2Fproject/jobs/99/trace') {
+        return { status: 200, body: sliceTrace(traceText, request) };
+      }
       return { status: 200, body: '' };
     };
     const timers = new FakeTimers();
@@ -2362,6 +2374,230 @@ describe('pipeline actions', () => {
     const card = root.querySelector('.gp-downstream-card') as HTMLElement;
     expect(card).not.toBeNull();
     expect(menuLabels(card)).toEqual(['Retry pipeline']);
+  });
+});
+
+describe('loading older pipelines', () => {
+  const nextLink = (page: number) =>
+    `<https://gitlab.com/api/v4/projects/group%2Fproject/pipelines?page=${page}&per_page=20>; rel="next"`;
+
+  function pagedHandler(pages: Pipeline[]): (request: HostRequest) => HostResponse {
+    return (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        const page = Number(request.query?.page ?? 1);
+        const body = JSON.stringify([pages[page - 1] ?? pipeline({ id: 900 + page })]);
+        return page < pages.length
+          ? { status: 200, body, headers: { link: nextLink(page + 1) } }
+          : { status: 200, body };
+      }
+      return { status: 200, body: '[]' };
+    };
+  }
+
+  test('Load more appears only with a next page, and appends without disturbing expansion', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = pagedHandler([
+      pipeline({ id: 1, ref: 'first' }),
+      pipeline({ id: 2, ref: 'second' }),
+    ]);
+    const { root } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('first');
+    expect(text(root)).not.toContain('second');
+    const more = root.querySelector('.gp-more button') as HTMLButtonElement;
+    expect(more?.textContent?.trim()).toBe('Load more');
+
+    // Expand the first row, then load so the expansion must survive. Re-query
+    // the control: expanding re-renders the panel and replaces its nodes.
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-more button') as HTMLButtonElement).click();
+    await flush();
+
+    expect(text(root)).toContain('second');
+    expect((root.querySelector('.gp-item') as HTMLElement).dataset.open).toBe('true');
+    // The last page has no next link, so the control is gone.
+    expect(root.querySelector('.gp-more')).toBeNull();
+  });
+
+  test('repeated clicks do not double-append', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = pagedHandler([
+      pipeline({ id: 1 }),
+      pipeline({ id: 2 }),
+      pipeline({ id: 3 }),
+    ]);
+    const { root } = await mount(host, new FakeTimers());
+    const more = root.querySelector('.gp-more button') as HTMLButtonElement;
+    more.click();
+    more.click();
+    await flush();
+    expect(root.querySelectorAll('.gp-row').length).toBe(2);
+    (root.querySelector('.gp-more button') as HTMLButtonElement).click();
+    await flush();
+    expect(root.querySelectorAll('.gp-row').length).toBe(3);
+  });
+
+  test('a missing X-Total/X-Total-Pages never blocks loading', async () => {
+    const host = configuredHost();
+    // The Link header is the only signal; no totals are returned anywhere.
+    host.gitlabHandler = pagedHandler([pipeline({ id: 1 }), pipeline({ id: 2 })]);
+    const { root } = await mount(host, new FakeTimers());
+    expect(root.querySelector('.gp-more')).not.toBeNull();
+  });
+});
+
+describe('rate limits', () => {
+  test('a 429 shows one notice, widens the poll, and clears on the next success', async () => {
+    const host = configuredHost();
+    let limited = true;
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return limited
+          ? { status: 429, body: '', headers: { 'retry-after': '30', 'ratelimit-remaining': '0' } }
+          : { status: 200, body: JSON.stringify([pipeline({ status: 'success' })]) };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const timers = new FakeTimers();
+    const { root } = await mount(host, timers);
+
+    expect(text(root)).toContain('rate-limited');
+    // The 429's own low remaining must not double the Retry-After.
+    expect(timers.pendingDelays()).toContain(30_000);
+    expect(timers.pendingDelays()).not.toContain(60_000);
+
+    limited = false;
+    timers.advance(30_000);
+    await flush();
+    expect(text(root)).not.toContain('rate-limited');
+    expect(text(root)).toContain('Passed');
+  });
+
+  test('a low RateLimit-Remaining widens the poll pre-emptively', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return {
+          status: 200,
+          body: JSON.stringify([pipeline({ status: 'running', finished_at: null })]),
+          headers: { 'ratelimit-remaining': '3' },
+        };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const timers = new FakeTimers();
+    const { panel } = await mount(host, timers);
+    expect(panel.isPolling()).toBe(true);
+    // Base is 5000; a low remaining budget doubles it.
+    expect(timers.pendingDelays()).toContain(10_000);
+  });
+});
+
+describe('incremental traces', () => {
+  function runningTraceHandler(onTrace: (request: HostRequest) => HostResponse): (request: HostRequest) => HostResponse {
+    return (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify([job({ id: 9, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/trace')) return onTrace(request);
+      return { status: 404, body: '' };
+    };
+  }
+
+  test('accumulates successive windows into one log from the running offset', async () => {
+    const host = configuredHost();
+    const full = 'part 1 part 2';
+    let calls = 0;
+    host.gitlabHandler = runningTraceHandler((request) => {
+      calls += 1;
+      if (calls === 1) return { status: 200, body: 'part 1', truncated: true };
+      return { status: 200, body: sliceTrace(full, request) };
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toBe(full);
+    const traceRequests = host.gitlabRequests.filter((request) => request.path.endsWith('/trace'));
+    expect(traceRequests).toHaveLength(2);
+    expect(traceRequests[1]?.query?.byte_offset).toBe('6');
+  });
+
+  test('a running log stops accumulating at the drawer line cap', async () => {
+    const host = configuredHost();
+    const huge = Array.from({ length: LOG_MAX_LINES + 1 }, (_, index) => `line ${index + 1}`).join('\n');
+    host.gitlabHandler = runningTraceHandler(() => ({ status: 200, body: huge, truncated: true }));
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+
+    expect(root.querySelector('.gp-drawer-notice')?.textContent).toContain('Older lines not shown');
+    // One window already filled the line cap, so the loop stopped.
+    const traceRequests = host.gitlabRequests.filter((request) => request.path.endsWith('/trace'));
+    expect(traceRequests).toHaveLength(1);
+  });
+});
+
+describe('conditional pipeline fetches', () => {
+  test('an unchanged list answered 304 keeps the list and sends If-None-Match', async () => {
+    const host = configuredHost();
+    let calls = 0;
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        calls += 1;
+        if (calls === 1) {
+          return {
+            status: 200,
+            body: JSON.stringify([pipeline({ id: 1, ref: 'unchanged' })]),
+            headers: { etag: 'W/"p"' },
+          };
+        }
+        return { status: 304, body: '' };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('unchanged');
+    panel.refresh();
+    await flush();
+
+    expect(text(root)).toContain('unchanged');
+    expect(root.querySelector('.gp-state')).toBeNull();
+    const requests = pipelineRequests(host);
+    expect(requests[1]?.headers?.['if-none-match']).toBe('W/"p"');
+  });
+
+  test('the cache is dropped when the Access token changes', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return {
+          status: 200,
+          body: JSON.stringify([pipeline({ id: 1 })]),
+          headers: { etag: 'W/"p"' },
+        };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+    expect(pipelineRequests(host)).toHaveLength(1);
+
+    openConfig(root);
+    setField(root, 'gp-config-token', 'rotated-pat');
+    submitConfig(root);
+    await flush();
+
+    const requests = pipelineRequests(host);
+    expect(requests.length).toBeGreaterThan(1);
+    // A different token means the cached ETag no longer applies.
+    expect(requests[requests.length - 1]?.headers?.['if-none-match']).toBeUndefined();
   });
 });
 

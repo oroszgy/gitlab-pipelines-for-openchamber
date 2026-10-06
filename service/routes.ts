@@ -95,7 +95,7 @@ export type ProxyRouteRequest = Omit<ProxyRequest, 'token'>;
 export const NO_TOKEN_ERROR = 'No Access token is configured for this GitLab host.';
 
 export type ProxyRouteResult =
-  | { ok: true; status: number; body: string; truncated: boolean }
+  | { ok: true; status: number; body: string; truncated: boolean; headers: Record<string, string> }
   | { ok: false; code?: 'no-token'; error: string };
 
 /**
@@ -124,6 +124,7 @@ export async function proxyWithConfig(
       path: request.path,
       ...(request.query ? { query: request.query } : {}),
       ...(request.body != null ? { body: request.body } : {}),
+      ...(request.headers ? { headers: request.headers } : {}),
       token,
     },
     fetchImpl,

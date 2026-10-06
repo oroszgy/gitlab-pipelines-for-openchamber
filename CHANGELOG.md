@@ -7,6 +7,28 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.9.0] - 2026-10-06
+
+### Added
+
+- Polling is now much cheaper. The panel reuses a Pipeline list, and a settled
+  Job's log, when GitLab says they have not changed, instead of re-downloading
+  them every few seconds.
+- **Load more** at the end of the Pipeline list pages back through older
+  Pipelines, so the list is no longer stuck at the newest 20. Loading a page
+  keeps the rows you have expanded.
+- When GitLab rate-limits the panel, it pauses and explains why, resuming on its
+  own once the limit clears.
+- A running Job's Trace now grows as an incremental delta and accumulates across
+  the service's response cap, so a long Trace becomes fully readable rather than
+  stopping at one capped window.
+
+### Changed
+
+- The panel asks GitLab for a wider set of response headers (paging, rate-limit
+  and caching signals) through a small, named allowlist, so the token and
+  cookies still never cross the service boundary.
+
 ## [0.8.2] - 2026-10-06
 
 ### Fixed

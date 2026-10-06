@@ -22,6 +22,12 @@ export type HostRequest = {
   path: string;
   query?: Record<string, string>;
   body?: string;
+  /**
+   * The curated request headers for a GitLab call (`If-None-Match` today).
+   * They travel inside the `/proxy` body, since the host bridge has no header
+   * channel. See ADR-0009.
+   */
+  headers?: Record<string, string>;
 };
 
 export type HostResponse = {
@@ -34,6 +40,11 @@ export type HostResponse = {
    * only signal.
    */
   truncated?: boolean;
+  /**
+   * The allowlisted GitLab response headers the service returned, lowercased.
+   * Absent when the service is older or sent none.
+   */
+  headers?: Record<string, string>;
 };
 
 export type HostPort = {

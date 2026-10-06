@@ -11,10 +11,14 @@ import {
   fetchProject,
   fetchTokenScopes,
   fetchTrace,
+  fetchTraceRange,
   forceCancelJob,
   jobsRequest,
   mapHttpStatus,
+  newRequestCache,
+  nextPageFromLink,
   parseMoveTarget,
+  parseRetryAfterMs,
   pipelinesRequest,
   playJob,
   playJobRequest,
@@ -29,6 +33,8 @@ import {
   traceRequest,
   triggerPipeline,
   triggerPipelineRequest,
+  TRACE_BYTE_LIMIT,
+  utf8Length,
   type Requester,
 } from '../panel/gitlab-client';
 
@@ -54,6 +60,22 @@ describe('path and query construction', () => {
 
   test('branch scope without a ref degrades to no filter', () => {
     expect(pipelinesRequest('group/project', { scope: 'branch', ref: null }).query.ref).toBeUndefined();
+  });
+
+  test('a later page adds the page query; page 1 omits it', () => {
+    expect(pipelinesRequest('g/p', { scope: 'branch', ref: 'main', page: 3 }).query).toEqual({
+      per_page: '20',
+      ref: 'main',
+      page: '3',
+    });
+    expect(pipelinesRequest('g/p', { scope: 'branch', ref: 'main', page: 1 }).query.page).toBeUndefined();
+  });
+
+  test('a trace range adds byte_offset and byte_limit', () => {
+    expect(traceRequest('g/p', 34, { offset: 100, limit: 256_000 })).toEqual({
+      path: '/api/v4/projects/g%2Fp/jobs/34/trace',
+      query: { byte_offset: '100', byte_limit: '256000' },
+    });
   });
 
   test('jobs and trace paths', () => {
@@ -98,6 +120,61 @@ describe('mapHttpStatus', () => {
   test('300 and 304 are not redirects', () => {
     expect(mapHttpStatus(300)).toEqual({ kind: 'http', status: 300 });
     expect(mapHttpStatus(304)).toEqual({ kind: 'http', status: 304 });
+  });
+});
+
+describe('mapHttpStatus for a rate limit', () => {
+  test('429 is its own kind, with Retry-After in delta-seconds', () => {
+    expect(mapHttpStatus(429, { 'retry-after': '30' })).toEqual({
+      kind: 'rate-limited',
+      retryAfterMs: 30_000,
+    });
+  });
+
+  test('429 with an HTTP-date Retry-After is measured from now', () => {
+    const now = Date.parse('2026-09-30T12:00:00Z');
+    expect(mapHttpStatus(429, { 'retry-after': 'Wed, 30 Sep 2026 12:00:45 GMT' }, now)).toEqual({
+      kind: 'rate-limited',
+      retryAfterMs: 45_000,
+    });
+  });
+
+  test('429 without a usable Retry-After carries null', () => {
+    expect(mapHttpStatus(429)).toEqual({ kind: 'rate-limited', retryAfterMs: null });
+    expect(mapHttpStatus(429, { 'retry-after': 'soon' })).toEqual({
+      kind: 'rate-limited',
+      retryAfterMs: null,
+    });
+  });
+
+  test('parseRetryAfterMs floors a past date at zero', () => {
+    const now = Date.parse('2026-09-30T12:00:00Z');
+    expect(parseRetryAfterMs('Wed, 30 Sep 2026 11:59:00 GMT', now)).toBe(0);
+    expect(parseRetryAfterMs(null, now)).toBeNull();
+  });
+});
+
+describe('nextPageFromLink', () => {
+  test('reads the page named by rel="next"', () => {
+    const link =
+      '<https://gitlab.com/api/v4/projects/1/pipelines?page=2&per_page=20>; rel="next", ' +
+      '<https://gitlab.com/api/v4/projects/1/pipelines?page=9&per_page=20>; rel="last"';
+    expect(nextPageFromLink(link)).toBe(2);
+  });
+
+  test('no next link means no more pages', () => {
+    const link =
+      '<https://gitlab.com/api/v4/projects/1/pipelines?page=1&per_page=20>; rel="first", ' +
+      '<https://gitlab.com/api/v4/projects/1/pipelines?page=1&per_page=20>; rel="last"';
+    expect(nextPageFromLink(link)).toBeNull();
+  });
+
+  test('an absent or malformed header is null, never an error', () => {
+    expect(nextPageFromLink(null)).toBeNull();
+    expect(nextPageFromLink(undefined)).toBeNull();
+    expect(nextPageFromLink('')).toBeNull();
+    expect(nextPageFromLink('not a link header')).toBeNull();
+    expect(nextPageFromLink('<not a url>; rel="next"')).toBeNull();
   });
 });
 
@@ -185,14 +262,15 @@ describe('fetchPipelines over a requester', () => {
     });
   });
 
-  test('parses a JSON body', async () => {
+  test('parses a JSON body into a page', async () => {
     const result = await fetchPipelines(
       requester(() => ({ status: 200, body: JSON.stringify([{ id: 1, status: 'success' }]) })),
       'g/p',
       { scope: 'all' },
     );
     if (!result.ok) throw new Error('expected success');
-    expect(result.data).toMatchObject([{ id: 1, status: 'success' }]);
+    expect(result.data.pipelines).toMatchObject([{ id: 1, status: 'success' }]);
+    expect(result.data.nextPage).toBeNull();
   });
 
   test('maps a forbidden status', async () => {
@@ -495,5 +573,121 @@ describe('write requests', () => {
     expect(await retryJob(refused, 'g/p', 9)).toEqual({ ok: false, failure: { kind: 'forbidden' } });
     const gone: Requester = async () => ({ status: 404, body: '' });
     expect(await cancelPipeline(gone, 'g/p', 10)).toEqual({ ok: false, failure: { kind: 'not-found' } });
+  });
+});
+
+describe('conditional GET reuses unchanged data', () => {
+  test('sends If-None-Match and reuses the cached body on a 304', async () => {
+    const cache = newRequestCache();
+    const seen: Array<Parameters<Requester>[0]> = [];
+    let calls = 0;
+    const requester: Requester = async (request) => {
+      seen.push(request);
+      calls += 1;
+      if (calls === 1) {
+        return { status: 200, body: JSON.stringify([{ id: 1 }]), headers: { etag: 'W/"abc"' } };
+      }
+      return { status: 304, body: '', headers: { etag: 'W/"abc"' } };
+    };
+
+    const first = await fetchPipelines(requester, 'g/p', { scope: 'all' }, cache);
+    const second = await fetchPipelines(requester, 'g/p', { scope: 'all' }, cache);
+
+    if (!first.ok || !second.ok) throw new Error('expected success');
+    expect(first.data.pipelines).toMatchObject([{ id: 1 }]);
+    expect(second.data.pipelines).toMatchObject([{ id: 1 }]);
+    expect(seen[0]?.headers).toBeUndefined();
+    expect(seen[1]?.headers).toEqual({ 'if-none-match': 'W/"abc"' });
+  });
+
+  test('a 200 with no ETag is a plain fetch next time', async () => {
+    const cache = newRequestCache();
+    const seen: Array<Parameters<Requester>[0]> = [];
+    const requester: Requester = async (request) => {
+      seen.push(request);
+      return { status: 200, body: JSON.stringify([]) };
+    };
+    await fetchPipelines(requester, 'g/p', { scope: 'all' }, cache);
+    await fetchPipelines(requester, 'g/p', { scope: 'all' }, cache);
+    expect(seen[1]?.headers).toBeUndefined();
+  });
+
+  test('304 is not a failure and a settled Trace reuses its body', async () => {
+    const cache = newRequestCache();
+    let calls = 0;
+    const requester: Requester = async (request) => {
+      calls += 1;
+      if (request.path.endsWith('/trace')) {
+        if (calls === 1) return { status: 200, body: 'the log', headers: { etag: 'W/"t"' } };
+        return { status: 304, body: '' };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const first = await fetchTrace(requester, 'g/p', 9, cache);
+    const second = await fetchTrace(requester, 'g/p', 9, cache);
+    expect(first).toEqual({ ok: true, data: 'the log' });
+    expect(second).toEqual({ ok: true, data: 'the log' });
+  });
+
+  test('the Jobs and bridges lists are cached too', async () => {
+    const cache = newRequestCache();
+    const seen: Array<Parameters<Requester>[0]> = [];
+    let calls = 0;
+    const requester: Requester = async (request) => {
+      seen.push(request);
+      calls += 1;
+      if (calls === 1) return { status: 200, body: '[]', headers: { etag: 'W/"j"' } };
+      return { status: 304, body: '' };
+    };
+    await fetchJobs(requester, 'g/p', 12, cache);
+    await fetchJobs(requester, 'g/p', 12, cache);
+    await fetchBridges(requester, 'g/p', 12, cache);
+    expect(seen[1]?.headers?.['if-none-match']).toBe('W/"j"');
+    // A different endpoint is a different key, so it is a plain first fetch.
+    expect(seen[2]?.headers).toBeUndefined();
+  });
+});
+
+describe('fetchTraceRange', () => {
+  test('asks from the offset with the byte limit, and advances the offset', async () => {
+    const seen: Array<Parameters<Requester>[0]> = [];
+    const requester: Requester = async (request) => {
+      seen.push(request);
+      return { status: 200, body: 'hello' };
+    };
+    const result = await fetchTraceRange(requester, 'g/p', 9, 100);
+    expect(seen[0]?.query).toEqual({ byte_offset: '100', byte_limit: String(TRACE_BYTE_LIMIT) });
+    expect(result).toEqual({ ok: true, data: { text: 'hello', nextOffset: 105, more: false } });
+  });
+
+  test('a service-truncated window means more remains', async () => {
+    const requester: Requester = async () => ({ status: 200, body: 'part', truncated: true });
+    const result = await fetchTraceRange(requester, 'g/p', 9, 0);
+    expect(result.ok && result.data.more).toBe(true);
+  });
+
+  test('a window that fills the limit means more may remain', async () => {
+    const body = 'x'.repeat(10);
+    const requester: Requester = async () => ({ status: 200, body });
+    const result = await fetchTraceRange(requester, 'g/p', 9, 0, 10);
+    expect(result.ok && result.data.more).toBe(true);
+    expect(result.ok && result.data.nextOffset).toBe(10);
+  });
+
+  test('a short window stops the loop', async () => {
+    const requester: Requester = async () => ({ status: 200, body: 'short' });
+    const result = await fetchTraceRange(requester, 'g/p', 9, 0, 10);
+    expect(result.ok && result.data.more).toBe(false);
+  });
+
+  test('a missing trace is an empty window, not an error', async () => {
+    const requester: Requester = async () => ({ status: 404, body: '' });
+    const result = await fetchTraceRange(requester, 'g/p', 9, 40);
+    expect(result).toEqual({ ok: true, data: { text: '', nextOffset: 40, more: false } });
+  });
+
+  test('utf8Length counts bytes, not code units', () => {
+    expect(utf8Length('abc')).toBe(3);
+    expect(utf8Length('é')).toBe(2);
   });
 });

@@ -2,7 +2,7 @@ import type { HostReadyContext, StartSessionSent } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountMenu, mountTabs } from '@openchamber/sdk/ui';
 
 import { accessLevelOf, canRunPipeline, cancelRoleOf, menuState, type ActionId, type Capability } from './actions';
-import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
+import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, POLL_INTERVAL_MS, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
   canExpand,
@@ -23,20 +23,29 @@ import {
   fetchProject,
   fetchTokenScopes,
   fetchTrace,
+  fetchTraceRange,
   fetchUser,
   forceCancelJob,
+  newRequestCache,
   playJob,
   projectFromRedirectTarget,
   retryJob,
   retryPipeline,
   triggerPipeline,
   type ClientFailure,
+  type PipelinePage,
+  type RequestCache,
   type Requester,
   type WriteResult,
 } from './gitlab-client';
 import { buildHandoff, isHandoffJob } from './handoff';
 import type { HostPort } from './host-port';
-import { nextPollDelay, shouldPoll } from './poll';
+import {
+  nextPollDelay,
+  rateLimitedDelay,
+  shouldPoll,
+  widenForLowRateLimit,
+} from './poll';
 import {
   isLinkedWorktree,
   resolveProject,
@@ -271,6 +280,12 @@ class PipelinesPanel implements PanelHandle {
   private problem: Problem | null = null;
   private error: string | null = null;
   private pipelines: Pipeline[] = [];
+  /** The next Pipelines page number from `Link rel="next"`, or null at the end. */
+  private pipelinesNextPage: number | null = null;
+  /** How many Pipelines pages are loaded, so a poll does not reset the accumulation. */
+  private pipelinesPage = 1;
+  /** Whether a Load more request is in flight, so a second click cannot double it. */
+  private loadMoreBusy = false;
   private expandedId: number | null = null;
   /** Trigger rows per Pipeline, from `/bridges`; missing means not fetched yet. */
   private readonly bridges = new Map<string, BridgeEntry>();
@@ -281,7 +296,11 @@ class PipelinesPanel implements PanelHandle {
   private openJob: OpenJob | null = null;
   /** Traces per (project, job id). */
   private readonly traces = new Map<string, TraceState>();
+  /** The byte offset reached per running Trace, so a poll fetches only the delta. */
+  private readonly traceOffsets = new Map<string, number>();
   private traceLoadingKey: string | null = null;
+  /** The Panel-local conditional-GET cache, dropped when the host or token changes. */
+  private readonly requestCache: RequestCache = newRequestCache();
   /** The Job whose handoff is in flight, and the last handoff failure to show. */
   private handoffJobId: number | null = null;
   private handoffError: string | null = null;
@@ -311,6 +330,12 @@ class PipelinesPanel implements PanelHandle {
   /** The last action's outcome notice, and its auto-dismiss timer. */
   private actionNotice: { kind: 'success' | 'error'; text: string } | null = null;
   private actionNoticeTimer: number | null = null;
+  /** The current rate-limit episode, until a request succeeds. */
+  private rateLimited: { retryAfterMs: number | null } | null = null;
+  /** Whether this episode's notice was dismissed by hand. */
+  private rateLimitNoticeDismissed = false;
+  /** GitLab's last reported `RateLimit-Remaining`, for pre-emptive widening. */
+  private lastRateRemaining: number | null = null;
 
   private generation = 0;
   private pollTimer: number | null = null;
@@ -426,6 +451,8 @@ class PipelinesPanel implements PanelHandle {
     this.downstreamPath = [];
     this.openJob = null;
     this.pipelines = [];
+    this.pipelinesNextPage = null;
+    this.pipelinesPage = 1;
     this.refresh();
   }
 
@@ -555,6 +582,11 @@ class PipelinesPanel implements PanelHandle {
     this.tokenCanWrite = null;
     this.tokenScopesHost = null;
     this.scopeNoticeDismissed = false;
+    // The conditional-GET cache and rate-limit state belong to the host+token
+    // they were read under, so they go with the capability.
+    this.requestCache.clear();
+    this.lastRateRemaining = null;
+    this.clearRateLimit();
   }
 
   /**
@@ -565,9 +597,12 @@ class PipelinesPanel implements PanelHandle {
    */
   private forgetHostData(): void {
     this.pipelines = [];
+    this.pipelinesNextPage = null;
+    this.pipelinesPage = 1;
     this.bridges.clear();
     this.jobs.clear();
     this.traces.clear();
+    this.traceOffsets.clear();
     this.openJob = null;
     this.expandedId = null;
     this.downstreamPath = [];
@@ -668,16 +703,23 @@ class PipelinesPanel implements PanelHandle {
     }
   }
 
+  /** The scope actually fetched: branch scope needs an open Ref, else all refs. */
+  private currentScope(ref: string | null | undefined): Scope {
+    return ref ? this.scope : 'all';
+  }
+
   private async loadPipelines(
     gen: number,
     resolution: Extract<ProjectResolution, { ok: true }>,
     seedBridges = false,
   ): Promise<void> {
-    const scope: Scope = resolution.ref ? this.scope : 'all';
-    const result = await fetchPipelines(this.requester(), resolution.project, {
-      scope,
-      ref: resolution.ref,
-    });
+    const scope = this.currentScope(resolution.ref);
+    const result = await fetchPipelines(
+      this.requester(),
+      resolution.project,
+      { scope, ref: resolution.ref },
+      this.requestCache,
+    );
     if (this.disposed || gen !== this.generation) return;
     if (!result.ok) {
       if (
@@ -689,10 +731,12 @@ class PipelinesPanel implements PanelHandle {
       this.handleFailure(result.failure);
       return;
     }
-    this.pipelines = result.data;
+    // A manual refresh resets to page 1; a poll merges so loaded pages survive.
+    this.applyPipelines(result.data, seedBridges ? 'replace' : 'merge');
     this.updatedAt = this.timers.now();
     this.phase = 'ready';
     this.error = null;
+    this.clearRateLimit();
     this.promoteHealNotice();
     this.pruneDownstreamNode();
     if (seedBridges) {
@@ -705,6 +749,76 @@ class PipelinesPanel implements PanelHandle {
     }
     this.render();
     this.schedulePoll();
+  }
+
+  /**
+   * Fold a fetched Pipelines page into the list. `replace` (a manual refresh or
+   * a scope/host change) starts over at page 1; `append` (Load more) adds the
+   * page without disturbing expansion; `merge` (a poll) updates page 1 in place
+   * while keeping any pages already loaded.
+   */
+  private applyPipelines(page: PipelinePage, mode: 'replace' | 'append' | 'merge'): void {
+    if (mode === 'replace') {
+      this.pipelines = page.pipelines;
+      this.pipelinesNextPage = page.nextPage;
+      this.pipelinesPage = 1;
+      return;
+    }
+    const seen = new Set(this.pipelines.map((pipeline) => pipeline.id));
+    if (mode === 'append') {
+      for (const pipeline of page.pipelines) {
+        if (seen.has(pipeline.id)) continue;
+        this.pipelines.push(pipeline);
+        seen.add(pipeline.id);
+      }
+      this.pipelinesNextPage = page.nextPage;
+      this.pipelinesPage += 1;
+      return;
+    }
+    // Merge: page 1 carries the newest, so it leads; older loaded pages follow.
+    const merged: Pipeline[] = [];
+    const added = new Set<number>();
+    for (const pipeline of page.pipelines) {
+      merged.push(pipeline);
+      added.add(pipeline.id);
+    }
+    for (const pipeline of this.pipelines) {
+      if (added.has(pipeline.id)) continue;
+      merged.push(pipeline);
+      added.add(pipeline.id);
+    }
+    this.pipelines = merged;
+    // Only page 1 is loaded, so adopt its next page; otherwise keep the deeper one.
+    if (this.pipelinesPage <= 1) this.pipelinesNextPage = page.nextPage;
+  }
+
+  /** Load the next Pipelines page, appending it without disturbing the list. */
+  private async loadMore(): Promise<void> {
+    if (this.loadMoreBusy) return;
+    const page = this.pipelinesNextPage;
+    const resolution = this.resolved;
+    if (page == null || !resolution) return;
+    const gen = this.generation;
+    this.loadMoreBusy = true;
+    this.render();
+    const scope = this.currentScope(resolution.ref);
+    const result = await fetchPipelines(
+      this.requester(),
+      resolution.project,
+      { scope, ref: resolution.ref, page },
+      this.requestCache,
+    );
+    const stale = this.disposed || gen !== this.generation;
+    this.loadMoreBusy = false;
+    if (stale) return;
+    if (!result.ok) {
+      this.handleFailure(result.failure);
+      return;
+    }
+    this.clearRateLimit();
+    this.applyPipelines(result.data, 'append');
+    this.seedBridges(gen, resolution.project);
+    this.render();
   }
 
   /**
@@ -729,6 +843,19 @@ class PipelinesPanel implements PanelHandle {
   }
 
   private handleFailure(failure: ClientFailure): void {
+    if (failure.kind === 'rate-limited') {
+      // One notice per episode: the first 429 opens it, repeats do not stack.
+      if (!this.rateLimited) {
+        this.rateLimited = { retryAfterMs: failure.retryAfterMs };
+        this.rateLimitNoticeDismissed = false;
+      } else if (failure.retryAfterMs != null) {
+        this.rateLimited = { retryAfterMs: failure.retryAfterMs };
+      }
+      this.error = null;
+      this.render();
+      this.schedulePoll();
+      return;
+    }
     if (
       failure.kind === 'no-token' ||
       failure.kind === 'unauthorized' ||
@@ -844,7 +971,7 @@ class PipelinesPanel implements PanelHandle {
       this.jobs.set(key, 'loading');
       this.render();
     }
-    const result = await fetchJobs(this.requester(), project, pipelineId);
+    const result = await fetchJobs(this.requester(), project, pipelineId, this.requestCache);
     if (this.disposed || gen !== this.generation) return;
     if (result.ok) {
       this.jobs.set(key, result.data);
@@ -859,7 +986,7 @@ class PipelinesPanel implements PanelHandle {
 
   private async loadBridges(gen: number, project: string, pipelineId: number, silent: boolean): Promise<void> {
     const key = pipelineKey(project, pipelineId);
-    const result = await fetchBridges(this.requester(), project, pipelineId);
+    const result = await fetchBridges(this.requester(), project, pipelineId, this.requestCache);
     if (this.disposed || gen !== this.generation) return;
     if (result.ok) {
       this.bridges.set(key, triggerRows(result.data, project));
@@ -893,12 +1020,19 @@ class PipelinesPanel implements PanelHandle {
     }
     this.traceLoadingKey = key;
     this.render();
-    void this.loadTrace(this.generation, project, jobId);
+    const job = this.jobById(project, pipelineId, jobId);
+    void this.loadTrace(this.generation, project, jobId, job != null && isActiveStatus(job.status));
   }
 
-  private async loadTrace(gen: number, project: string, jobId: number): Promise<void> {
+  /**
+   * Load a Job's Trace. A running Job grows its log as a byte-range delta so it
+   * is not re-read whole each Poll; a settled Job is one conditional GET, since
+   * its body no longer changes. See ADR-0010.
+   */
+  private async loadTrace(gen: number, project: string, jobId: number, active: boolean): Promise<void> {
+    if (active) return this.loadTraceDelta(gen, project, jobId);
     const key = jobKey(project, jobId);
-    const result = await fetchTrace(this.requester(), project, jobId);
+    const result = await fetchTrace(this.requester(), project, jobId, this.requestCache);
     if (this.disposed || gen !== this.generation) return;
     if (this.traceLoadingKey === key) this.traceLoadingKey = null;
     if (!result.ok) {
@@ -907,6 +1041,41 @@ class PipelinesPanel implements PanelHandle {
     } else {
       this.traces.set(key, traceStateOf(result.data ?? '', result.truncated));
     }
+    this.render();
+  }
+
+  /**
+   * Grow a running Job's Trace window by window. Each request asks from the
+   * offset already held and appends only the new bytes, continuing while the
+   * service says there is more or a window came back full, until the Job
+   * settles or the drawer's line cap is reached.
+   */
+  private async loadTraceDelta(gen: number, project: string, jobId: number): Promise<void> {
+    const key = jobKey(project, jobId);
+    let offset = this.traceOffsets.get(key) ?? 0;
+    const existing = this.traces.get(key);
+    let text = existing?.state === 'ready' ? existing.text : '';
+    for (;;) {
+      const result = await fetchTraceRange(this.requester(), project, jobId, offset);
+      if (this.disposed || gen !== this.generation) return;
+      if (!result.ok) {
+        // Keep what is already on screen rather than blanking a long log.
+        if (!text) {
+          if (this.traceLoadingKey === key) this.traceLoadingKey = null;
+          this.traces.set(key, { state: 'error', text: '', truncated: null });
+          this.render();
+          return;
+        }
+        break;
+      }
+      text += result.data.text;
+      offset = result.data.nextOffset;
+      if (!result.data.more) break;
+      if (logLines(text).length >= LOG_MAX_LINES) break;
+    }
+    if (this.traceLoadingKey === key) this.traceLoadingKey = null;
+    this.traceOffsets.set(key, offset);
+    this.traces.set(key, traceStateOf(text, false));
     this.render();
   }
 
@@ -921,7 +1090,7 @@ class PipelinesPanel implements PanelHandle {
     if (this.traceLoadingKey === jobKey(reference.project, reference.jobId)) return;
     const job = this.jobById(reference.project, reference.pipelineId, reference.jobId);
     if (!job || !isActiveStatus(job.status)) return;
-    void this.loadTrace(gen, reference.project, reference.jobId);
+    void this.loadTrace(gen, reference.project, reference.jobId, true);
   }
 
   /**
@@ -1041,7 +1210,7 @@ class PipelinesPanel implements PanelHandle {
     const key = jobKey(project, job.id);
     const cached = this.traces.get(key);
     if (cached?.state === 'ready') return cached.text;
-    const result = await fetchTrace(this.requester(), project, job.id);
+    const result = await fetchTrace(this.requester(), project, job.id, this.requestCache);
     if (!result.ok) return null;
     const text = result.data ?? '';
     this.traces.set(key, traceStateOf(text, result.truncated));
@@ -1111,10 +1280,10 @@ class PipelinesPanel implements PanelHandle {
         return `${action} failed: no Access token is configured for this host.`;
       case 'service':
         return `${action} failed: the Proxy service is unavailable.`;
+      case 'rate-limited':
+        return `${action} was rate-limited by GitLab. Try again shortly.`;
       case 'http':
-        return failure.status === 429
-          ? `${action} was rate-limited by GitLab. Try again shortly.`
-          : `${action} failed: GitLab returned ${failure.status}.`;
+        return `${action} failed: GitLab returned ${failure.status}.`;
       default:
         return `${action} failed: could not reach GitLab.`;
     }
@@ -1297,11 +1466,19 @@ class PipelinesPanel implements PanelHandle {
     this.stopPollTimer();
     const now = this.timers.now();
     if (this.pollStartedAt == null) this.pollStartedAt = now;
-    const delay = nextPollDelay(this.visibleStatuses(), { elapsedMs: now - this.pollStartedAt });
-    if (delay == null) {
+    const base = nextPollDelay(this.visibleStatuses(), { elapsedMs: now - this.pollStartedAt });
+    const rate = this.rateLimited;
+    // A rate-limit episode keeps polling even when nothing looks active, so the
+    // list can recover; otherwise a settled view stops as before.
+    if (base == null && !rate) {
       this.pollStartedAt = null;
       return;
     }
+    let delay = base ?? POLL_INTERVAL_MS;
+    if (rate) delay = rateLimitedDelay(delay, rate.retryAfterMs);
+    // Pre-emptive widening is only for an ordinary success; a 429 already set
+    // its own delay above.
+    else delay = widenForLowRateLimit(delay, this.lastRateRemaining);
     this.pollTimer = this.timers.setTimeout(() => {
       this.pollTimer = null;
       void this.pollOnce();
@@ -1539,6 +1716,24 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /**
+   * Remember GitLab's remaining budget from an ordinary success, so a low one
+   * widens the Poll pre-emptively rather than waiting for a 429. A 429's own
+   * headers are deliberately ignored: its `Retry-After` already sets the delay,
+   * and doubling it again would over-pause.
+   */
+  private recordRateLimit(status: number, headers: Record<string, string> | undefined): void {
+    if (status < 200 || status >= 300) return;
+    const remaining = headers?.['ratelimit-remaining'];
+    if (remaining != null && /^\d+$/.test(remaining)) this.lastRateRemaining = Number(remaining);
+  }
+
+  /** End a rate-limit episode: the notice and the widened poll both clear. */
+  private clearRateLimit(): void {
+    this.rateLimited = null;
+    this.rateLimitNoticeDismissed = false;
+  }
+
+  /**
    * The one call every GitLab fetch makes: the Proxy service resolves the
    * Access token for the request's host and attaches it, so the Panel never
    * holds one. Only the base URL rides in the query, for the service's logs.
@@ -1555,9 +1750,12 @@ class PipelinesPanel implements PanelHandle {
           path: request.path,
           query: request.query ?? {},
           ...(request.body != null ? { body: request.body } : {}),
+          ...(request.headers ? { headers: request.headers } : {}),
         }),
       });
-      return parseProxyEnvelope(response);
+      const parsed = parseProxyEnvelope(response);
+      this.recordRateLimit(parsed.status, parsed.headers);
+      return parsed;
     };
   }
 
@@ -1587,6 +1785,8 @@ class PipelinesPanel implements PanelHandle {
     if (scopeNotice) this.root.append(scopeNotice);
     const actionNotice = this.renderActionNotice();
     if (actionNotice) this.root.append(actionNotice);
+    const rateNotice = this.renderRateLimitNotice();
+    if (rateNotice) this.root.append(rateNotice);
 
     this.scrollEl = el('div', 'gp-scroll');
     const pad = el('div', 'gp-pad');
@@ -1847,6 +2047,19 @@ class PipelinesPanel implements PanelHandle {
     const list = el('div', 'gp-list');
     for (const pipeline of this.pipelines) list.append(this.renderPipeline(pipeline));
     nodes.push(list);
+    if (this.pipelinesNextPage != null) {
+      const more = el('div', 'gp-more');
+      this.handles.push(
+        mountButton(more, {
+          label: this.loadMoreBusy ? 'Loading…' : 'Load more',
+          variant: 'outline',
+          size: 'sm',
+          disabled: this.loadMoreBusy,
+          onClick: () => void this.loadMore(),
+        }),
+      );
+      nodes.push(more);
+    }
     return nodes;
   }
 
@@ -2359,6 +2572,22 @@ class PipelinesPanel implements PanelHandle {
         this.render();
       },
     });
+  }
+
+  /** One notice per rate-limit episode, until a request succeeds. */
+  private renderRateLimitNotice(): HTMLElement | null {
+    if (!this.rateLimited || this.rateLimitNoticeDismissed) return null;
+    return this.notice(
+      'GitLab rate-limited this host, so the panel paused. It will resume automatically.',
+      {
+        role: 'status',
+        tone: 'info',
+        onDismiss: () => {
+          this.rateLimitNoticeDismissed = true;
+          this.render();
+        },
+      },
+    );
   }
 
   private renderDrawer(reference: OpenJob): HTMLElement {

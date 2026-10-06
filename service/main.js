@@ -6,6 +6,19 @@ import { createServer } from "node:http";
 import { dirname, posix, win32 } from "node:path";
 
 // service/proxy.ts
+var REQUEST_HEADER_ALLOWLIST = new Set(["if-none-match"]);
+var RESPONSE_HEADER_ALLOWLIST = [
+  "etag",
+  "link",
+  "x-next-page",
+  "x-prev-page",
+  "x-total",
+  "x-total-pages",
+  "ratelimit-limit",
+  "ratelimit-remaining",
+  "ratelimit-reset",
+  "retry-after"
+];
 var PROXY_TIMEOUT_MS = 20000;
 var PROXY_BODY_MAX = 256000;
 var WRITE_METHOD = "POST";
@@ -79,6 +92,26 @@ async function readCapped(response) {
     text += decoder.decode();
   return { text, truncated };
 }
+function readAllowlistedHeaders(response) {
+  const out = {};
+  if (typeof response.headers?.get !== "function")
+    return out;
+  for (const name of RESPONSE_HEADER_ALLOWLIST) {
+    const value = response.headers.get(name);
+    if (value != null && value !== "")
+      out[name] = value;
+  }
+  return out;
+}
+function forwardedHeaders(headers) {
+  const out = {};
+  for (const [key, value] of Object.entries(headers ?? {})) {
+    const name = key.toLowerCase();
+    if (REQUEST_HEADER_ALLOWLIST.has(name))
+      out[name] = value;
+  }
+  return out;
+}
 async function handleProxy(request, fetchImpl) {
   const origin = normalizeBaseUrl(request.baseUrl);
   if (!origin) {
@@ -91,7 +124,10 @@ async function handleProxy(request, fetchImpl) {
   if (new URL(url).origin !== origin) {
     return { ok: false, error: PATH_ERROR };
   }
-  const headers = { Authorization: `Bearer ${request.token}` };
+  const headers = {
+    Authorization: `Bearer ${request.token}`,
+    ...forwardedHeaders(request.headers)
+  };
   if (request.body != null)
     headers["Content-Type"] = "application/json";
   const controller = new AbortController;
@@ -118,7 +154,13 @@ async function handleProxy(request, fetchImpl) {
   } finally {
     clearTimeout(timer);
   }
-  return { ok: true, status: response.status, body: redact(text, request.token), truncated };
+  return {
+    ok: true,
+    status: response.status,
+    body: redact(text, request.token),
+    truncated,
+    headers: readAllowlistedHeaders(response)
+  };
 }
 
 // service/config.ts
@@ -314,6 +356,7 @@ async function proxyWithConfig(fs, path, request, fetchImpl) {
     path: request.path,
     ...request.query ? { query: request.query } : {},
     ...request.body != null ? { body: request.body } : {},
+    ...request.headers ? { headers: request.headers } : {},
     token
   }, fetchImpl);
 }
@@ -418,7 +461,12 @@ async function route(request, deps) {
   if (!result.ok) {
     return json(502, { error: result.error, ...result.code ? { code: result.code } : {} });
   }
-  return json(200, { status: result.status, body: result.body, truncated: result.truncated });
+  return json(200, {
+    status: result.status,
+    body: result.body,
+    truncated: result.truncated,
+    headers: result.headers
+  });
 }
 async function handleRequest(request, deps) {
   try {

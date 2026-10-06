@@ -45,3 +45,19 @@ export function nextPollDelay(
 ): number | null {
   return pollDecision(statuses, options).delayMs;
 }
+
+/** How few `RateLimit-Remaining` requests count as "nearly out of budget". */
+export const RATE_LIMIT_LOW_REMAINING = 10;
+
+/**
+ * A rate-limited request's retry delay: honour `Retry-After` when GitLab sent
+ * it, otherwise widen the ordinary delay so the Panel backs off on its own.
+ */
+export function rateLimitedDelay(baseDelayMs: number, retryAfterMs: number | null): number {
+  return retryAfterMs != null ? Math.max(baseDelayMs, retryAfterMs) : baseDelayMs * 2;
+}
+
+/** Pre-emptively widen the delay while GitLab's remaining budget is low. */
+export function widenForLowRateLimit(delayMs: number, remaining: number | null): number {
+  return remaining != null && remaining <= RATE_LIMIT_LOW_REMAINING ? delayMs * 2 : delayMs;
+}

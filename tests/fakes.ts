@@ -107,6 +107,7 @@ export class FakeHost implements HostPort {
         path?: string;
         query?: Record<string, string>;
         body?: string;
+        headers?: Record<string, string>;
       };
       const host = (body.baseUrl ?? '').replace(/^https:\/\//, '').replace(/\/+$/, '');
       if (!this.tokens[host]) {
@@ -120,6 +121,7 @@ export class FakeHost implements HostPort {
         path: body.path ?? '/',
         query: body.query ?? {},
         ...(typeof body.body === 'string' ? { body: body.body } : {}),
+        ...(body.headers ? { headers: body.headers } : {}),
       };
       const index = this.gitlabRequests.length;
       this.gitlabRequests.push(request);
@@ -132,6 +134,7 @@ export class FakeHost implements HostPort {
         status: response.status,
         body: response.body,
         ...(response.truncated != null ? { truncated: response.truncated } : {}),
+        ...(response.headers ? { headers: response.headers } : {}),
       });
     }
     return { status: 404, body: JSON.stringify({ error: 'not found' }) };

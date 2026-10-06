@@ -1,6 +1,6 @@
 # Spec: Caching and transport speedups
 
-Status: specified — tickets `caching-and-transport/01`–`06` are mapped in [`README.md`](README.md).
+Status: implemented — see tickets `caching-and-transport/01`–`05` (mapped in [`README.md`](README.md)).
 Feature: `caching-and-transport`
 Follows: [`docs/specs/pipelines-panel.md`](pipelines-panel.md) (its polling model and the 256 000-char
 body cap), and records ADR-0009 and ADR-0010.

@@ -1,6 +1,12 @@
 import { describe, expect, test } from 'bun:test';
 import { ACTIVE_STATUSES } from '../panel/status';
-import { nextPollDelay, pollDecision, shouldPoll } from '../panel/poll';
+import {
+  nextPollDelay,
+  pollDecision,
+  rateLimitedDelay,
+  shouldPoll,
+  widenForLowRateLimit,
+} from '../panel/poll';
 
 describe('shouldPoll', () => {
   test('is true when any status is still moving', () => {
@@ -30,5 +36,25 @@ describe('nextPollDelay', () => {
   test('backs off for a long-running pipeline', () => {
     expect(nextPollDelay(['running'], { elapsedMs: 3 * 60_000 })).toBe(10_000);
     expect(nextPollDelay(['running'], { elapsedMs: 11 * 60_000 })).toBe(15_000);
+  });
+});
+
+describe('rate-limit widening', () => {
+  test('honours Retry-After over the ordinary backoff', () => {
+    expect(rateLimitedDelay(5000, 30_000)).toBe(30_000);
+  });
+
+  test('keeps the ordinary backoff when Retry-After is shorter', () => {
+    expect(rateLimitedDelay(5000, 1000)).toBe(5000);
+  });
+
+  test('doubles when there is no Retry-After', () => {
+    expect(rateLimitedDelay(5000, null)).toBe(10_000);
+  });
+
+  test('widens pre-emptively when the remaining budget is low', () => {
+    expect(widenForLowRateLimit(5000, 5)).toBe(10_000);
+    expect(widenForLowRateLimit(5000, 100)).toBe(5000);
+    expect(widenForLowRateLimit(5000, null)).toBe(5000);
   });
 });

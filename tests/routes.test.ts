@@ -38,7 +38,7 @@ function fakeFs(entries: Record<string, Entry> = {}): ConfigFs & { entries: Reco
   };
 }
 
-function fakeFetch(reply: { status?: number; body?: string } = {}): ProxyFetch & {
+function fakeFetch(reply: { status?: number; body?: string; headers?: Record<string, string> } = {}): ProxyFetch & {
   calls: Array<{ url: string; init: { method: string; headers: Record<string, string>; body?: string } }>;
 } {
   const calls: Array<{ url: string; init: { method: string; headers: Record<string, string>; body?: string } }> =
@@ -48,7 +48,10 @@ function fakeFetch(reply: { status?: number; body?: string } = {}): ProxyFetch &
     init: { method: string; headers: Record<string, string>; body?: string },
   ) => {
     calls.push({ url, init });
-    return new Response(reply.body ?? '{"ok":true}', { status: reply.status ?? 200 });
+    return new Response(reply.body ?? '{"ok":true}', {
+      status: reply.status ?? 200,
+      ...(reply.headers ? { headers: reply.headers } : {}),
+    });
   }) as unknown as ProxyFetch;
   return Object.assign(fetchImpl, { calls });
 }
@@ -279,5 +282,29 @@ describe('the proxy resolves the token from configuration', () => {
     if (!result.ok) return;
     expect(result.body.length).toBe(PROXY_BODY_MAX);
     expect(result.truncated).toBe(true);
+  });
+});
+
+describe('the proxy carries the header allowlist', () => {
+  test('forwards If-None-Match and returns only allowlisted response headers', async () => {
+    const fs = fakeFs();
+    await writeTokenRoute(fs, PATH, { host: 'gitlab.example.com', token: 'configured' });
+    const fetchImpl = fakeFetch({
+      status: 304,
+      headers: { ETag: 'W/"abc"', 'Set-Cookie': 'session=secret', 'X-Evil': '1' },
+    });
+    const result = await proxyWithConfig(
+      fs,
+      PATH,
+      proxyRequest({ headers: { 'If-None-Match': 'W/"abc"', Cookie: 'session=secret' } }),
+      fetchImpl,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.status).toBe(304);
+    expect(result.headers).toEqual({ etag: 'W/"abc"' });
+    expect(fetchImpl.calls[0]?.init.headers['if-none-match']).toBe('W/"abc"');
+    expect(fetchImpl.calls[0]?.init.headers.Cookie).toBeUndefined();
+    expect(fetchImpl.calls[0]?.init.headers.cookie).toBeUndefined();
   });
 });

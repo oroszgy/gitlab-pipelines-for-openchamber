@@ -1,4 +1,4 @@
-import { PER_PAGE } from './config';
+import { HOST_BODY_CAP, PER_PAGE } from './config';
 import type { HostRequest, HostResponse } from './host-port';
 import type { Bridge, Job, Pipeline, Scope } from './types';
 
@@ -12,6 +12,8 @@ export type ClientFailure =
   | { kind: 'service' }
   /** A redirect; `target` is the moved project's URL, or null when the body is not a recognisable move. */
   | { kind: 'redirect'; target: string | null }
+  /** GitLab throttled the call (429); `retryAfterMs` is `Retry-After`, or null. */
+  | { kind: 'rate-limited'; retryAfterMs: number | null }
   | { kind: 'http'; status: number }
   | { kind: 'network' };
 
@@ -32,6 +34,77 @@ export type BuiltRequest = {
   query: Record<string, string>;
 };
 
+/**
+ * A Panel-local request cache for the list endpoints and a settled Trace. It
+ * holds the last `ETag` and body per method+path+query, so a repeat sends
+ * `If-None-Match` and a `304` reuses what it already has. It dies with the
+ * Panel, and is dropped wholesale when the host or token changes. See ADR-0009.
+ */
+export type CacheEntry = { etag: string; body: string; link?: string };
+export type RequestCache = Map<string, CacheEntry>;
+
+/** The most entries the cache keeps; beyond it, the least recently written is dropped. */
+export const CACHE_MAX_ENTRIES = 50;
+
+export function newRequestCache(): RequestCache {
+  return new Map();
+}
+
+/** Store an entry, keeping the cache bounded and its ordering least-recently-written first. */
+function remember(cache: RequestCache, key: string, entry: CacheEntry): void {
+  cache.delete(key);
+  cache.set(key, entry);
+  while (cache.size > CACHE_MAX_ENTRIES) {
+    const oldest = cache.keys().next().value;
+    if (oldest === undefined) break;
+    cache.delete(oldest);
+  }
+}
+
+/** A request's cache identity: the method and the full path and query. */
+function cacheKey(request: HostRequest): string {
+  const query = Object.entries(request.query ?? {})
+    .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+    .map(([key, value]) => `${key}=${value}`)
+    .join('&');
+  return `${request.method ?? 'GET'} ${request.path}?${query}`;
+}
+
+/**
+ * The `page` named by a `Link: <…>; rel="next"` header, or null when there is
+ * no next page. A malformed header is treated as no next page rather than an
+ * error: pagination is a convenience, not a requirement.
+ */
+export function nextPageFromLink(link: string | null | undefined): number | null {
+  if (!link) return null;
+  for (const part of link.split(',')) {
+    const match = /^\s*<([^>]*)>\s*;\s*(.*)$/.exec(part);
+    if (!match) continue;
+    if (!/rel\s*=\s*"?next"?/i.test(match[2] ?? '')) continue;
+    try {
+      const page = new URL(match[1] ?? '').searchParams.get('page');
+      if (page != null && /^\d+$/.test(page)) return Number(page);
+    } catch {
+      // A URL GitLab would never emit; treat it as no next page.
+    }
+    return null;
+  }
+  return null;
+}
+
+/**
+ * `Retry-After` in milliseconds: delta-seconds or an HTTP date. Null when absent
+ * or unparseable; a date in the past floors at zero.
+ */
+export function parseRetryAfterMs(value: string | null | undefined, now: number): number | null {
+  if (!value) return null;
+  const trimmed = value.trim();
+  if (/^\d+$/.test(trimmed)) return Number(trimmed) * 1000;
+  const date = Date.parse(trimmed);
+  if (Number.isNaN(date)) return null;
+  return Math.max(0, date - now);
+}
+
 /** `/api/v4/projects/:encoded-path` — GitLab accepts the URL-encoded path or a numeric id. */
 export function projectBase(project: string): string {
   return `/api/v4/projects/${encodeURIComponent(project)}`;
@@ -39,7 +112,7 @@ export function projectBase(project: string): string {
 
 export function pipelinesRequest(
   project: string,
-  options: { scope: Scope; ref?: string | null; perPage?: number } = { scope: 'all' },
+  options: { scope: Scope; ref?: string | null; perPage?: number; page?: number } = { scope: 'all' },
 ): BuiltRequest {
   const query: Record<string, string> = {
     per_page: String(options.perPage ?? PER_PAGE),
@@ -52,6 +125,8 @@ export function pipelinesRequest(
     query.order_by = 'updated_at';
     query.sort = 'desc';
   }
+  // Page 1 is the default page GitLab serves with no `page` param; only emit it for older pages.
+  if (options.page != null && options.page > 1) query.page = String(options.page);
   return { path: `${projectBase(project)}/pipelines`, query };
 }
 
@@ -69,8 +144,17 @@ export function bridgesRequest(project: string, pipelineId: number): BuiltReques
   };
 }
 
-export function traceRequest(project: string, jobId: number): BuiltRequest {
-  return { path: `${projectBase(project)}/jobs/${jobId}/trace`, query: {} };
+export function traceRequest(
+  project: string,
+  jobId: number,
+  range?: { offset: number; limit: number },
+): BuiltRequest {
+  const query: Record<string, string> = {};
+  if (range) {
+    query.byte_offset = String(range.offset);
+    query.byte_limit = String(range.limit);
+  }
+  return { path: `${projectBase(project)}/jobs/${jobId}/trace`, query };
 }
 
 /** The whole project, for its `permissions` and cancel-restriction role. */
@@ -162,11 +246,18 @@ export function projectFromRedirectTarget(target: string, host: string): string 
 }
 
 /** HTTP status → typed failure, or null for a success. */
-export function mapHttpStatus(status: number): ClientFailure | null {
+export function mapHttpStatus(
+  status: number,
+  headers: Record<string, string> = {},
+  now: number = Date.now(),
+): ClientFailure | null {
   if (status >= 200 && status < 300) return null;
   if (status === 401) return { kind: 'unauthorized' };
   if (status === 403) return { kind: 'forbidden' };
   if (status === 404) return { kind: 'not-found' };
+  if (status === 429) {
+    return { kind: 'rate-limited', retryAfterMs: parseRetryAfterMs(headers['retry-after'], now) };
+  }
   if (REDIRECT_STATUSES.has(status)) return { kind: 'redirect', target: null };
   return { kind: 'http', status };
 }
@@ -194,17 +285,51 @@ export function clientFailureFromError(error: unknown): ClientFailure {
 }
 
 type CallResult =
-  | { ok: true; status: number; body: string; truncated?: boolean }
+  | {
+      ok: true;
+      status: number;
+      body: string;
+      truncated?: boolean;
+      headers?: Record<string, string>;
+    }
   | { ok: false; failure: ClientFailure };
 
-async function call(requester: Requester, request: HostRequest): Promise<CallResult> {
+/**
+ * One request, optionally through the cache. When the key is cached, an
+ * `If-None-Match` goes out and a `304` reuses the cached body rather than
+ * reading it as a failure. A `200` with no `ETag` simply means "not cacheable
+ * this time", so the stale entry is dropped.
+ */
+async function call(
+  requester: Requester,
+  request: HostRequest,
+  cache?: RequestCache,
+): Promise<CallResult> {
+  const key = cache ? cacheKey(request) : null;
+  const cached = key ? cache?.get(key) : undefined;
+  const outgoing: HostRequest = cached
+    ? { ...request, headers: { ...(request.headers ?? {}), 'if-none-match': cached.etag } }
+    : request;
   let response;
   try {
-    response = await requester(request);
+    response = await requester(outgoing);
   } catch (error) {
     return { ok: false, failure: clientFailureFromError(error) };
   }
-  const failure = mapHttpStatus(response.status);
+  if (response.status === 304 && cached && key) {
+    // A 304 carries no body; the cached one is still current.
+    const headers: Record<string, string> = {
+      ...(response.headers ?? {}),
+      ...(cached.link ? { link: cached.link } : {}),
+    };
+    return {
+      ok: true,
+      status: 304,
+      body: cached.body,
+      ...(Object.keys(headers).length ? { headers } : {}),
+    };
+  }
+  const failure = mapHttpStatus(response.status, response.headers);
   if (failure) {
     // The status alone cannot say where a redirect points; only the body can.
     if (failure.kind === 'redirect') {
@@ -212,11 +337,18 @@ async function call(requester: Requester, request: HostRequest): Promise<CallRes
     }
     return { ok: false, failure };
   }
+  if (key && cache) {
+    const etag = response.headers?.['etag'];
+    const link = response.headers?.['link'];
+    if (etag) remember(cache, key, { etag, body: response.body, ...(link ? { link } : {}) });
+    else cache.delete(key);
+  }
   return {
     ok: true,
     status: response.status,
     body: response.body,
     ...(response.truncated != null ? { truncated: response.truncated } : {}),
+    ...(response.headers ? { headers: response.headers } : {}),
   };
 }
 
@@ -228,15 +360,35 @@ function parseJson<T>(body: string, status: number): ClientResult<T> {
   }
 }
 
+/** The list options every Pipelines fetch shares. */
+export type PipelineOptions = {
+  scope: Scope;
+  ref?: string | null;
+  perPage?: number;
+  page?: number;
+};
+
+/** A requested page of Pipelines, with the next page's number or null. */
+export type PipelinePage = {
+  pipelines: Pipeline[];
+  nextPage: number | null;
+};
+
 export async function fetchPipelines(
   requester: Requester,
   project: string,
-  options: { scope: Scope; ref?: string | null; perPage?: number },
-): Promise<ClientResult<Pipeline[]>> {
+  options: PipelineOptions,
+  cache?: RequestCache,
+): Promise<ClientResult<PipelinePage>> {
   const request = pipelinesRequest(project, options);
-  const result = await call(requester, { method: 'GET', ...request });
+  const result = await call(requester, { method: 'GET', ...request }, cache);
   if (!result.ok) return result;
-  return parseJson<Pipeline[]>(result.body, result.status);
+  const parsed = parseJson<Pipeline[]>(result.body, result.status);
+  if (!parsed.ok) return parsed;
+  return {
+    ok: true,
+    data: { pipelines: parsed.data, nextPage: nextPageFromLink(result.headers?.link) },
+  };
 }
 
 /** The authenticated account `/api/v4/user` answers, used to show who the token is. */
@@ -255,9 +407,10 @@ export async function fetchJobs(
   requester: Requester,
   project: string,
   pipelineId: number,
+  cache?: RequestCache,
 ): Promise<ClientResult<Job[]>> {
   const request = jobsRequest(project, pipelineId);
-  const result = await call(requester, { method: 'GET', ...request });
+  const result = await call(requester, { method: 'GET', ...request }, cache);
   if (!result.ok) return result;
   return parseJson<Job[]>(result.body, result.status);
 }
@@ -266,9 +419,10 @@ export async function fetchBridges(
   requester: Requester,
   project: string,
   pipelineId: number,
+  cache?: RequestCache,
 ): Promise<ClientResult<Bridge[]>> {
   const request = bridgesRequest(project, pipelineId);
-  const result = await call(requester, { method: 'GET', ...request });
+  const result = await call(requester, { method: 'GET', ...request }, cache);
   if (!result.ok) return result;
   return parseJson<Bridge[]>(result.body, result.status);
 }
@@ -277,9 +431,10 @@ export async function fetchTrace(
   requester: Requester,
   project: string,
   jobId: number,
+  cache?: RequestCache,
 ): Promise<ClientResult<string>> {
   const request = traceRequest(project, jobId);
-  const result = await call(requester, { method: 'GET', ...request });
+  const result = await call(requester, { method: 'GET', ...request }, cache);
   if (!result.ok) {
     // A job with no trace answers 404; treat that as an empty log, not an error.
     if (result.failure.kind === 'not-found') return { ok: true, data: '' };
@@ -289,6 +444,56 @@ export async function fetchTrace(
     ok: true,
     data: result.body,
     ...(result.truncated != null ? { truncated: result.truncated } : {}),
+  };
+}
+
+/** The largest Trace window the Panel asks for in one request. */
+export const TRACE_BYTE_LIMIT = HOST_BODY_CAP;
+
+/** The UTF-8 byte length of a decoded Trace window, for the next offset. */
+export function utf8Length(text: string): number {
+  return new TextEncoder().encode(text).length;
+}
+
+/**
+ * One incremental Trace window. `more` says the Panel should ask again: either
+ * the service truncated the body (there is more), or the window filled the
+ * requested limit (so the Trace likely continues past it).
+ */
+export type TraceWindow = {
+  text: string;
+  nextOffset: number;
+  more: boolean;
+};
+
+/**
+ * Fetch the Trace from `offset` as a byte window. Used while a Job is running,
+ * so a long log accumulates window by window instead of being re-read whole.
+ * See ADR-0010.
+ */
+export async function fetchTraceRange(
+  requester: Requester,
+  project: string,
+  jobId: number,
+  offset: number,
+  limit: number = TRACE_BYTE_LIMIT,
+): Promise<ClientResult<TraceWindow>> {
+  const request = traceRequest(project, jobId, { offset, limit });
+  const result = await call(requester, { method: 'GET', ...request });
+  if (!result.ok) {
+    if (result.failure.kind === 'not-found') {
+      return { ok: true, data: { text: '', nextOffset: offset, more: false } };
+    }
+    return result;
+  }
+  const bytes = utf8Length(result.body);
+  return {
+    ok: true,
+    data: {
+      text: result.body,
+      nextOffset: offset + bytes,
+      more: result.truncated === true || bytes >= limit,
+    },
   };
 }
 

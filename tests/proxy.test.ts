@@ -11,7 +11,7 @@ import {
  * The proxy handler is tested directly through its one seam: the injected fetch.
  * A fake records what the handler asked for and answers what the test dictates.
  */
-function fakeFetch(reply: { status?: number; body?: string } = {}): ProxyFetch & {
+function fakeFetch(reply: { status?: number; body?: string; headers?: Record<string, string> } = {}): ProxyFetch & {
   calls: Array<{
     url: string;
     init: { method: string; headers: Record<string, string>; body?: string; redirect?: string };
@@ -26,7 +26,10 @@ function fakeFetch(reply: { status?: number; body?: string } = {}): ProxyFetch &
     init: { method: string; headers: Record<string, string>; body?: string; redirect?: string },
   ) => {
     calls.push({ url, init });
-    return new Response(reply.body ?? '{"ok":true}', { status: reply.status ?? 200 });
+    return new Response(reply.body ?? '{"ok":true}', {
+      status: reply.status ?? 200,
+      ...(reply.headers ? { headers: reply.headers } : {}),
+    });
   }) as unknown as ProxyFetch;
   return Object.assign(fetchImpl, { calls });
 }
@@ -126,12 +129,67 @@ describe('the proxy forwards exactly what it was asked for', () => {
 
   test('returns the status and body', async () => {
     const result = await handleProxy(request(), fakeFetch({ status: 200, body: 'hello' }));
-    expect(result).toEqual({ ok: true, status: 200, body: 'hello', truncated: false });
+    expect(result).toEqual({ ok: true, status: 200, body: 'hello', truncated: false, headers: {} });
   });
 
   test('passes a non-2xx status through rather than throwing', async () => {
     const result = await handleProxy(request(), fakeFetch({ status: 404, body: '' }));
-    expect(result).toEqual({ ok: true, status: 404, body: '', truncated: false });
+    expect(result).toEqual({ ok: true, status: 404, body: '', truncated: false, headers: {} });
+  });
+});
+
+describe('the header allowlist is the seam', () => {
+  test('forwards If-None-Match down to GitLab', async () => {
+    const fetchImpl = fakeFetch();
+    await handleProxy(request({ headers: { 'If-None-Match': 'W/"abc"' } }), fetchImpl);
+    expect(fetchImpl.calls[0]?.init.headers['if-none-match']).toBe('W/"abc"');
+  });
+
+  test('drops every request header not on the allowlist', async () => {
+    const fetchImpl = fakeFetch();
+    await handleProxy(
+      request({ headers: { Cookie: 'session=secret', 'X-Evil': '1', 'If-None-Match': 'W/"abc"' } }),
+      fetchImpl,
+    );
+    const headers = fetchImpl.calls[0]?.init.headers ?? {};
+    expect(headers.Cookie).toBeUndefined();
+    expect(headers.cookie).toBeUndefined();
+    expect(headers['X-Evil']).toBeUndefined();
+    expect(headers['if-none-match']).toBe('W/"abc"');
+  });
+
+  test('returns the allowlisted response headers and drops the rest', async () => {
+    const result = await handleProxy(
+      request(),
+      fakeFetch({
+        headers: {
+          ETag: 'W/"abc"',
+          Link: '<https://gitlab.example.com/x?page=2>; rel="next"',
+          'X-Next-Page': '2',
+          'RateLimit-Remaining': '9',
+          'Retry-After': '30',
+          'Set-Cookie': 'session=secret',
+          'X-Evil': '1',
+        },
+      }),
+    );
+    expect(result.ok).toBe(true);
+    expect(result.headers).toEqual({
+      etag: 'W/"abc"',
+      link: '<https://gitlab.example.com/x?page=2>; rel="next"',
+      'x-next-page': '2',
+      'ratelimit-remaining': '9',
+      'retry-after': '30',
+    });
+    expect(result.headers?.['set-cookie']).toBeUndefined();
+    expect(result.headers?.['x-evil']).toBeUndefined();
+  });
+
+  test('hands a 304 back as a success with its headers, not a redirect', async () => {
+    const result = await handleProxy(request(), fakeFetch({ status: 304, headers: { ETag: 'W/"abc"' } }));
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(304);
+    expect(result.headers).toEqual({ etag: 'W/"abc"' });
   });
 });
 
