@@ -12,13 +12,18 @@ import {
  * A fake records what the handler asked for and answers what the test dictates.
  */
 function fakeFetch(reply: { status?: number; body?: string } = {}): ProxyFetch & {
-  calls: Array<{ url: string; init: { method: string; headers: Record<string, string>; body?: string } }>;
+  calls: Array<{
+    url: string;
+    init: { method: string; headers: Record<string, string>; body?: string; redirect?: string };
+  }>;
 } {
-  const calls: Array<{ url: string; init: { method: string; headers: Record<string, string>; body?: string } }> =
-    [];
+  const calls: Array<{
+    url: string;
+    init: { method: string; headers: Record<string, string>; body?: string; redirect?: string };
+  }> = [];
   const fetchImpl = (async (
     url: string,
-    init: { method: string; headers: Record<string, string>; body?: string },
+    init: { method: string; headers: Record<string, string>; body?: string; redirect?: string },
   ) => {
     calls.push({ url, init });
     return new Response(reply.body ?? '{"ok":true}', { status: reply.status ?? 200 });
@@ -145,6 +150,38 @@ describe('the proxy is read-only at the boundary', () => {
     const result = await handleProxy(request(), fetchImpl);
     expect(result.ok).toBe(true);
     expect(fetchImpl.calls[0]?.init.method).toBe('GET');
+  });
+});
+
+describe('the proxy returns a redirect instead of following it (#32)', () => {
+  const MOVED_BODY =
+    'This resource has been moved permanently to https://gitlab.example.com/api/v4/projects/81';
+
+  /** A fetch that follows a 301 unless asked not to, as Node's fetch does by default. */
+  function redirectingFetch(): ProxyFetch & {
+    calls: Array<{ url: string; init: { method: string; redirect?: string } }>;
+  } {
+    const calls: Array<{ url: string; init: { method: string; redirect?: string } }> = [];
+    const fetchImpl = (async (_url: string, init: { method: string; redirect?: string }) => {
+      calls.push({ url: _url, init });
+      if (init.redirect === 'manual') return new Response(MOVED_BODY, { status: 301 });
+      return new Response('[]', { status: 200 });
+    }) as unknown as ProxyFetch;
+    return Object.assign(fetchImpl, { calls });
+  }
+
+  test('asks the fetch not to follow redirects', async () => {
+    const fetchImpl = fakeFetch();
+    await handleProxy(request(), fetchImpl);
+    expect(fetchImpl.calls[0]?.init.redirect).toBe('manual');
+  });
+
+  test('hands the 301 and its move body back to the Panel', async () => {
+    const fetchImpl = redirectingFetch();
+    const result = await handleProxy(request(), fetchImpl);
+    expect(result.ok).toBe(true);
+    expect(result.status).toBe(301);
+    expect(result.body).toContain('/api/v4/projects/81');
   });
 });
 

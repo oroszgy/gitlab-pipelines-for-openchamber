@@ -26,3 +26,9 @@ healed target lives only in memory. Because the header then shows the project id
 path survives only in the one-time notice (`old path → target`). Both transports share the one
 client-side path; the custom-host proxy already follows redirects implicitly through Node `fetch`, so
 there the explicit handling is a safety net, not the fix.
+
+> **Note (2026-10-06).** The last sentence was half wrong. With service-owned configuration as the
+> only transport (ADR-0006), the proxy *was* following the redirect, so the client-side handling
+> never ran and a moved project surfaced as an authorization error. The proxy now requests
+> `redirect: 'manual'`, returning the `301` and its move body for the Panel to act on — so the
+> client-side handling is the fix, not a safety net. See issue #32.

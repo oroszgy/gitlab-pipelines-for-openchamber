@@ -36,6 +36,7 @@ export type ProxyFetch = (url: string, init: {
   headers: Record<string, string>;
   body?: string;
   signal?: AbortSignal;
+  redirect?: 'manual';
 }) => Promise<{ status: number; body?: ProxyBodyStream | null; text(): Promise<string> }>;
 
 /** The request budget. Matches the host's own ~20 s ceiling. */
@@ -163,6 +164,10 @@ export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch):
       headers,
       ...(request.body != null ? { body: request.body } : {}),
       signal: controller.signal,
+      // A moved project's redirect must reach the Panel, whose client follows
+      // the move itself from the response body. Following it here would swallow
+      // the 301 and neuter that heal path. See ADR-0003.
+      redirect: 'manual',
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'request failed';

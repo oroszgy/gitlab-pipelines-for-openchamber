@@ -98,7 +98,8 @@ async function handleProxy(request, fetchImpl) {
       method: request.method,
       headers,
       ...request.body != null ? { body: request.body } : {},
-      signal: controller.signal
+      signal: controller.signal,
+      redirect: "manual"
     });
   } catch (error) {
     const message = error instanceof Error ? error.message : "request failed";

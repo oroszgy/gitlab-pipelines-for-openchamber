@@ -7,6 +7,15 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.7.6] - 2026-10-06
+
+### Fixed
+
+- The Panel now follows a GitLab project that has been renamed or moved when it reaches GitLab through
+  the Proxy service. The service was following the redirect itself, so the Panel never saw the move and
+  reported an authorization error instead; the service now returns the redirect for the Panel’s heal
+  path to follow.
+
 ## [0.7.5] - 2026-10-06
 
 ### Fixed
