@@ -413,7 +413,8 @@ describe('the job log drawer', () => {
 
     const rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
     expect(rendered.length).toBeGreaterThan(0);
-    expect(rendered.length).toBeLessThan(100);
+    // A fixed window, not the whole 20 000-line Trace.
+    expect(rendered.length).toBeLessThan(160);
     // Follow-tail: the newest line is the one on screen.
     expect(rendered.some((line) => line.dataset.line === '19999')).toBe(true);
     expect(rendered.some((line) => line.dataset.line === '0')).toBe(false);

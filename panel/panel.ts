@@ -65,7 +65,7 @@ import {
 } from './service-config';
 import { groupJobsByStage, type StageGroup } from './stage-groups';
 import { isActiveStatus, jobStatusInfo, statusInfo, type StatusInfo } from './status';
-import { TraceIndexer, stripAnsi, windowFor, type IdleScheduler } from './trace-index';
+import { TraceIndexer, lineAtOffset, stripAnsi, type IdleScheduler } from './trace-index';
 import type { Bridge, Job, Pipeline, Scope } from './types';
 
 /** Everything the panel needs from a clock. Injected so tests are deterministic. */
@@ -145,10 +145,8 @@ const LOG_LINE_HEIGHT = 18;
 const LOG_WRAP_CHARS = 80;
 /** Viewport height assumed before layout exists (and under a test DOM). */
 const LOG_VIEWPORT_FALLBACK = 320;
-/** Lines rendered even when no viewport can be measured, so a tall panel still fills. */
-const LOG_MIN_WINDOW_LINES = 40;
-/** Lines rendered beyond the visible window on each side, to keep it filled. */
-const LOG_OVERSCAN = 40;
+/** Lines the drawer renders at once, regardless of a viewport it may not be able to read. */
+const LOG_WINDOW_LINES = 120;
 /** How long a typed find query waits before it is run over the index. */
 const LOG_FIND_DEBOUNCE_MS = 120;
 /** A monospace glyph's advance at the drawer's 0.75rem font, before measurement. */
@@ -407,6 +405,8 @@ class PipelinesPanel implements PanelHandle {
   private traceScrollSet = -1;
   /** The measured monospace advance width, once computed. */
   private traceCharWidthPx: number | null = null;
+  /** TEMPORARY: a readout of the drawer's window metrics, for a remote diagnosis. */
+  private traceDebugEl: HTMLElement | null = null;
   /** The open log's incremental line index. */
   private traceIndexer: TraceIndexer | null = null;
   /** Whether the index was complete on the last update, to repaint once on completion. */
@@ -2851,6 +2851,7 @@ class PipelinesPanel implements PanelHandle {
     this.drawerToolsEl = null;
     this.drawerCopyEl = null;
     this.drawerJumpEl = null;
+    this.traceDebugEl = null;
   }
 
   private disposeTraceIndexer(): void {
@@ -2880,6 +2881,12 @@ class PipelinesPanel implements PanelHandle {
     const count = el('span', 'gp-log-count', this.traceCountText());
     this.drawerCountEl = count;
     tools.append(count);
+
+    // TEMPORARY: visible window metrics for a remote diagnosis. Remove once the
+    // drawer's sizing is confirmed on a real panel.
+    const debug = el('span', 'gp-log-debug');
+    this.traceDebugEl = debug;
+    tools.append(debug);
 
     const previous = el('button', 'gp-log-prev');
     previous.type = 'button';
@@ -3103,9 +3110,7 @@ class PipelinesPanel implements PanelHandle {
     }
     const heights = this.traceLines.map((_, index) => this.traceLineHeight(index));
     const viewport = this.traceViewport();
-    // Render at least a full screenful even if the viewport could not be measured,
-    // so a mis-read zero never leaves a tall panel mostly empty.
-    const windowHeight = Math.max(viewport, LOG_MIN_WINDOW_LINES * LOG_LINE_HEIGHT);
+    const count = heights.length;
     const total = heights.reduce((sum, height) => sum + height, 0);
     this.traceTotal = total;
     // Follow-tail pins to the element's real bottom when layout provides one, so
@@ -3116,28 +3121,45 @@ class PipelinesPanel implements PanelHandle {
         ? Math.max(0, body.scrollHeight - body.clientHeight)
         : Math.max(0, total - viewport);
     const scroll = this.followTail ? realBottom : Math.max(0, this.drawerScrollTop);
-    const view = windowFor(heights, scroll, windowHeight, LOG_OVERSCAN);
+
+    // A fixed number of lines, led by the anchor, so the window never depends on a
+    // viewport that may have been read as zero before layout. At >= 18px a line,
+    // the lines below the anchor always cover more than any panel is tall.
+    const anchor = lineAtOffset(heights, scroll);
+    const windowLines = Math.min(LOG_WINDOW_LINES, count);
+    const lead = Math.floor(LOG_WINDOW_LINES / 10);
+    const start = Math.max(0, Math.min(anchor - lead, count - windowLines));
+    const end = Math.min(count, start + windowLines);
+    let top = 0;
+    for (let index = 0; index < start; index++) top += heights[index]!;
+    let bottom = 0;
+    for (let index = end; index < count; index++) bottom += heights[index]!;
 
     const content = el('div', 'gp-log');
-    if (view.top > 0) {
+    if (top > 0) {
       const spacer = el('div', 'gp-log-pad');
-      spacer.style.height = `${view.top}px`;
+      spacer.style.height = `${top}px`;
       content.append(spacer);
     }
     const errors = new Set(this.traceErrors);
     const current = this.traceMatches[this.traceMatchAt];
-    for (let index = view.start; index < view.end; index++) {
+    for (let index = start; index < end; index++) {
       content.append(this.renderTraceLine(index, errors, current));
     }
-    if (view.bottom > 0) {
+    if (bottom > 0) {
       const spacer = el('div', 'gp-log-pad');
-      spacer.style.height = `${view.bottom}px`;
+      spacer.style.height = `${bottom}px`;
       content.append(spacer);
     }
     body.append(content);
     body.scrollTop = scroll;
     this.traceScrollSet = body.scrollTop;
     this.drawerScrollTop = body.scrollTop;
+    if (this.traceDebugEl) {
+      this.traceDebugEl.textContent =
+        `d4 n=${count} a=${anchor} ${start}..${end} vp=${Math.round(viewport)} ` +
+        `ch=${body.clientHeight} sh=${body.scrollHeight} wrap=${wrap}`;
+    }
     this.measureTraceRows(content);
   }
 

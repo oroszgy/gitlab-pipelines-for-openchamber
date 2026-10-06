@@ -78,7 +78,9 @@ describe('package manifest', () => {
   test('ships the entry HTML and a built IIFE script', () => {
     expect(existsSync(join(root, 'panel/index.html'))).toBe(true);
     const html = readFileSync(join(root, 'panel/index.html'), 'utf8');
-    expect(html).toContain('<script src="./main.js"></script>');
+    // The script URL is versioned so a version bump busts any cached bundle.
+    const version = JSON.parse(raw).version as string;
+    expect(html).toContain(`<script src="./main.js?v=${version}"></script>`);
     requireBuiltBundle('panel/main.js');
   });
 });

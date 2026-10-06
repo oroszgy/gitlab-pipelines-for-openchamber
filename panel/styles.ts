@@ -372,6 +372,8 @@ html { font-size: 16px !important; }
 }
 .gp-log-find:focus { outline: 2px solid var(--oc-focus, #5b8def); outline-offset: -1px; }
 .gp-log-count { flex: 0 0 auto; color: var(--oc-muted, GrayText); font-size: 0.75rem; font-variant-numeric: tabular-nums; white-space: nowrap; }
+/* TEMPORARY: window metrics readout for a remote diagnosis. */
+.gp-log-debug { flex: 1 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: var(--oc-muted, GrayText); font-size: 0.625rem; }
 .gp-log-prev, .gp-log-next, .gp-log-jump, .gp-log-copy {
   flex: 0 0 auto;
   display: inline-flex;

@@ -6,6 +6,7 @@ import {
   errorLines,
   findMatches,
   indexTrace,
+  lineAtOffset,
   stripAnsi,
   windowFor,
   type IdleScheduler,
@@ -97,6 +98,21 @@ describe('windowFor', () => {
 
   test('an empty trace has an empty window', () => {
     expect(windowFor([], 0, 300)).toEqual({ start: 0, end: 0, top: 0, bottom: 0 });
+  });
+});
+
+describe('lineAtOffset', () => {
+  test('finds the line containing an offset', () => {
+    const heights = [30, 10, 10, 30, 10];
+    expect(lineAtOffset(heights, 0)).toBe(0);
+    expect(lineAtOffset(heights, 29)).toBe(0);
+    expect(lineAtOffset(heights, 30)).toBe(1);
+    expect(lineAtOffset(heights, 45)).toBe(2);
+    expect(lineAtOffset(heights, 90)).toBe(4);
+  });
+
+  test('an empty list has no line', () => {
+    expect(lineAtOffset([], 100)).toBe(0);
   });
 });
 

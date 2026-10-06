@@ -7,6 +7,17 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.10.4] - 2026-10-06
+
+### Fixed
+
+- The log drawer now renders a fixed-size window around the scroll position,
+  instead of one sized from a height it may not have been able to measure. This
+  is what stops a tall panel showing blank space above or below the lines.
+- The panel script is requested with the package version (`main.js?v=…`), so a
+  version bump actually busts a cached bundle rather than continuing to serve
+  the old one.
+
 ## [0.10.3] - 2026-10-06
 
 ### Fixed

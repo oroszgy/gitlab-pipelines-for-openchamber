@@ -91,6 +91,19 @@ export type LogWindow = {
 };
 
 /**
+ * The index of the line containing `offset` pixels down the list: the last
+ * line whose top is at or above `offset`. Used to anchor a fixed-size window.
+ */
+export function lineAtOffset(heights: readonly number[], offset: number): number {
+  let accumulated = 0;
+  for (let index = 0; index < heights.length; index++) {
+    accumulated += heights[index]!;
+    if (accumulated > offset) return index;
+  }
+  return Math.max(0, heights.length - 1);
+}
+
+/**
  * The visible window for variable-height rows: walk the height prefix sums to
  * the first line crossing `scrollTop`, extend past the viewport, then pad by
  * `overscan` lines on each side. Handles the top, middle and end of the list.
