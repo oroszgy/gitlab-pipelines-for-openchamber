@@ -75,8 +75,10 @@ and is deterministic to test. The action disables itself while a handoff is in f
 click cannot start two sessions. A Job whose Pipeline object is not in the current list still hands
 off — the Pipeline identifiers are simply omitted from the prompt.
 
-**Manifest.** Unchanged. `sessions` is already declared and covers `startSession`, including its seed
-text; `prompt` is deliberately not added, so no re-approval is needed.
+**Manifest.** `prompt` is declared alongside `sessions`. A `startSession` carrying seed `text` is
+guarded by *both* capabilities on the host — `startSession` answers `NOT_GRANTED` without `prompt` —
+so `sessions` alone does not cover the handoff. `prompt` is a new capability, so OpenChamber
+re-approves the extension once.
 
 ## Testing Decisions
 

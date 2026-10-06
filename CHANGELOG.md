@@ -7,6 +7,14 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.8.2] - 2026-10-06
+
+### Fixed
+
+- **Debug this job** now works: the manifest declares the `prompt` capability. A session seeded with
+  the Job's log needs both `sessions` and `prompt`, so without it OpenChamber refused to start the
+  session. This adds a capability, so OpenChamber asks you to approve the extension once more.
+
 ## [0.8.1] - 2026-10-06
 
 ### Fixed

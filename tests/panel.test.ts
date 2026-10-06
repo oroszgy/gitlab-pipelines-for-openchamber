@@ -1221,6 +1221,18 @@ describe('session handoff', () => {
     expect(text(root)).not.toContain('Could not start a session for this job.');
   });
 
+  test('a not-granted host answer names the missing capabilities', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = failedRun();
+    host.startSessionError = Object.assign(new Error('not allowed'), { code: 'NOT_GRANTED' });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-handoff') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('sessions and prompt');
+  });
+
   test('a failed log fetch blocks the handoff with a clear message', async () => {
     const host = configuredHost();
     host.gitlabHandler = (request) => {

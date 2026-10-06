@@ -1081,8 +1081,9 @@ class PipelinesPanel implements PanelHandle {
       case 'HOST_UNAVAILABLE':
         return 'OpenChamber is not reachable, so the session could not be started.';
       case 'NOT_GRANTED':
+        return 'OpenChamber has not granted this extension the sessions and prompt capabilities it needs to start a session.';
       case 'DISABLED':
-        return 'This extension is not granted the sessions capability.';
+        return 'This extension is disabled in OpenChamber Settings, so it cannot start a session.';
       case 'HOST_REJECTED':
         return message && message !== 'Host did not return a session.'
           ? `Could not start a session: ${message}`

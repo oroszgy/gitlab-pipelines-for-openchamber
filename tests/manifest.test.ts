@@ -2,6 +2,7 @@ import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { describe, expect, test } from 'bun:test';
 import { parseManifestJson } from '@openchamber/sdk/schemas';
+import { requestedGuestCapabilities } from '@openchamber/sdk';
 import { PANEL_ID } from '../panel/config';
 
 const root = join(import.meta.dir, '..');
@@ -59,12 +60,19 @@ describe('package manifest', () => {
     requireBuiltBundle('service/main.js');
   });
 
-  test('asks for files and sessions only; the service carries network', () => {
+  test('asks for files, sessions and prompt; the service carries network', () => {
     if (!parsed.ok) throw new Error('manifest did not parse');
     const capabilities = parsed.manifest.contributes.capabilities ?? [];
     expect(capabilities).toContain('files');
     expect(capabilities).toContain('sessions');
+    // A seeded startSession carries text, which the host guards with `prompt`.
+    expect(capabilities).toContain('prompt');
     expect(capabilities).not.toContain('network');
+    // The SDK derives the actual approval request from the manifest; prove the
+    // seed prompt is part of it, not just the raw list.
+    const requested = requestedGuestCapabilities(parsed.manifest.contributes);
+    expect(requested).toContain('prompt');
+    expect(requested).toContain('sessions');
   });
 
   test('ships the entry HTML and a built IIFE script', () => {
