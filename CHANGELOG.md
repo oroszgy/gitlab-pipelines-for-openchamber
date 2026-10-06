@@ -7,6 +7,18 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.10.5] - 2026-10-06
+
+### Fixed
+
+- Scrolling the log drawer now reaches the bottom. Repainting the open drawer no
+  longer rewrites the scroll offset, so it stops fighting the browser and
+  bouncing back before the end.
+
+### Removed
+
+- The temporary window-metrics readout added in 0.10.4; its diagnosis is done.
+
 ## [0.10.4] - 2026-10-06
 
 ### Fixed

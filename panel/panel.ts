@@ -405,8 +405,6 @@ class PipelinesPanel implements PanelHandle {
   private traceScrollSet = -1;
   /** The measured monospace advance width, once computed. */
   private traceCharWidthPx: number | null = null;
-  /** TEMPORARY: a readout of the drawer's window metrics, for a remote diagnosis. */
-  private traceDebugEl: HTMLElement | null = null;
   /** The open log's incremental line index. */
   private traceIndexer: TraceIndexer | null = null;
   /** Whether the index was complete on the last update, to repaint once on completion. */
@@ -1875,8 +1873,8 @@ class PipelinesPanel implements PanelHandle {
     // now, and once more after the next layout, so the first view uses the real
     // viewport and width and measures its rows.
     if (this.openJob && this.drawerEl && this.traceLines.length > 0) {
-      this.paintTrace(this.drawerEl);
-      this.afterLayout(() => this.repaintTrace());
+      this.paintTrace(this.drawerEl, true);
+      this.afterLayout(() => this.repaintTrace(true));
     }
 
     if (this.scrollEl) this.scrollEl.scrollTop = this.scrollTop;
@@ -2712,14 +2710,16 @@ class PipelinesPanel implements PanelHandle {
     const body = el('div', 'gp-drawer-body');
     body.addEventListener('scroll', () => {
       const top = body.scrollTop;
-      // Ignore the scroll event our own paint caused, so follow-tail is not
-      // switched off by a programmatic scroll.
-      if (top === this.traceScrollSet) return;
+      const programmatic = top === this.traceScrollSet;
+      this.traceScrollSet = -1;
+      // Ignore the one scroll event our own paint caused, so follow-tail is not
+      // switched off by a programmatic scroll — but only that one.
+      if (programmatic) return;
       this.drawerScrollTop = top;
       this.followTail = this.traceAtBottom(top);
       // Windowed rendering: the rows for the newly visible range must be
       // rendered as the user scrolls, or the log shows only its first window.
-      if (this.traceLines.length > 0) this.repaintTrace();
+      if (this.traceLines.length > 0) this.repaintTrace(false);
     });
     this.drawerEl = body;
     drawer.append(body);
@@ -2727,7 +2727,7 @@ class PipelinesPanel implements PanelHandle {
     if (entry.state === 'missing') {
       body.append(el('div', 'gp-drawer-empty', 'No log output yet — the job has not started.'));
     } else {
-      this.paintTrace(body);
+      this.paintTrace(body, true);
     }
     return drawer;
   }
@@ -2754,14 +2754,14 @@ class PipelinesPanel implements PanelHandle {
     const view = body.ownerDocument.defaultView;
     const Observer = view?.ResizeObserver;
     if (Observer) {
-      const observer = new Observer(() => this.repaintTrace());
+      const observer = new Observer(() => this.repaintTrace(this.followTail));
       observer.observe(body);
       this.handles.push({ dispose: () => observer.disconnect() });
     }
     // A belt-and-braces trigger for a host that resizes the panel without
     // resizing the body's content box (or where ResizeObserver is unavailable).
     if (view) {
-      const onResize = (): void => this.repaintTrace();
+      const onResize = (): void => this.repaintTrace(this.followTail);
       view.addEventListener('resize', onResize);
       this.handles.push({ dispose: () => view.removeEventListener('resize', onResize) });
     }
@@ -2851,7 +2851,6 @@ class PipelinesPanel implements PanelHandle {
     this.drawerToolsEl = null;
     this.drawerCopyEl = null;
     this.drawerJumpEl = null;
-    this.traceDebugEl = null;
   }
 
   private disposeTraceIndexer(): void {
@@ -2881,12 +2880,6 @@ class PipelinesPanel implements PanelHandle {
     const count = el('span', 'gp-log-count', this.traceCountText());
     this.drawerCountEl = count;
     tools.append(count);
-
-    // TEMPORARY: visible window metrics for a remote diagnosis. Remove once the
-    // drawer's sizing is confirmed on a real panel.
-    const debug = el('span', 'gp-log-debug');
-    this.traceDebugEl = debug;
-    tools.append(debug);
 
     const previous = el('button', 'gp-log-prev');
     previous.type = 'button';
@@ -2952,7 +2945,7 @@ class PipelinesPanel implements PanelHandle {
     if (complete && !this.traceIndexed) {
       // The index now knows every line: repaint so heights and highlights are exact.
       this.traceIndexed = true;
-      this.repaintTrace();
+      this.repaintTrace(this.followTail);
     } else if (!complete) {
       this.traceIndexed = false;
     }
@@ -2974,7 +2967,7 @@ class PipelinesPanel implements PanelHandle {
     this.traceMatchAt = this.traceMatches.length > 0 ? 0 : -1;
     if (this.traceMatchAt >= 0) this.scrollToTraceLine(this.traceMatches[this.traceMatchAt]!);
     this.updateFindCount();
-    this.repaintTrace();
+    this.repaintTrace(true);
   }
 
   private traceFindNext(): void {
@@ -2982,7 +2975,7 @@ class PipelinesPanel implements PanelHandle {
     this.traceMatchAt = (this.traceMatchAt + 1) % this.traceMatches.length;
     this.scrollToTraceLine(this.traceMatches[this.traceMatchAt]!);
     this.updateFindCount();
-    this.repaintTrace();
+    this.repaintTrace(true);
   }
 
   private traceFindPrevious(): void {
@@ -2990,14 +2983,14 @@ class PipelinesPanel implements PanelHandle {
     this.traceMatchAt = (this.traceMatchAt - 1 + this.traceMatches.length) % this.traceMatches.length;
     this.scrollToTraceLine(this.traceMatches[this.traceMatchAt]!);
     this.updateFindCount();
-    this.repaintTrace();
+    this.repaintTrace(true);
   }
 
   private jumpToError(): void {
     const errors = this.traceErrors;
     if (errors.length === 0) return;
     this.scrollToTraceLine(errors[errors.length - 1]!);
-    this.repaintTrace();
+    this.repaintTrace(true);
   }
 
   private scrollToTraceLine(index: number): void {
@@ -3097,8 +3090,14 @@ class PipelinesPanel implements PanelHandle {
     });
   }
 
-  /** Render the visible window into `body`, with spacers standing in for the rest. */
-  private paintTrace(body: HTMLElement): void {
+  /**
+   * Render the visible window into `body`, with spacers standing in for the rest.
+   * `reposition` sets the scroll offset to the computed one — only for a newly
+   * attached body, follow-tail, or an explicit jump. An ordinary repaint of an
+   * existing body must leave the scroll position to the browser, or clamping as
+   * the content changes fights the user and the view can never settle.
+   */
+  private paintTrace(body: HTMLElement, reposition: boolean): void {
     clearNode(body);
     // A width change re-wraps every row, so heights measured at the old width no
     // longer hold. This is also how the detached first paint's fallback width is
@@ -3152,13 +3151,10 @@ class PipelinesPanel implements PanelHandle {
       content.append(spacer);
     }
     body.append(content);
-    body.scrollTop = scroll;
-    this.traceScrollSet = body.scrollTop;
-    this.drawerScrollTop = body.scrollTop;
-    if (this.traceDebugEl) {
-      this.traceDebugEl.textContent =
-        `d4 n=${count} a=${anchor} ${start}..${end} vp=${Math.round(viewport)} ` +
-        `ch=${body.clientHeight} sh=${body.scrollHeight} wrap=${wrap}`;
+    if (reposition) {
+      body.scrollTop = scroll;
+      this.traceScrollSet = body.scrollTop;
+      this.drawerScrollTop = body.scrollTop;
     }
     this.measureTraceRows(content);
   }
@@ -3199,13 +3195,13 @@ class PipelinesPanel implements PanelHandle {
     }
     if (changed && !this.traceSettling) {
       this.traceSettling = true;
-      this.repaintTrace();
+      this.repaintTrace(false);
       this.traceSettling = false;
     }
   }
 
-  private repaintTrace(): void {
-    if (this.drawerEl) this.paintTrace(this.drawerEl);
+  private repaintTrace(reposition: boolean): void {
+    if (this.drawerEl) this.paintTrace(this.drawerEl, reposition);
   }
 
   private renderFooter(): HTMLElement {
