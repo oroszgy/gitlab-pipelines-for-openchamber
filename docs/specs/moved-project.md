@@ -1,16 +1,17 @@
 # Spec: Follow a moved GitLab project
 
-Status: ready-for-agent
+Status: implemented — see tickets `moved-project/01`–`04` (mapped in [`README.md`](README.md)).
 Feature: `moved-project`
 
 ## Problem Statement
 
 A GitLab project can be renamed or transferred to another namespace, and the Panel's path for it — derived
 from the git remote, or set in the `project` override — can go stale. GitLab answers a request for the old
-path with a redirect (301) whose `Location` names the project's current identity. OpenChamber's `request`
-bridge returns only `{ status, body }` and does not follow the redirect, so the Panel shows
-`GitLab returned an unexpected response (301)` and offers no way out. The user has to know to update their
-git remote or the Project setting — the very thing the failure does not tell them.
+path with a redirect (301) that names the project's current identity. The Panel reaches GitLab through the
+Proxy service, whose `/proxy` envelope carries only `{ status, body }` and never headers, so the move is
+recoverable only if the service hands the redirect back rather than following it. When it does not, the
+Panel never sees the move and the user has to know to update their git remote or the Project setting — the
+very thing the failure does not tell them.
 
 ## Solution
 
@@ -49,8 +50,8 @@ settings.
    misleading.
 9. As a developer, I want a redirect loop to stop and explain rather than spin, so that a broken host does
    not hang the Panel.
-10. As a developer on a custom host, I want the same redirect handling as the built-in host, so that
-    behaviour does not depend on which transport is in use.
+10. As a developer on any host, I want the redirect handled the same way, so that behaviour does not
+    depend on which GitLab instance I read.
 11. As a developer, I want a refresh not to pay for the move again, so that polling stays cheap after the
     first heal.
 12. As a maintainer, I want the parse and the redirect statuses in the tested client, so that the wire
@@ -95,9 +96,9 @@ for the Panel's lifetime. A refresh — which re-derives the same stale remote p
 never re-follows. `forgetHostData()` clears it on a host switch, so a healed id never crosses hosts. Nothing
 is written to settings; the user fixes the remote or the `project` override.
 
-**Origin.** The bridge pins `request` to the manifest origin, so the only followable target is one on the
-effective host. A target on any other host is not followed; it falls to the *Project moved* state, which
-names the target.
+**Origin.** The Proxy service attaches the Access token only for the Configured host, so the only
+followable target is one on the effective host. A target on any other host is not followed; it falls to
+the *Project moved* state, which names the target.
 
 **Downstream.** Jobs, traces, the ref, the scope and polling are unchanged: they read the resolved project,
 which is now the healed target.
@@ -143,19 +144,21 @@ structure. The feature uses the two seams that already exist.
   does not say.
 - Persisting a healed target across Panel remounts or across sessions.
 - Following a redirect to a different host, or to a non-`api/v4` URL.
-- Changing the transport (the built-in bridge still does not follow redirects); the upstream note stands.
+- Following the redirect in the Proxy service, or exposing `Location`; the service returns the redirect
+  and the Panel follows the move from the response body.
 - Any change to project/Ref resolution, the log drawer, or polling.
 
 ## Further Notes
 
-- **Why parse text at all:** the host bridge returns only `{ status, body }` (`panel/host-port.ts:25-29`;
-  SDK `contract.d.ts:70-73`), validated to those two keys, so `Location` never reaches the Panel. GitLab's
-  documented body is the only in-repo handle on the target. See ADR-0003.
-- **The custom-host asymmetry:** the proxy's Node `fetch` follows same-origin redirects by default, so a
-  custom host already healed implicitly and non-obviously. Implementing in the shared client makes both
-  paths explicit and identical; there the new code is a safety net.
-- **Upstream note:** the durable fix is for the host to follow redirects (or expose `Location`) in
-  `host.request`. That is outside this repo; the Panel-side heal is what unblocks users now.
+- **Why parse text at all:** the Proxy service's `/proxy` envelope returns only `{ status, body,
+  truncated }` (`panel/host-port.ts`), never headers, so `Location` never reaches the Panel. GitLab's
+  documented body is the only handle on the target. See ADR-0003.
+- **One transport, one path:** the service returns a redirect unfollowed (`redirect: 'manual'`) instead of
+  following it, so the client-side heal is the single mechanism — the same on `gitlab.com` and a
+  self-managed host. Following it in the service would swallow the `301` and neuter the heal.
+- **Upstream note (superseded):** the original plan waited for the host to follow redirects or expose
+  `Location` in `host.request`; since the Proxy service is the Extension's own process, it returns the
+  redirect and the Panel heals it. See the 2026-10-06 note on ADR-0003.
 - **Settled in the grilling** that produced ADR-0003: heal-then-guide; strict documented-text parse; call
   and display the target; typed failure from the client; panel-lifetime cache; five-hop cap; two fallback
   flavours; one-time from→to notice.

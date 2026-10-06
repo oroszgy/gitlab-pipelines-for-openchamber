@@ -67,6 +67,9 @@ A correct token is confirmed by the username shown in the panel header.
 
 ## Development
 
+Development requires **[Bun](https://bun.sh) ≥ 1.3** — install, build and tests all run on it, and Node
+alone will not work.
+
 ```sh
 bun install
 bun run build   # regenerates the committed panel/main.js and service/main.js

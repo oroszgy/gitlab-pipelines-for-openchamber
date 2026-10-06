@@ -1,6 +1,6 @@
 # Spec: Downstream pipelines
 
-Status: ready-for-agent
+Status: implemented — see tickets `downstream-pipelines/01`–`07` (mapped in [`README.md`](README.md)).
 Feature: `downstream-pipelines`
 Follows: [`docs/specs/pipelines-panel.md`](pipelines-panel.md) (whose Out of Scope deferred this) and
 `docs/adr/0004-follow-trigger-edges-forward.md`.
