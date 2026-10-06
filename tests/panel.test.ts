@@ -373,7 +373,7 @@ describe('expanding a pipeline', () => {
 });
 
 describe('the job log drawer', () => {
-  test('opens the whole log wrapped, with a full-log link, and closes back', async () => {
+  test('opens a window of the log wrapped, with a full-log link, and closes back', async () => {
     const host = configuredHost();
     const trace = Array.from({ length: 45 }, (_, index) => `line ${index + 1}`).join('\n');
     host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
@@ -385,16 +385,37 @@ describe('the job log drawer', () => {
 
     const drawer = root.querySelector('.gp-drawer');
     expect(drawer).not.toBeNull();
-    const body = root.querySelector('.gp-drawer-body');
-    // Scrolling replaces the old 40-line peek, so lines beyond 40 are now present.
-    expect(body?.textContent).toContain('line 1\n');
-    expect(body?.textContent).toContain('line 45');
+    // Only the visible window is in the DOM, and follow-tail lands on the end.
+    const rendered = root.querySelectorAll('.gp-log-line');
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(rendered.length).toBeLessThan(45);
+    expect([...rendered].some((line) => line.textContent === 'line 45')).toBe(true);
+    expect(root.querySelector('.gp-log-find')).not.toBeNull();
+    expect(root.querySelector('.gp-log-copy')).not.toBeNull();
     expect(root.querySelector('.gp-drawer-link')?.textContent).toContain('View full log in GitLab');
 
     (root.querySelector('.gp-drawer-close') as HTMLElement).click();
     await flush();
     expect(root.querySelector('.gp-drawer')).toBeNull();
     expect(root.querySelector('.gp-row')).not.toBeNull();
+  });
+
+  test('renders only a screenful of a very large trace', async () => {
+    const host = configuredHost();
+    const trace = Array.from({ length: 20_000 }, (_, index) => `line ${index + 1}`).join('\n');
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+
+    const rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(rendered.length).toBeLessThan(100);
+    // Follow-tail: the newest line is the one on screen.
+    expect(rendered.some((line) => line.dataset.line === '19999')).toBe(true);
+    expect(rendered.some((line) => line.dataset.line === '0')).toBe(false);
   });
 
   test('a log over the line cap says older lines are not shown', async () => {
@@ -551,7 +572,7 @@ describe('live log while a job runs', () => {
     trace = 'line 1\nline 2';
     timers.advance(5000);
     await flush();
-    expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('line 1\nline 2');
+    expect(root.querySelector('.gp-drawer-body')?.textContent).toContain('line 2');
   });
 
   test('does not refetch a settled job’s log, even while the pipeline polls', async () => {
@@ -589,6 +610,174 @@ describe('isAtBottom', () => {
   });
   test('is false once scrolled further up', () => {
     expect(isAtBottom({ scrollTop: 40, scrollHeight: 300, clientHeight: 200 })).toBe(false);
+  });
+});
+
+describe('the log drawer tools', () => {
+  async function openLog(host: FakeHost, timers: FakeTimers): Promise<HTMLElement> {
+    const { root } = await mount(host, timers);
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    return root;
+  }
+
+  function dispatchScroll(body: HTMLElement): void {
+    const EventCtor = (body.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+    body.dispatchEvent(new EventCtor('scroll'));
+  }
+
+  test('find counts matches case-insensitively and steps between them', async () => {
+    const host = configuredHost();
+    const trace = 'alpha\nbeta\nALPHA\ngamma\nalpha\n';
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    const timers = new FakeTimers();
+    const root = await openLog(host, timers);
+    timers.advance(0);
+
+    setField(root, 'gp-log-find', 'alpha');
+    timers.advance(200);
+    expect(root.querySelector('.gp-log-count')?.textContent).toBe('1/3');
+    expect(root.querySelectorAll('.gp-log-line[data-match="true"]').length).toBeGreaterThan(0);
+
+    // Enter steps to the next match, as a keyboard user would.
+    (root.querySelector('.gp-log-find') as HTMLInputElement).dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }),
+    );
+    expect(root.querySelector('.gp-log-count')?.textContent).toBe('2/3');
+    (root.querySelector('.gp-log-next') as HTMLElement).click();
+    expect(root.querySelector('.gp-log-count')?.textContent).toBe('3/3');
+    (root.querySelector('.gp-log-next') as HTMLElement).click();
+    expect(root.querySelector('.gp-log-count')?.textContent).toBe('1/3');
+    (root.querySelector('.gp-log-prev') as HTMLElement).click();
+    expect(root.querySelector('.gp-log-count')?.textContent).toBe('3/3');
+  });
+
+  test('a zero-match query shows a count of 0 and does not error', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace: 'only line\n',
+    });
+    const timers = new FakeTimers();
+    const root = await openLog(host, timers);
+    timers.advance(0);
+
+    setField(root, 'gp-log-find', 'nowhere');
+    timers.advance(200);
+    expect(root.querySelector('.gp-log-count')?.textContent).toBe('0');
+    expect(root.querySelectorAll('.gp-log-line[data-match="true"]').length).toBe(0);
+  });
+
+  test('Ctrl/Cmd+F focuses find while the drawer is open', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace: 'line 1\n',
+    });
+    const root = await openLog(host, new FakeTimers());
+    const find = root.querySelector('.gp-log-find') as HTMLInputElement;
+    expect(document.activeElement).not.toBe(find);
+
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'f', ctrlKey: true, bubbles: true }));
+    expect(document.activeElement).toBe(find);
+  });
+
+  test('Jump to error appears with the index and reaches the last error line', async () => {
+    const host = configuredHost();
+    const lines = Array.from({ length: 2000 }, (_, index) => `line ${index + 1}`);
+    lines[39] = 'error: first failure';
+    lines[1199] = 'fatal: the real one';
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace: lines.join('\n'),
+    });
+    const timers = new FakeTimers();
+    const root = await openLog(host, timers);
+    expect(root.querySelector('.gp-log-jump')).toBeNull();
+
+    timers.advance(0);
+    const jump = root.querySelector('.gp-log-jump') as HTMLElement;
+    expect(jump).not.toBeNull();
+    jump.click();
+
+    const rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
+    expect(rendered.some((line) => line.dataset.line === '1199' && line.dataset.error === 'true')).toBe(true);
+  });
+
+  test('Jump to error is absent on a clean log', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace: 'all green\nstill green\n',
+    });
+    const timers = new FakeTimers();
+    const root = await openLog(host, timers);
+    timers.advance(0);
+    expect(root.querySelector('.gp-log-jump')).toBeNull();
+  });
+
+  test('Copy writes the full accumulated trace to the clipboard', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9 })],
+      trace: 'one\ntwo\nthree\n',
+    });
+    const root = await openLog(host, new FakeTimers());
+
+    (root.querySelector('.gp-log-copy') as HTMLElement).click();
+    await flush();
+    expect(host.clipboard).toEqual(['one\ntwo\nthree\n']);
+  });
+
+  test('Copy an empty log writes an empty string without error', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })] });
+    const root = await openLog(host, new FakeTimers());
+    expect(text(root)).toContain('No log output yet');
+
+    (root.querySelector('.gp-log-copy') as HTMLElement).click();
+    await flush();
+    expect(host.clipboard).toEqual(['']);
+  });
+
+  test('follow-tail sticks and the scroll position survives a Poll re-render', async () => {
+    const host = configuredHost();
+    let trace = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join('\n');
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify([job({ id: 9, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/trace')) return { status: 200, body: sliceTrace(trace, request) };
+      return { status: 404, body: '' };
+    };
+    const timers = new FakeTimers();
+    const root = await openLog(host, timers);
+    timers.advance(0);
+    const tail = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
+    expect(tail.some((line) => line.dataset.line === '199')).toBe(true);
+
+    // Read back a position above the tail, then let a Poll re-render.
+    const body = root.querySelector('.gp-drawer-body') as HTMLElement;
+    body.scrollTop = 360;
+    dispatchScroll(body);
+    trace = `${trace}\nline 201`;
+    timers.advance(5000);
+    await flush();
+
+    const rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
+    expect(rendered.length).toBeGreaterThan(0);
+    expect(Number(rendered[0]!.dataset.line)).toBeGreaterThan(10);
+    expect(rendered.some((line) => line.dataset.line === '200')).toBe(false);
   });
 });
 

@@ -7,6 +7,18 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.10.0] - 2026-10-06
+
+### Added
+
+- The log drawer now works on the Trace rather than just displaying it. Only the
+  lines on screen are rendered, so a 20 000-line Trace opens without laying out
+  the whole log, and long lines still wrap.
+- **Find in log** with a match count and previous/next, opened with `Ctrl/Cmd+F`.
+- **Jump to error**, which appears only when the Trace has failure lines and
+  scrolls to the last one; error and failure lines are highlighted in place.
+- **Copy** puts the whole accumulated Trace on the clipboard.
+
 ## [0.9.0] - 2026-10-06
 
 ### Added

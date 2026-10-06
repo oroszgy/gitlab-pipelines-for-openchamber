@@ -65,6 +65,7 @@ import {
 } from './service-config';
 import { groupJobsByStage, type StageGroup } from './stage-groups';
 import { isActiveStatus, jobStatusInfo, statusInfo, type StatusInfo } from './status';
+import { TraceIndexer, stripAnsi, windowFor, type IdleScheduler } from './trace-index';
 import type { Bridge, Job, Pipeline, Scope } from './types';
 
 /** Everything the panel needs from a clock. Injected so tests are deterministic. */
@@ -73,6 +74,9 @@ export type Timers = {
   clearTimeout(id: number): void;
   setInterval(fn: () => void, ms: number): number;
   clearInterval(id: number): void;
+  /** Scheduling for the Trace index's idle slices; mirrors `requestIdleCallback`. */
+  requestIdleCallback(fn: () => void): number;
+  cancelIdleCallback(id: number): void;
   now(): number;
 };
 
@@ -81,6 +85,17 @@ export const defaultTimers: Timers = {
   clearTimeout: (id) => globalThis.clearTimeout(id),
   setInterval: (fn, ms) => globalThis.setInterval(fn, ms) as unknown as number,
   clearInterval: (id) => globalThis.clearInterval(id),
+  requestIdleCallback: (fn) => {
+    const idle = (globalThis as { requestIdleCallback?: (callback: () => void) => number })
+      .requestIdleCallback;
+    return idle ? idle(fn) : (globalThis.setTimeout(fn, 0) as unknown as number);
+  },
+  cancelIdleCallback: (id) => {
+    const cancel = (globalThis as { cancelIdleCallback?: (handle: number) => void })
+      .cancelIdleCallback;
+    if (cancel) cancel(id);
+    else globalThis.clearTimeout(id);
+  },
   now: () => Date.now(),
 };
 
@@ -123,6 +138,17 @@ type ConfigResult = { ok: true; config: ServiceConfig } | { ok: false; error: st
 
 /** Redirects followed in one refresh before a move chain is treated as runaway. */
 const MAX_REDIRECT_HOPS = 5;
+
+/** Estimated height of one unwrapped log row, in pixels. */
+const LOG_LINE_HEIGHT = 18;
+/** Characters per wrapped row when no width has been measured. */
+const LOG_WRAP_CHARS = 80;
+/** Viewport height assumed before layout exists (and under a test DOM). */
+const LOG_VIEWPORT_FALLBACK = 320;
+/** Lines rendered beyond the visible window on each side. */
+const LOG_OVERSCAN = 6;
+/** How long a typed find query waits before it is run over the index. */
+const LOG_FIND_DEBOUNCE_MS = 120;
 
 /** How long a successful action's notice stays before it dismisses itself. */
 const ACTION_NOTICE_MS = 5000;
@@ -347,6 +373,39 @@ class PipelinesPanel implements PanelHandle {
   private drawerScrollTop = 0;
   /** Whether the log view should stick to the bottom as it updates. */
   private followTail = true;
+  /** The find field, match count and Jump control of the open log's toolbar. */
+  private drawerFindEl: HTMLInputElement | null = null;
+  private drawerCountEl: HTMLElement | null = null;
+  private drawerToolsEl: HTMLElement | null = null;
+  private drawerCopyEl: HTMLElement | null = null;
+  private drawerJumpEl: HTMLElement | null = null;
+  /** The open log's lines (tail-capped) and the text they came from. */
+  private traceLines: string[] = [];
+  private traceText = '';
+  /** The raw Trace text last turned into `logLines`, to skip unchanged renders. */
+  private traceRawText: string | null = null;
+  private traceKey: string | null = null;
+  /** The open log's find query, matching line indices and current match. */
+  private traceFindQuery = '';
+  private traceMatches: number[] = [];
+  private traceMatchAt = -1;
+  /** The pending debounce for a find query, if any. */
+  private traceFindTimer: number | null = null;
+  /** The error line indices from the last index update. */
+  private traceErrors: number[] = [];
+  /** The full accumulated Trace, ANSI-stripped, for Copy. */
+  private traceCopyText = '';
+  /** Row heights by line index (measured where layout allows, else estimated). */
+  private readonly traceHeights = new Map<number, number>();
+  private readonly traceMeasured = new Set<number>();
+  /** The open log's incremental line index. */
+  private traceIndexer: TraceIndexer | null = null;
+  /** Whether the index was complete on the last update, to repaint once on completion. */
+  private traceIndexed = false;
+  /** Guards the single measurement re-settle pass. */
+  private traceSettling = false;
+  /** The open log's total row height, for a scroll-position bottom test. */
+  private traceTotal = 0;
 
   private readonly handles: Array<{ dispose(): void }> = [];
   private unsubReady: (() => void) | null = null;
@@ -450,6 +509,7 @@ class PipelinesPanel implements PanelHandle {
     this.expandedId = null;
     this.downstreamPath = [];
     this.openJob = null;
+    this.resetTrace();
     this.pipelines = [];
     this.pipelinesNextPage = null;
     this.pipelinesPage = 1;
@@ -464,6 +524,8 @@ class PipelinesPanel implements PanelHandle {
     this.disposed = true;
     this.stopAllTimers();
     if (this.actionNoticeTimer != null) this.timers.clearTimeout(this.actionNoticeTimer);
+    if (this.traceFindTimer != null) this.timers.clearTimeout(this.traceFindTimer);
+    this.disposeTraceIndexer();
     this.unsubReady?.();
     this.disposeHandles();
     clearNode(this.root);
@@ -604,6 +666,7 @@ class PipelinesPanel implements PanelHandle {
     this.traces.clear();
     this.traceOffsets.clear();
     this.openJob = null;
+    this.resetTrace();
     this.expandedId = null;
     this.downstreamPath = [];
     this.updatedAt = null;
@@ -1108,6 +1171,7 @@ class PipelinesPanel implements PanelHandle {
     this.openJob = null;
     this.followTail = true;
     this.drawerScrollTop = 0;
+    this.resetTrace();
     this.render();
   }
 
@@ -1767,7 +1831,6 @@ class PipelinesPanel implements PanelHandle {
     if (this.disposed) return;
     this.disposeHandles();
     if (this.scrollEl) this.scrollTop = this.scrollEl.scrollTop;
-    if (this.drawerEl) this.drawerScrollTop = this.drawerEl.scrollTop;
     clearNode(this.root);
     this.root.className = 'gp';
 
@@ -1801,9 +1864,6 @@ class PipelinesPanel implements PanelHandle {
     if (this.openJob) this.root.append(this.renderDrawer(this.openJob));
 
     if (this.scrollEl) this.scrollEl.scrollTop = this.scrollTop;
-    if (this.drawerEl) {
-      this.drawerEl.scrollTop = this.followTail ? this.drawerEl.scrollHeight : this.drawerScrollTop;
-    }
     this.updateLive();
     this.syncTicker();
   }
@@ -2614,33 +2674,405 @@ class PipelinesPanel implements PanelHandle {
     close.addEventListener('click', () => this.closeDrawer());
     head.append(close);
     drawer.append(head);
+    this.watchDrawerKeys();
 
     const entry = this.traces.get(jobKey(reference.project, reference.jobId));
     if (!entry) {
-      this.drawerEl = null;
+      this.suspendTrace();
       drawer.append(el('div', 'gp-drawer-empty', 'Loading log…'));
       return drawer;
     }
-    if (entry.state === 'missing') {
-      this.drawerEl = null;
-      drawer.append(el('div', 'gp-drawer-empty', 'No log output yet — the job has not started.'));
-      return drawer;
-    }
     if (entry.state === 'error') {
-      this.drawerEl = null;
+      this.suspendTrace();
       drawer.append(el('div', 'gp-drawer-empty', 'Could not load the log. Close and reopen to retry.'));
       return drawer;
     }
+
+    // Ready, or missing (an empty Trace). Find and Copy stay available either way,
+    // so an empty log counts zero matches rather than erroring.
+    this.ensureTrace(jobKey(reference.project, reference.jobId), entry.text);
+    drawer.append(this.renderTraceTools());
     if (entry.truncated) drawer.append(truncationNotice(entry.truncated));
-    const pre = el('pre', 'gp-drawer-body');
-    pre.textContent = tailLines(entry.text, LOG_MAX_LINES).join('\n');
-    pre.addEventListener('scroll', () => {
-      this.drawerScrollTop = pre.scrollTop;
-      this.followTail = isAtBottom(pre);
+    const body = el('div', 'gp-drawer-body');
+    body.addEventListener('scroll', () => {
+      this.drawerScrollTop = body.scrollTop;
+      this.followTail = this.traceAtBottom(body.scrollTop);
     });
-    this.drawerEl = pre;
-    drawer.append(pre);
+    this.drawerEl = body;
+    drawer.append(body);
+    if (entry.state === 'missing') {
+      body.append(el('div', 'gp-drawer-empty', 'No log output yet — the job has not started.'));
+    } else {
+      this.paintTrace(body);
+    }
     return drawer;
+  }
+
+  /** Ctrl/Cmd+F focuses find while the drawer is open; Esc closes the drawer. */
+  private watchDrawerKeys(): void {
+    const onKey = (event: KeyboardEvent): void => {
+      if ((event.ctrlKey || event.metaKey) && (event.key === 'f' || event.key === 'F')) {
+        // Only claim the shortcut where there is a find field, so a loading or
+        // error drawer never shadows the host's own find.
+        if (!this.drawerFindEl) return;
+        event.preventDefault();
+        this.drawerFindEl.focus();
+      } else if (event.key === 'Escape') {
+        this.closeDrawer();
+      }
+    };
+    document.addEventListener('keydown', onKey);
+    this.handles.push({ dispose: () => document.removeEventListener('keydown', onKey) });
+  }
+
+  private idleScheduler(): IdleScheduler {
+    return {
+      request: (callback) => this.timers.requestIdleCallback(callback),
+      cancel: (handle) => this.timers.cancelIdleCallback(handle),
+    };
+  }
+
+  /**
+   * Point the log view at a Trace. A new Job resets it; appended text is fed to
+   * the indexer from where it stopped. Heights survive an append, except for the
+   * previously partial last line, whose content an append can change.
+   */
+  private ensureTrace(key: string, text: string): void {
+    if (this.traceKey !== key) {
+      this.resetTrace();
+      this.traceKey = key;
+    }
+    if (this.traceRawText === text) return;
+    const lines = tailLines(text, LOG_MAX_LINES);
+    const display = lines.join('\n');
+    if (this.traceText && !display.startsWith(this.traceText)) {
+      // The held text was replaced, not extended: earlier heights and index void.
+      this.traceHeights.clear();
+      this.traceMeasured.clear();
+      this.traceErrors = [];
+      this.traceIndexed = false;
+    } else if (display.length > this.traceText.length && this.traceLines.length > 0) {
+      // An append can lengthen the previously partial last line.
+      const last = this.traceLines.length - 1;
+      this.traceHeights.delete(last);
+      this.traceMeasured.delete(last);
+    }
+    this.traceLines = lines;
+    this.traceText = display;
+    this.traceRawText = text;
+    this.traceCopyText = text;
+    if (!this.traceIndexer) {
+      this.traceIndexer = new TraceIndexer(this.idleScheduler(), () => this.onIndexUpdate());
+    }
+    this.traceIndexer.setText(display);
+  }
+
+  /** Reset the log view's data and element references, disposing its index. */
+  private resetTrace(): void {
+    this.disposeTraceIndexer();
+    if (this.traceFindTimer != null) {
+      this.timers.clearTimeout(this.traceFindTimer);
+      this.traceFindTimer = null;
+    }
+    this.traceKey = null;
+    this.traceLines = [];
+    this.traceText = '';
+    this.traceRawText = null;
+    this.traceCopyText = '';
+    this.traceFindQuery = '';
+    this.traceMatches = [];
+    this.traceMatchAt = -1;
+    this.traceErrors = [];
+    this.traceHeights.clear();
+    this.traceMeasured.clear();
+    this.traceIndexed = false;
+    this.clearTraceRefs();
+  }
+
+  /** Drop stale element references so a background index update cannot touch them. */
+  private suspendTrace(): void {
+    this.disposeTraceIndexer();
+    this.traceRawText = null;
+    this.traceIndexed = false;
+    this.clearTraceRefs();
+  }
+
+  private clearTraceRefs(): void {
+    this.drawerEl = null;
+    this.drawerFindEl = null;
+    this.drawerCountEl = null;
+    this.drawerToolsEl = null;
+    this.drawerCopyEl = null;
+    this.drawerJumpEl = null;
+  }
+
+  private disposeTraceIndexer(): void {
+    this.traceIndexer?.dispose();
+    this.traceIndexer = null;
+  }
+
+  private renderTraceTools(): HTMLElement {
+    const tools = el('div', 'gp-drawer-tools');
+    const find = document.createElement('input');
+    find.type = 'search';
+    find.className = 'gp-log-find';
+    find.placeholder = 'Find in log';
+    find.value = this.traceFindQuery;
+    find.setAttribute('aria-label', 'Find in log');
+    find.addEventListener('input', () => this.setTraceQuery(find.value));
+    find.addEventListener('keydown', (event) => {
+      if (event.key === 'Enter') {
+        event.preventDefault();
+        if (event.shiftKey) this.traceFindPrevious();
+        else this.traceFindNext();
+      }
+    });
+    this.drawerFindEl = find;
+    tools.append(find);
+
+    const count = el('span', 'gp-log-count', this.traceCountText());
+    this.drawerCountEl = count;
+    tools.append(count);
+
+    const previous = el('button', 'gp-log-prev');
+    previous.type = 'button';
+    previous.title = 'Previous match';
+    previous.setAttribute('aria-label', 'Previous match');
+    previous.textContent = '↑';
+    previous.addEventListener('click', () => this.traceFindPrevious());
+    tools.append(previous);
+
+    const next = el('button', 'gp-log-next');
+    next.type = 'button';
+    next.title = 'Next match';
+    next.setAttribute('aria-label', 'Next match');
+    next.textContent = '↓';
+    next.addEventListener('click', () => this.traceFindNext());
+    tools.append(next);
+
+    const copy = el('button', 'gp-log-copy', 'Copy');
+    copy.type = 'button';
+    copy.title = 'Copy the trace';
+    copy.addEventListener('click', () => void this.copyTrace());
+    this.drawerCopyEl = copy;
+    tools.append(copy);
+
+    this.drawerToolsEl = tools;
+    this.drawerJumpEl = null;
+    this.syncJumpButton();
+    return tools;
+  }
+
+  /** Jump to error is present only while the index reports an error line. */
+  private syncJumpButton(): void {
+    const hasErrors = this.traceErrors.length > 0;
+    if (hasErrors && !this.drawerJumpEl && this.drawerToolsEl) {
+      const jump = el('button', 'gp-log-jump', 'Jump to error');
+      jump.type = 'button';
+      jump.addEventListener('click', () => this.jumpToError());
+      this.drawerToolsEl.insertBefore(jump, this.drawerCopyEl);
+      this.drawerJumpEl = jump;
+    } else if (!hasErrors && this.drawerJumpEl) {
+      this.drawerJumpEl.remove();
+      this.drawerJumpEl = null;
+    }
+  }
+
+  private traceCountText(): string {
+    if (!this.traceFindQuery) return '';
+    if (this.traceMatches.length === 0) return '0';
+    return `${this.traceMatchAt + 1}/${this.traceMatches.length}`;
+  }
+
+  private updateFindCount(): void {
+    if (this.drawerCountEl) this.drawerCountEl.textContent = this.traceCountText();
+    this.syncJumpButton();
+  }
+
+  private onIndexUpdate(): void {
+    this.traceErrors = this.traceIndexer?.errors() ?? [];
+    this.traceMatches = this.traceIndexer?.find(this.traceFindQuery) ?? [];
+    if (this.traceMatchAt >= this.traceMatches.length) this.traceMatchAt = this.traceMatches.length - 1;
+    this.updateFindCount();
+    const complete = this.traceIndexer?.complete ?? false;
+    if (complete && !this.traceIndexed) {
+      // The index now knows every line: repaint so heights and highlights are exact.
+      this.traceIndexed = true;
+      this.repaintTrace();
+    } else if (!complete) {
+      this.traceIndexed = false;
+    }
+  }
+
+  private setTraceQuery(query: string): void {
+    this.traceFindQuery = query;
+    // Debounce the search over the index: a fast typist does not force one full
+    // scan per keystroke. The count and highlights update when the debounce runs.
+    if (this.traceFindTimer != null) this.timers.clearTimeout(this.traceFindTimer);
+    this.traceFindTimer = this.timers.setTimeout(() => {
+      this.traceFindTimer = null;
+      this.runTraceFind();
+    }, LOG_FIND_DEBOUNCE_MS);
+  }
+
+  private runTraceFind(): void {
+    this.traceMatches = this.traceIndexer?.find(this.traceFindQuery) ?? [];
+    this.traceMatchAt = this.traceMatches.length > 0 ? 0 : -1;
+    if (this.traceMatchAt >= 0) this.scrollToTraceLine(this.traceMatches[this.traceMatchAt]!);
+    this.updateFindCount();
+    this.repaintTrace();
+  }
+
+  private traceFindNext(): void {
+    if (this.traceMatches.length === 0) return;
+    this.traceMatchAt = (this.traceMatchAt + 1) % this.traceMatches.length;
+    this.scrollToTraceLine(this.traceMatches[this.traceMatchAt]!);
+    this.updateFindCount();
+    this.repaintTrace();
+  }
+
+  private traceFindPrevious(): void {
+    if (this.traceMatches.length === 0) return;
+    this.traceMatchAt = (this.traceMatchAt - 1 + this.traceMatches.length) % this.traceMatches.length;
+    this.scrollToTraceLine(this.traceMatches[this.traceMatchAt]!);
+    this.updateFindCount();
+    this.repaintTrace();
+  }
+
+  private jumpToError(): void {
+    const errors = this.traceErrors;
+    if (errors.length === 0) return;
+    this.scrollToTraceLine(errors[errors.length - 1]!);
+    this.repaintTrace();
+  }
+
+  private scrollToTraceLine(index: number): void {
+    let offset = 0;
+    for (let line = 0; line < index; line++) offset += this.traceLineHeight(line);
+    this.followTail = false;
+    this.drawerScrollTop = offset;
+  }
+
+  private async copyTrace(): Promise<void> {
+    try {
+      await this.port.writeClipboard(this.traceCopyText);
+    } catch {
+      // A clipboard failure is the host's; the log stays readable.
+    }
+  }
+
+  /**
+   * A row's height: measured where layout allows, otherwise estimated from how
+   * many fallback-width rows its text wraps to.
+   */
+  private traceLineHeight(index: number): number {
+    const cached = this.traceHeights.get(index);
+    if (cached != null) return cached;
+    const text = this.traceIndexer?.lineAt(index)?.text ?? this.traceLines[index] ?? '';
+    const height =
+      text.length === 0
+        ? LOG_LINE_HEIGHT
+        : Math.ceil(text.length / LOG_WRAP_CHARS) * LOG_LINE_HEIGHT;
+    this.traceHeights.set(index, height);
+    return height;
+  }
+
+  private traceViewport(): number {
+    const measured = this.drawerEl?.clientHeight ?? 0;
+    return measured > 0 ? measured : LOG_VIEWPORT_FALLBACK;
+  }
+
+  /**
+   * Whether a scroll position is at the log's bottom. Computed from the known
+   * row heights rather than the element's `scrollHeight`, which needs layout.
+   */
+  private traceAtBottom(scrollTop: number): boolean {
+    return isAtBottom({
+      scrollTop,
+      scrollHeight: this.traceTotal,
+      clientHeight: this.traceViewport(),
+    });
+  }
+
+  /** Render the visible window into `body`, with spacers standing in for the rest. */
+  private paintTrace(body: HTMLElement): void {
+    clearNode(body);
+    const heights = this.traceLines.map((_, index) => this.traceLineHeight(index));
+    const viewport = this.traceViewport();
+    const total = heights.reduce((sum, height) => sum + height, 0);
+    this.traceTotal = total;
+    const maxScroll = Math.max(0, total - viewport);
+    const scroll = this.followTail
+      ? maxScroll
+      : Math.min(Math.max(0, this.drawerScrollTop), maxScroll);
+    const view = windowFor(heights, scroll, viewport, LOG_OVERSCAN);
+
+    const content = el('div', 'gp-log');
+    if (view.top > 0) {
+      const spacer = el('div', 'gp-log-pad');
+      spacer.style.height = `${view.top}px`;
+      content.append(spacer);
+    }
+    const errors = new Set(this.traceErrors);
+    const current = this.traceMatches[this.traceMatchAt];
+    for (let index = view.start; index < view.end; index++) {
+      content.append(this.renderTraceLine(index, errors, current));
+    }
+    if (view.bottom > 0) {
+      const spacer = el('div', 'gp-log-pad');
+      spacer.style.height = `${view.bottom}px`;
+      content.append(spacer);
+    }
+    body.append(content);
+    body.scrollTop = scroll;
+    this.drawerScrollTop = scroll;
+    this.measureTraceRows(content);
+  }
+
+  private renderTraceLine(
+    index: number,
+    errors: ReadonlySet<number>,
+    current: number | undefined,
+  ): HTMLElement {
+    const line = el('div', 'gp-log-line');
+    line.dataset.line = String(index);
+    const indexed = this.traceIndexer?.lineAt(index);
+    const text = indexed?.text ?? stripAnsi(this.traceLines[index] ?? '');
+    line.textContent = text;
+    if (errors.has(index)) line.dataset.error = 'true';
+    const lower = indexed?.lower ?? text.toLowerCase();
+    if (this.traceFindQuery && lower.includes(this.traceFindQuery.toLowerCase())) {
+      line.dataset.match = 'true';
+      if (current === index) line.dataset.current = 'true';
+    }
+    return line;
+  }
+
+  /**
+   * Cache each rendered row's real height. Layout is unavailable under a test
+   * DOM (every height is zero), so that path is skipped and estimates stand.
+   */
+  private measureTraceRows(content: HTMLElement): void {
+    let changed = false;
+    for (const node of content.querySelectorAll<HTMLElement>('.gp-log-line')) {
+      const index = Number(node.dataset.line);
+      if (!Number.isFinite(index) || this.traceMeasured.has(index)) continue;
+      const height = node.getBoundingClientRect().height || node.offsetHeight;
+      if (height > 0 && height !== this.traceHeights.get(index)) {
+        this.traceHeights.set(index, height);
+        this.traceMeasured.add(index);
+        changed = true;
+      }
+    }
+    if (changed && !this.traceSettling) {
+      this.traceSettling = true;
+      this.repaintTrace();
+      this.traceSettling = false;
+    }
+  }
+
+  private repaintTrace(): void {
+    if (this.drawerEl) this.paintTrace(this.drawerEl);
   }
 
   private renderFooter(): HTMLElement {

@@ -56,6 +56,8 @@ export type HostPort = {
   /** The Panel's only outbound action: start a seeded OpenChamber session. */
   startSession(request: StartSessionRequest): Promise<StartSessionResult>;
   openUrl(url: string): Promise<void>;
+  /** Put text on the user's clipboard, for Copy the Trace. Ungated on the host. */
+  writeClipboard(text: string): Promise<void>;
   onReady(listener: (context: HostReadyContext) => void): () => void;
   dispose(): void;
 };
@@ -76,6 +78,7 @@ export function createHostPort(): HostPort {
     listWorktrees: (projectId) => host.listWorktrees(projectId),
     startSession: (request) => host.startSession(request),
     openUrl: (url) => host.openUrl(url),
+    writeClipboard: (text) => host.writeClipboard(text),
     onReady: (listener) => host.onReady(listener),
     dispose: () => host.dispose(),
   };

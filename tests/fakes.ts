@@ -38,6 +38,8 @@ export class FakeHost implements HostPort {
   serviceRequests: HostRequest[] = [];
   gitlabRequests: HostRequest[] = [];
   openUrls: string[] = [];
+  /** Text written through `writeClipboard`, in order. */
+  clipboard: string[] = [];
   startSessions: StartSessionRequest[] = [];
   startSessionResult: StartSessionResult = { sessionId: 'ses_1', sent: 'sent', directory: '/repo' };
   startSessionError: unknown = null;
@@ -162,6 +164,10 @@ export class FakeHost implements HostPort {
     this.openUrls.push(url);
   }
 
+  async writeClipboard(text: string): Promise<void> {
+    this.clipboard.push(text);
+  }
+
   async startSession(request: StartSessionRequest): Promise<StartSessionResult> {
     this.startSessions.push(request);
     if (this.startSessionError) throw this.startSessionError;
@@ -199,6 +205,13 @@ export class FakeTimers {
 
   clearInterval = (id: number): void => {
     this.timers.delete(id);
+  };
+
+  /** Idle slices run on the next `advance(0)`, like `requestIdleCallback`. */
+  requestIdleCallback = (fn: () => void): number => this.setTimeout(fn, 0);
+
+  cancelIdleCallback = (id: number): void => {
+    this.clearTimeout(id);
   };
 
   now = (): number => this.current;

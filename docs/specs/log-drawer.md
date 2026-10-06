@@ -1,6 +1,6 @@
 # Spec: Log drawer usability
 
-Status: specified — tickets `log-drawer/01`–`06` are mapped in [`README.md`](README.md).
+Status: implemented — tickets `log-drawer/01`–`05` are mapped in [`README.md`](README.md).
 Feature: `log-drawer`
 Follows: [`docs/specs/pipelines-panel.md`](pipelines-panel.md) (the drawer it deepens) and
 [`docs/specs/downstream-pipelines.md`](downstream-pipelines.md) (nested Traces), and records ADR-0012.
@@ -19,7 +19,7 @@ Make the drawer work on the Trace rather than just display it:
 - **Windowed rendering** so 20 000 lines cost the layout of a screenful;
 - an **incremental index** built on the main thread between idle callbacks (ADR-0012);
 - **Find** with a match count and prev/next;
-- **error highlighting** and a **jump to the first error**;
+- **error highlighting** and a **jump to the last error line**;
 - **Copy** the Trace — whole or the current window — to the clipboard.
 
 Download to a file is deliberately **not** in this feature: it would need a `contributes.filesystem`
