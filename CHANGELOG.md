@@ -7,6 +7,13 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.8.1] - 2026-10-06
+
+### Fixed
+
+- When **Debug this job** cannot start a session, the panel now names OpenChamber's reason — no
+  model, a busy session, a timeout, or a rejected request — instead of only saying it failed.
+
 ## [0.8.0] - 2026-10-06
 
 ### Added

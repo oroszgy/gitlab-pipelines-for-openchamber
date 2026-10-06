@@ -1017,9 +1017,19 @@ class PipelinesPanel implements PanelHandle {
           trace,
         }),
       );
+      // A worktree-informed refusal carries `failure`, whose own reason is more
+      // useful than the generic "skipped" copy.
+      if ('failure' in result && result.failure) {
+        this.finishHandoff(
+          result.failure === 'bootstrap-failed'
+            ? 'OpenChamber could not prepare the session. Try again.'
+            : 'OpenChamber could not create the session. Try again.',
+        );
+        return;
+      }
       sent = result.sent;
-    } catch {
-      this.finishHandoff('Could not start a session for this job.');
+    } catch (error) {
+      this.finishHandoff(this.handoffStartError(error));
       return;
     }
     if (this.disposed) return;
@@ -1042,6 +1052,46 @@ class PipelinesPanel implements PanelHandle {
     this.handoffJobId = null;
     this.handoffError = error;
     this.render();
+  }
+
+  /**
+   * The host's reason for refusing to start a session, in the user's words. The
+   * SDK rejects with a `HostRequestError` carrying a `code`; surfacing it is what
+   * turns "it failed" into something the user can act on.
+   */
+  private handoffStartError(error: unknown): string {
+    const code =
+      typeof error === 'object' && error !== null && 'code' in error
+        ? String((error as { code?: unknown }).code ?? '')
+        : '';
+    const message = error instanceof Error ? error.message.trim() : '';
+    switch (code) {
+      case 'NO_MODEL':
+        return 'No model is selected in OpenChamber, so the session was not started.';
+      case 'MODEL_FAILED':
+        return 'OpenChamber could not start the session: the model call failed.';
+      case 'SESSION_BUSY':
+        return 'The current OpenChamber session is busy. Try again once it settles.';
+      case 'NO_DIRECTORY':
+        return 'OpenChamber could not place the session: no project directory is open.';
+      case 'DISCONNECTED':
+        return 'The OpenChamber server changed while starting the session. Try again.';
+      case 'HOST_TIMEOUT':
+        return 'OpenChamber did not answer in time while starting the session.';
+      case 'HOST_UNAVAILABLE':
+        return 'OpenChamber is not reachable, so the session could not be started.';
+      case 'NOT_GRANTED':
+      case 'DISABLED':
+        return 'This extension is not granted the sessions capability.';
+      case 'HOST_REJECTED':
+        return message && message !== 'Host did not return a session.'
+          ? `Could not start a session: ${message}`
+          : 'OpenChamber rejected the session. Check the selected model, then try again.';
+      default:
+        return message
+          ? `Could not start a session: ${message}`
+          : 'Could not start a session for this job.';
+    }
   }
 
   // -- pipeline actions -----------------------------------------------------

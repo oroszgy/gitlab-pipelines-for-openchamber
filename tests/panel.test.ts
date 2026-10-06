@@ -1194,6 +1194,33 @@ describe('session handoff', () => {
     expect(text(root)).toContain('Could not start a session');
   });
 
+  test('a rejected start names the host’s own reason', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = failedRun();
+    host.startSessionError = Object.assign(new Error('Host did not return a session.'), {
+      code: 'HOST_REJECTED',
+    });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-handoff') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('OpenChamber rejected the session');
+  });
+
+  test('a known host code gets its own message', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = failedRun();
+    host.startSessionError = Object.assign(new Error('x'), { code: 'NO_MODEL' });
+    const { root } = await mount(host, new FakeTimers());
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (root.querySelector('.gp-handoff') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('No model is selected');
+    expect(text(root)).not.toContain('Could not start a session for this job.');
+  });
+
   test('a failed log fetch blocks the handoff with a clear message', async () => {
     const host = configuredHost();
     host.gitlabHandler = (request) => {
