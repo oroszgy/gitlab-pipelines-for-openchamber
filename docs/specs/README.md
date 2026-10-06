@@ -11,6 +11,7 @@ Issues titled `<feature>/<NN>: <title>`; this table maps each stable ticket id t
 - [`moved-project`](moved-project.md) — Follow a moved GitLab project
 - [`downstream-pipelines`](downstream-pipelines.md) — Downstream pipelines
 - [`session-handoff`](session-handoff.md) — Session handoff
+- [`pipeline-actions`](pipeline-actions.md) — Pipeline and Job actions
 
 ## Tickets
 
@@ -47,3 +48,10 @@ Issues titled `<feature>/<NN>: <title>`; this table maps each stable ticket id t
 | `downstream-pipelines/05` | The collapsed-row downstream count | [#29](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/29) |
 | `downstream-pipelines/06` | Keep it live | [#30](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/30) |
 | `downstream-pipelines/07` | Handoff only within the open project | [#31](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/31) |
+| `pipeline-actions/01` | Proxy permits POST under /api/v4/ | [#43](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/43) |
+| `pipeline-actions/02` | Client project detail, token scopes and write calls | [#44](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/44) |
+| `pipeline-actions/03` | The capability module | [#45](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/45) |
+| `pipeline-actions/04` | The row action menu | [#46](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/46) |
+| `pipeline-actions/05` | Capability gating and the header action | [#47](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/47) |
+| `pipeline-actions/06` | Outcome notice and refresh | [#48](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/48) |
+| `pipeline-actions/07` | Docs, glossary and the posture ADR | [#49](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/49) |
