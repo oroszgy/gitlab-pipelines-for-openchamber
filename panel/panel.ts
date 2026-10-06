@@ -2697,6 +2697,9 @@ class PipelinesPanel implements PanelHandle {
     body.addEventListener('scroll', () => {
       this.drawerScrollTop = body.scrollTop;
       this.followTail = this.traceAtBottom(body.scrollTop);
+      // Windowed rendering: the rows for the newly visible range must be
+      // rendered as the user scrolls, or the log shows only its first window.
+      if (this.traceLines.length > 0) this.repaintTrace();
     });
     this.drawerEl = body;
     drawer.append(body);
@@ -2972,9 +2975,20 @@ class PipelinesPanel implements PanelHandle {
     const height =
       text.length === 0
         ? LOG_LINE_HEIGHT
-        : Math.ceil(text.length / LOG_WRAP_CHARS) * LOG_LINE_HEIGHT;
+        : Math.ceil(text.length / this.traceWrapChars()) * LOG_LINE_HEIGHT;
     this.traceHeights.set(index, height);
     return height;
+  }
+
+  /**
+   * Characters per rendered row. The drawer's width is read when layout provides
+   * it — a monospace glyph is about 0.6em at the drawer's 0.75rem font — and a
+   * fixed fallback is used otherwise, so the estimate is close before a row has
+   * been measured.
+   */
+  private traceWrapChars(): number {
+    const width = this.drawerEl?.clientWidth ?? 0;
+    return width > 0 ? Math.max(20, Math.floor(width / 7.5)) : LOG_WRAP_CHARS;
   }
 
   private traceViewport(): number {
@@ -2983,10 +2997,19 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /**
-   * Whether a scroll position is at the log's bottom. Computed from the known
-   * row heights rather than the element's `scrollHeight`, which needs layout.
+   * Whether a scroll position is at the log's bottom. Uses the element's real
+   * `scrollHeight` when layout provides it, and the known row heights otherwise
+   * (as under a test DOM, where every element measures zero).
    */
   private traceAtBottom(scrollTop: number): boolean {
+    const el = this.drawerEl;
+    if (el && el.scrollHeight > 0) {
+      return isAtBottom({
+        scrollTop,
+        scrollHeight: el.scrollHeight,
+        clientHeight: el.clientHeight || this.traceViewport(),
+      });
+    }
     return isAtBottom({
       scrollTop,
       scrollHeight: this.traceTotal,
@@ -3002,9 +3025,10 @@ class PipelinesPanel implements PanelHandle {
     const total = heights.reduce((sum, height) => sum + height, 0);
     this.traceTotal = total;
     const maxScroll = Math.max(0, total - viewport);
-    const scroll = this.followTail
-      ? maxScroll
-      : Math.min(Math.max(0, this.drawerScrollTop), maxScroll);
+    // Follow-tail pins to the estimated bottom; a scrolled position is used as
+    // read, never clamped by the estimate, so a real layout that is taller than
+    // estimated cannot yank the view back up.
+    const scroll = this.followTail ? maxScroll : Math.max(0, this.drawerScrollTop);
     const view = windowFor(heights, scroll, viewport, LOG_OVERSCAN);
 
     const content = el('div', 'gp-log');

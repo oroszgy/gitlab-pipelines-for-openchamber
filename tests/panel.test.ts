@@ -747,6 +747,28 @@ describe('the log drawer tools', () => {
     expect(host.clipboard).toEqual(['']);
   });
 
+  test('scrolling renders the newly visible window', async () => {
+    const host = configuredHost();
+    const trace = Array.from({ length: 500 }, (_, index) => `line ${index + 1}`).join('\n');
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })], jobs: [job({ id: 9 })], trace });
+    const timers = new FakeTimers();
+    const root = await openLog(host, timers);
+    timers.advance(0);
+
+    // Follow-tail opens on the end of the log...
+    let rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
+    expect(rendered.some((line) => line.dataset.line === '499')).toBe(true);
+    expect(rendered.some((line) => line.dataset.line === '0')).toBe(false);
+
+    // ...and scrolling up renders the start, rather than leaving blank spacers.
+    const body = root.querySelector('.gp-drawer-body') as HTMLElement;
+    body.scrollTop = 0;
+    dispatchScroll(body);
+    rendered = [...root.querySelectorAll<HTMLElement>('.gp-log-line')];
+    expect(rendered.some((line) => line.dataset.line === '0')).toBe(true);
+    expect(rendered.some((line) => line.dataset.line === '499')).toBe(false);
+  });
+
   test('follow-tail sticks and the scroll position survives a Poll re-render', async () => {
     const host = configuredHost();
     let trace = Array.from({ length: 200 }, (_, index) => `line ${index + 1}`).join('\n');

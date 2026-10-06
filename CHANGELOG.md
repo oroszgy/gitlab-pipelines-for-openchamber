@@ -7,6 +7,15 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-10-06
+
+### Fixed
+
+- Scrolling the log drawer now renders the lines you scroll to. The windowed
+  drawer only painted its first screenful and never repainted on scroll, so a
+  long Trace looked like it began at whatever was on screen — usually the
+  exception and its context — with blank space above.
+
 ## [0.10.0] - 2026-10-06
 
 ### Added
