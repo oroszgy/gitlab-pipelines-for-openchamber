@@ -20,7 +20,10 @@ and commit them instead.
 - **Pure logic behind the seam.** Resolution, request building, status mapping, grouping, polling,
   formatting and the handoff prompt are pure modules (`panel/*.ts` minus `panel.ts`). `panel/panel.ts`
   is the only module that touches the DOM.
-- **No writes to GitLab.** GitLab access is read-only. The one outbound action is starting a host
+- **GitLab writes are capability-gated and few.** GitLab access is read-only unless the Access token
+  carries the `api` scope and the user has the role for the project. The only writes are the Pipeline
+  actions (`panel/actions.ts` → `panel/gitlab-client.ts`), sent as `POST` under `/api/v4/`; the
+  service still refuses every other write method. The remaining outbound action is starting a host
   session (`panel/handoff.ts` → `startSession`); it is a host action, not a GitLab write.
 
 ## Tests

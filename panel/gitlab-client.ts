@@ -6,6 +6,8 @@ import type { Bridge, Job, Pipeline, Scope } from './types';
 export type ClientFailure =
   | { kind: 'no-token' }
   | { kind: 'unauthorized' }
+  /** Authenticated but not allowed (403): a scope or role too low. */
+  | { kind: 'forbidden' }
   | { kind: 'not-found' }
   | { kind: 'service' }
   /** A redirect; `target` is the moved project's URL, or null when the body is not a recognisable move. */
@@ -21,6 +23,9 @@ export type ClientFailure =
 export type Requester = (request: HostRequest) => Promise<HostResponse>;
 
 export type ClientResult<T> = { ok: true; data: T; truncated?: boolean } | { ok: false; failure: ClientFailure };
+
+/** A write's outcome: it succeeded, or it failed the same way a read can. */
+export type WriteResult = { ok: true; status: number } | { ok: false; failure: ClientFailure };
 
 export type BuiltRequest = {
   path: string;
@@ -66,6 +71,41 @@ export function bridgesRequest(project: string, pipelineId: number): BuiltReques
 
 export function traceRequest(project: string, jobId: number): BuiltRequest {
   return { path: `${projectBase(project)}/jobs/${jobId}/trace`, query: {} };
+}
+
+/** The whole project, for its `permissions` and cancel-restriction role. */
+export function projectRequest(project: string): BuiltRequest {
+  return { path: projectBase(project), query: {} };
+}
+
+/** The current Access token's own details, for its `scopes`. */
+export function tokenScopesRequest(): BuiltRequest {
+  return { path: '/api/v4/personal_access_tokens/self', query: {} };
+}
+
+export function retryJobRequest(project: string, jobId: number): BuiltRequest {
+  return { path: `${projectBase(project)}/jobs/${jobId}/retry`, query: {} };
+}
+
+export function playJobRequest(project: string, jobId: number): BuiltRequest {
+  return { path: `${projectBase(project)}/jobs/${jobId}/play`, query: {} };
+}
+
+export function cancelJobRequest(project: string, jobId: number): BuiltRequest {
+  return { path: `${projectBase(project)}/jobs/${jobId}/cancel`, query: {} };
+}
+
+export function retryPipelineRequest(project: string, pipelineId: number): BuiltRequest {
+  return { path: `${projectBase(project)}/pipelines/${pipelineId}/retry`, query: {} };
+}
+
+export function cancelPipelineRequest(project: string, pipelineId: number): BuiltRequest {
+  return { path: `${projectBase(project)}/pipelines/${pipelineId}/cancel`, query: {} };
+}
+
+/** Triggering a new Pipeline is the one write scoped to a Ref, not an entity. */
+export function triggerPipelineRequest(project: string, ref: string): BuiltRequest {
+  return { path: `${projectBase(project)}/pipeline`, query: { ref } };
 }
 
 /**
@@ -124,7 +164,8 @@ export function projectFromRedirectTarget(target: string, host: string): string 
 /** HTTP status → typed failure, or null for a success. */
 export function mapHttpStatus(status: number): ClientFailure | null {
   if (status >= 200 && status < 300) return null;
-  if (status === 401 || status === 403) return { kind: 'unauthorized' };
+  if (status === 401) return { kind: 'unauthorized' };
+  if (status === 403) return { kind: 'forbidden' };
   if (status === 404) return { kind: 'not-found' };
   if (REDIRECT_STATUSES.has(status)) return { kind: 'redirect', target: null };
   return { kind: 'http', status };
@@ -249,4 +290,97 @@ export async function fetchTrace(
     data: result.body,
     ...(result.truncated != null ? { truncated: result.truncated } : {}),
   };
+}
+
+/**
+ * The project's detail: `permissions` says whether the user may write, and
+ * `ci_restrict_pipeline_cancellation_role` whether Cancel is allowed at all.
+ */
+export type ProjectDetail = {
+  id: number;
+  path_with_namespace?: string | null;
+  permissions?: {
+    project_access?: { access_level?: number } | null;
+    group_access?: { access_level?: number } | null;
+  } | null;
+  ci_restrict_pipeline_cancellation_role?: string | null;
+};
+
+/** The current Access token's own scopes, for deciding whether writes are possible. */
+export type TokenScopes = {
+  scopes?: string[] | null;
+};
+
+export async function fetchProject(
+  requester: Requester,
+  project: string,
+): Promise<ClientResult<ProjectDetail>> {
+  const result = await call(requester, { method: 'GET', ...projectRequest(project) });
+  if (!result.ok) return result;
+  return parseJson<ProjectDetail>(result.body, result.status);
+}
+
+/**
+ * The token's scopes. A failure is not "no scopes": a non-personal token, or an
+ * instance that refuses the self route, leaves the scopes *unknown*, and the
+ * caller must allow the attempt rather than hide the action.
+ */
+export async function fetchTokenScopes(requester: Requester): Promise<ClientResult<TokenScopes>> {
+  const result = await call(requester, { method: 'GET', ...tokenScopesRequest() });
+  if (!result.ok) return result;
+  return parseJson<TokenScopes>(result.body, result.status);
+}
+
+/** A write call's one seam: send a POST and report success by status alone. */
+async function send(
+  requester: Requester,
+  request: BuiltRequest,
+  body?: string,
+): Promise<WriteResult> {
+  const result = await call(requester, {
+    method: 'POST',
+    path: request.path,
+    query: request.query,
+    ...(body != null ? { body } : {}),
+  });
+  if (!result.ok) return result;
+  return { ok: true, status: result.status };
+}
+
+export function retryJob(requester: Requester, project: string, jobId: number): Promise<WriteResult> {
+  return send(requester, retryJobRequest(project, jobId));
+}
+
+export function playJob(requester: Requester, project: string, jobId: number): Promise<WriteResult> {
+  return send(requester, playJobRequest(project, jobId));
+}
+
+/** `force` finishes a Job already stuck in `canceling`; it needs Maintainer. */
+export function cancelJob(
+  requester: Requester,
+  project: string,
+  jobId: number,
+  force = false,
+): Promise<WriteResult> {
+  return send(requester, cancelJobRequest(project, jobId), force ? JSON.stringify({ force: true }) : undefined);
+}
+
+export function retryPipeline(
+  requester: Requester,
+  project: string,
+  pipelineId: number,
+): Promise<WriteResult> {
+  return send(requester, retryPipelineRequest(project, pipelineId));
+}
+
+export function cancelPipeline(
+  requester: Requester,
+  project: string,
+  pipelineId: number,
+): Promise<WriteResult> {
+  return send(requester, cancelPipelineRequest(project, pipelineId));
+}
+
+export function triggerPipeline(requester: Requester, project: string, ref: string): Promise<WriteResult> {
+  return send(requester, triggerPipelineRequest(project, ref));
 }

@@ -106,6 +106,7 @@ export class FakeHost implements HostPort {
         method?: string;
         path?: string;
         query?: Record<string, string>;
+        body?: string;
       };
       const host = (body.baseUrl ?? '').replace(/^https:\/\//, '').replace(/\/+$/, '');
       if (!this.tokens[host]) {
@@ -118,6 +119,7 @@ export class FakeHost implements HostPort {
         method: (body.method ?? 'GET') as HostRequest['method'],
         path: body.path ?? '/',
         query: body.query ?? {},
+        ...(typeof body.body === 'string' ? { body: body.body } : {}),
       };
       const index = this.gitlabRequests.length;
       this.gitlabRequests.push(request);

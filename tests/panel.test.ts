@@ -2048,3 +2048,251 @@ describe('downstream pipelines', () => {
   });
 });
 
+describe('pipeline actions', () => {
+  const PROJECT_PATH = '/api/v4/projects/group%2Fproject';
+
+  function projectDetail(accessLevel: number | null | undefined, cancelRole: string | undefined): unknown {
+    const level = accessLevel === undefined ? 30 : accessLevel;
+    return {
+      id: 1,
+      path_with_namespace: 'group/project',
+      permissions: {
+        project_access: level == null ? null : { access_level: level },
+        group_access: null,
+      },
+      ci_restrict_pipeline_cancellation_role: cancelRole ?? 'developer',
+    };
+  }
+
+  function actionHandler(
+    options: {
+      pipelines?: Pipeline[];
+      jobs?: Job[];
+      bridges?: Bridge[];
+      trace?: string;
+      scopes?: string[];
+      accessLevel?: number | null;
+      cancelRole?: string;
+      writeStatus?: number;
+      otherAccessLevel?: number | null;
+    } = {},
+  ): { handler: (request: HostRequest) => HostResponse; writes: HostRequest[] } {
+    const writes: HostRequest[] = [];
+    const handler = (request: HostRequest): HostResponse => {
+      if (request.method === 'POST') {
+        writes.push(request);
+        return { status: options.writeStatus ?? 201, body: '{"id":1}' };
+      }
+      if (request.path === '/api/v4/personal_access_tokens/self') {
+        return { status: 200, body: JSON.stringify({ scopes: options.scopes ?? ['read_api', 'api'] }) };
+      }
+      if (request.path === PROJECT_PATH) {
+        return { status: 200, body: JSON.stringify(projectDetail(options.accessLevel, options.cancelRole)) };
+      }
+      if (request.path === '/api/v4/projects/other%2Fproject') {
+        return { status: 200, body: JSON.stringify(projectDetail(options.otherAccessLevel, options.cancelRole)) };
+      }
+      if (request.path.endsWith('/pipelines')) return { status: 200, body: JSON.stringify(options.pipelines ?? []) };
+      if (request.path.endsWith('/jobs')) return { status: 200, body: JSON.stringify(options.jobs ?? []) };
+      if (request.path.endsWith('/bridges')) return { status: 200, body: JSON.stringify(options.bridges ?? []) };
+      if (request.path.endsWith('/trace')) return { status: 200, body: options.trace ?? '' };
+      return { status: 404, body: '' };
+    };
+    return { handler, writes };
+  }
+
+  async function mountWith(
+    options: Parameters<typeof actionHandler>[0] = {},
+  ): Promise<{ root: HTMLElement; host: FakeHost; writes: HostRequest[] }> {
+    const host = configuredHost();
+    const { handler, writes } = actionHandler(options);
+    host.gitlabHandler = handler;
+    const { root } = await mount(host, new FakeTimers());
+    return { root, host, writes };
+  }
+
+  async function expand(root: HTMLElement): Promise<void> {
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+  }
+
+  /** Open a scope's `⋯` menu, read its item labels, and close it again. */
+  function menuLabels(scope: HTMLElement): string[] {
+    const trigger = scope.querySelector('.gp-actions button') as HTMLButtonElement | null;
+    if (!trigger) return [];
+    trigger.click();
+    const labels = Array.from(scope.querySelectorAll('.oc-sdk-option')).map((node) =>
+      (node.textContent ?? '').trim(),
+    );
+    trigger.click();
+    return labels;
+  }
+
+  function clickMenu(scope: HTMLElement, label: string): void {
+    const trigger = scope.querySelector('.gp-actions button') as HTMLButtonElement;
+    trigger.click();
+    const option = Array.from(scope.querySelectorAll('.oc-sdk-option')).find(
+      (node) => (node.textContent ?? '').trim() === label,
+    );
+    if (!option) throw new Error(`no ${label} menu item`);
+    (option as HTMLElement).click();
+  }
+
+  test('a failed Job offers Retry while Debug stays visible', async () => {
+    const { root } = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 9, name: 'unit', status: 'failed' })],
+      trace: 'boom',
+    });
+    await expand(root);
+    const jobRow = root.querySelector('.gp-job') as HTMLElement;
+    expect(menuLabels(jobRow)).toEqual(['Retry']);
+    expect(jobRow.querySelector('.gp-handoff')).not.toBeNull();
+  });
+
+  test('a manual Job offers Play; a running one offers Cancel', async () => {
+    const manual = await mountWith({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9, name: 'deploy', status: 'manual' })],
+    });
+    await expand(manual.root);
+    expect(menuLabels(manual.root.querySelector('.gp-job') as HTMLElement)).toEqual(['Play']);
+
+    const running = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'running' })],
+      jobs: [job({ id: 9, name: 'test', status: 'running' })],
+    });
+    await expand(running.root);
+    expect(menuLabels(running.root.querySelector('.gp-job') as HTMLElement)).toEqual(['Cancel']);
+  });
+
+  test('a canceling Job offers Force cancel to a Maintainer, nothing to a Developer', async () => {
+    const maintainer = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'running' })],
+      jobs: [job({ id: 9, name: 'deploy', status: 'canceling' })],
+      accessLevel: 40,
+    });
+    await expand(maintainer.root);
+    expect(menuLabels(maintainer.root.querySelector('.gp-job') as HTMLElement)).toEqual(['Force cancel']);
+
+    const developer = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'running' })],
+      jobs: [job({ id: 9, name: 'deploy', status: 'canceling' })],
+      accessLevel: 30,
+    });
+    await expand(developer.root);
+    expect(developer.root.querySelector('.gp-job .gp-actions')).toBeNull();
+  });
+
+  test('a failed Pipeline offers Retry pipeline on its row', async () => {
+    const { root } = await mountWith({ pipelines: [pipeline({ id: 7, status: 'failed' })] });
+    expect(menuLabels(root.querySelector('.gp-row') as HTMLElement)).toEqual(['Retry pipeline']);
+  });
+
+  test('the header offers Run pipeline for the current Ref', async () => {
+    const { root, writes } = await mountWith({ pipelines: [pipeline({ id: 7 })] });
+    const run = root.querySelector('.gp-run button') as HTMLButtonElement;
+    expect(run).not.toBeNull();
+    expect(run.textContent?.trim()).toBe('Run pipeline');
+    run.click();
+    await flush();
+    expect(writes[0]?.method).toBe('POST');
+    expect(writes[0]?.path).toBe(`${PROJECT_PATH}/pipeline`);
+    expect(writes[0]?.query).toEqual({ ref: 'main' });
+  });
+
+  test('clicking Retry posts the action and shows a success notice that auto-dismisses', async () => {
+    const timers = new FakeTimers();
+    const host = configuredHost();
+    const { handler, writes } = actionHandler({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 9, name: 'unit', status: 'failed' })],
+    });
+    host.gitlabHandler = handler;
+    const { root } = await mount(host, timers);
+    await expand(root);
+    clickMenu(root.querySelector('.gp-job') as HTMLElement, 'Retry');
+    await flush();
+    expect(writes[0]?.method).toBe('POST');
+    expect(writes[0]?.path).toBe(`${PROJECT_PATH}/jobs/9/retry`);
+    expect(text(root)).toContain('Job retry started.');
+    timers.advance(5000);
+    await flush();
+    expect(text(root)).not.toContain('Job retry started.');
+  });
+
+  test('a read_api token disables the menu and explains why', async () => {
+    const { root } = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 9, name: 'unit', status: 'failed' })],
+      scopes: ['read_api'],
+    });
+    await expand(root);
+    const trigger = root.querySelector('.gp-job .gp-actions button') as HTMLButtonElement;
+    expect(trigger).not.toBeNull();
+    expect(trigger.disabled).toBe(true);
+    expect(text(root)).toContain('api scope');
+  });
+
+  test('a role below Developer hides the menu and the header action', async () => {
+    const { root } = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 9, name: 'unit', status: 'failed' })],
+      accessLevel: 10,
+    });
+    await expand(root);
+    expect(root.querySelector('.gp-actions')).toBeNull();
+    expect(root.querySelector('.gp-run')).toBeNull();
+  });
+
+  test('a refused write is surfaced and stays until dismissed', async () => {
+    const timers = new FakeTimers();
+    const host = configuredHost();
+    const { handler } = actionHandler({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 9, name: 'unit', status: 'failed' })],
+      writeStatus: 403,
+    });
+    host.gitlabHandler = handler;
+    const { root } = await mount(host, timers);
+    await expand(root);
+    clickMenu(root.querySelector('.gp-job') as HTMLElement, 'Retry');
+    await flush();
+    expect(text(root)).toContain('was refused');
+    timers.advance(60000);
+    await flush();
+    expect(text(root)).toContain('was refused');
+  });
+
+  test('a Trigger job carries no menu of its own', async () => {
+    const { root } = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 1, status: 'success' })],
+      bridges: [bridge({ downstream_pipeline: downstreamPipeline({ id: 42, project_id: 7, status: 'failed' }) })],
+    });
+    await expand(root);
+    expect(root.querySelector('.gp-trigger .gp-actions')).toBeNull();
+  });
+
+  test('a Downstream card in another project gets a menu gated by that project', async () => {
+    const { root } = await mountWith({
+      pipelines: [pipeline({ id: 7, status: 'failed' })],
+      jobs: [job({ id: 1, status: 'success' })],
+      bridges: [
+        bridge({
+          downstream_pipeline: downstreamPipeline({
+            id: 42,
+            status: 'failed',
+            web_url: 'https://gitlab.com/other/project/-/pipelines/42',
+          }),
+        }),
+      ],
+      otherAccessLevel: 30,
+    });
+    await expand(root);
+    const card = root.querySelector('.gp-downstream-card') as HTMLElement;
+    expect(card).not.toBeNull();
+    expect(menuLabels(card)).toEqual(['Retry pipeline']);
+  });
+});
+

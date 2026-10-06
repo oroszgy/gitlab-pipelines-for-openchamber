@@ -266,6 +266,9 @@ html { font-size: 16px !important; }
 .gp-handoff[disabled] { color: var(--oc-muted, GrayText); opacity: 0.6; cursor: default; }
 .gp-handoff svg { flex: 0 0 auto; }
 
+.gp-actions { display: inline-flex; align-items: center; flex: 0 0 auto; }
+.gp-run { display: inline-flex; flex: 0 0 auto; }
+
 .gp-notice {
   flex: 0 0 auto;
   display: flex;
@@ -278,6 +281,8 @@ html { font-size: 16px !important; }
   font-size: 0.8125rem;
 }
 .gp-notice-text { flex: 1 1 auto; }
+.gp-notice[data-tone='success'] { color: var(--oc-success-text, #2e9e4f); }
+.gp-notice[data-tone='info'] { color: var(--oc-info-text, #86b8e0); }
 .gp-notice-close {
   flex: 0 0 auto;
   padding: 3px 8px;

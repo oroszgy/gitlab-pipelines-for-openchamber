@@ -7,6 +7,20 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-10-06
+
+### Added
+
+- Pipeline actions: retry a Job or Pipeline, play a manual Job, cancel or force-cancel a running Job
+  or Pipeline, and run a new Pipeline on the current Ref — from a per-row `⋯` menu and a header
+  button. Each is offered only when the Access token has the `api` scope and your project role
+  allows it, and a refused action is reported in the panel.
+
+### Changed
+
+- The panel can now write to GitLab when the token allows it, so the footer, the configuration hints
+  and the README read "read-only unless your token allows actions" rather than plain read-only.
+
 ## [0.7.8] - 2026-10-06
 
 ### Changed

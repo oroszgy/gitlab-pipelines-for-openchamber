@@ -45,8 +45,20 @@ export const PROXY_TIMEOUT_MS = 20_000;
 /** Matches the host's response cap, so the proxy never returns more than the bridge would. */
 export const PROXY_BODY_MAX = 256_000;
 
-/** GitLab access is read-only, and this is where that is enforced: only `GET`. */
-const METHODS: readonly string[] = ['GET'];
+/**
+ * The write boundary. `GET` is always allowed; `POST` is allowed only under
+ * GitLab's API prefix, so the Panel can run pipeline actions while every other
+ * method and path stays read-only. This is deliberately the loosest accepted
+ * rule: it lets the Panel reach any GitLab write endpoint its token permits.
+ * See `docs/specs/pipeline-actions.md`.
+ */
+const WRITE_METHOD = 'POST';
+const WRITE_PATH_PREFIX = '/api/v4/';
+
+function methodAllowed(method: string, path: string): boolean {
+  if (method === 'GET') return true;
+  return method === WRITE_METHOD && path.startsWith(WRITE_PATH_PREFIX);
+}
 
 /** The refusal shared by base-URL normalization and stored-host validation. */
 export const HOST_ERROR = 'The GitLab host must be an https origin with no credentials or path.';
@@ -140,7 +152,7 @@ export async function handleProxy(request: ProxyRequest, fetchImpl: ProxyFetch):
   if (!origin) {
     return { ok: false, error: HOST_ERROR };
   }
-  if (!METHODS.includes(request.method)) {
+  if (!methodAllowed(request.method, request.path)) {
     return { ok: false, error: `Unsupported method ${request.method}.` };
   }
 

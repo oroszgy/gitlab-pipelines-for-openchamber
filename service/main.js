@@ -8,7 +8,13 @@ import { dirname, posix, win32 } from "node:path";
 // service/proxy.ts
 var PROXY_TIMEOUT_MS = 20000;
 var PROXY_BODY_MAX = 256000;
-var METHODS = ["GET"];
+var WRITE_METHOD = "POST";
+var WRITE_PATH_PREFIX = "/api/v4/";
+function methodAllowed(method, path) {
+  if (method === "GET")
+    return true;
+  return method === WRITE_METHOD && path.startsWith(WRITE_PATH_PREFIX);
+}
 var HOST_ERROR = "The GitLab host must be an https origin with no credentials or path.";
 var PATH_ERROR = "The proxy path must stay on the configured GitLab host.";
 function normalizeBaseUrl(baseUrl) {
@@ -78,7 +84,7 @@ async function handleProxy(request, fetchImpl) {
   if (!origin) {
     return { ok: false, error: HOST_ERROR };
   }
-  if (!METHODS.includes(request.method)) {
+  if (!methodAllowed(request.method, request.path)) {
     return { ok: false, error: `Unsupported method ${request.method}.` };
   }
   const url = buildTargetUrl(origin, request.path, request.query ?? {});

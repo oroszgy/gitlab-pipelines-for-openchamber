@@ -135,9 +135,27 @@ describe('the proxy forwards exactly what it was asked for', () => {
   });
 });
 
-describe('the proxy is read-only at the boundary', () => {
-  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) {
-    test(`refuses ${method} before attaching the token`, async () => {
+describe('the proxy write boundary', () => {
+  test('forwards POST under the GitLab API prefix', async () => {
+    const fetchImpl = fakeFetch();
+    const result = await handleProxy(
+      request({ method: 'POST', path: '/api/v4/projects/g%2Fp/jobs/9/retry', query: {}, body: '{}' }),
+      fetchImpl,
+    );
+    expect(result.ok).toBe(true);
+    expect(fetchImpl.calls[0]?.init.method).toBe('POST');
+    expect(fetchImpl.calls[0]?.init.body).toBe('{}');
+  });
+
+  test('refuses POST outside the API prefix, before attaching the token', async () => {
+    const fetchImpl = fakeFetch();
+    const result = await handleProxy(request({ method: 'POST', path: '/collect', body: '{}' }), fetchImpl);
+    expect(result.ok).toBe(false);
+    expect(fetchImpl.calls).toHaveLength(0);
+  });
+
+  for (const method of ['PUT', 'PATCH', 'DELETE'] as const) {
+    test(`refuses ${method} even under the API prefix`, async () => {
       const fetchImpl = fakeFetch();
       const result = await handleProxy(request({ method, body: '{"x":1}' }), fetchImpl);
       expect(result.ok).toBe(false);

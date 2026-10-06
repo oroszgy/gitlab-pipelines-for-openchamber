@@ -1,6 +1,7 @@
 import type { HostReadyContext, StartSessionSent } from '@openchamber/sdk';
-import { applyHostReady, mountButton, mountEmpty, mountTabs } from '@openchamber/sdk/ui';
+import { applyHostReady, mountButton, mountEmpty, mountMenu, mountTabs } from '@openchamber/sdk/ui';
 
+import { canRunPipeline, cancelRoleOf, menuState, type ActionId, type Capability } from './actions';
 import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
@@ -14,14 +15,23 @@ import {
 } from './downstream';
 import { ago, duration, elapsed, logLines, shortSha, tailLines, toEpoch } from './format';
 import {
+  cancelJob,
+  cancelPipeline,
   fetchBridges,
   fetchJobs,
   fetchPipelines,
+  fetchProject,
+  fetchTokenScopes,
   fetchTrace,
   fetchUser,
+  playJob,
   projectFromRedirectTarget,
+  retryJob,
+  retryPipeline,
+  triggerPipeline,
   type ClientFailure,
   type Requester,
+  type WriteResult,
 } from './gitlab-client';
 import { buildHandoff, isHandoffJob } from './handoff';
 import type { HostPort } from './host-port';
@@ -81,6 +91,7 @@ type Problem = {
     | ProjectFailureKind
     | 'no-token'
     | 'unauthorized'
+    | 'forbidden'
     | 'not-found'
     | 'service'
     | 'moved'
@@ -102,6 +113,31 @@ type ConfigResult = { ok: true; config: ServiceConfig } | { ok: false; error: st
 
 /** Redirects followed in one refresh before a move chain is treated as runaway. */
 const MAX_REDIRECT_HOPS = 5;
+
+/** How long a successful action's notice stays before it dismisses itself. */
+const ACTION_NOTICE_MS = 5000;
+
+/** The menu item wording; the row's own context says whether it is a Job or Pipeline. */
+const ACTION_LABELS: Record<ActionId, string> = {
+  'retry-job': 'Retry',
+  'play-job': 'Play',
+  'cancel-job': 'Cancel',
+  'force-cancel-job': 'Force cancel',
+  'retry-pipeline': 'Retry pipeline',
+  'cancel-pipeline': 'Cancel pipeline',
+  'run-pipeline': 'Run pipeline',
+};
+
+/** The success notice for an action, in the user's words. */
+const ACTION_SUCCESS: Record<ActionId, string> = {
+  'retry-job': 'Job retry started.',
+  'play-job': 'Job started.',
+  'cancel-job': 'Job cancellation requested.',
+  'force-cancel-job': 'Force cancel requested.',
+  'retry-pipeline': 'Pipeline retry started.',
+  'cancel-pipeline': 'Pipeline cancellation requested.',
+  'run-pipeline': 'Pipeline started.',
+};
 
 /** Why a log is shorter than the trace: our own line cap, or the host's body cap. */
 type TraceTruncation = 'cap' | 'host' | null;
@@ -261,6 +297,19 @@ class PipelinesPanel implements PanelHandle {
   private pendingHealNotice: { from: string; to: string } | null = null;
   /** The one-time heal notice, until dismissed. */
   private healNotice: { from: string; to: string } | null = null;
+  /** Project capabilities by path, once read; absent means not yet known. */
+  private readonly capabilities = new Map<string, Capability>();
+  /** Whether the Access token has the `api` scope; null until read or when unreadable. */
+  private tokenCanWrite: boolean | null = null;
+  /** The host the token scopes belong to, so a switch re-reads them. */
+  private tokenScopesHost: string | null = null;
+  /** The one-time notice that the token is read-only; dismissed by hand. */
+  private scopeNoticeDismissed = false;
+  /** Whether a write is in flight, so a second click cannot fire one. */
+  private actionBusy = false;
+  /** The last action's outcome notice, and its auto-dismiss timer. */
+  private actionNotice: { kind: 'success' | 'error'; text: string } | null = null;
+  private actionNoticeTimer: number | null = null;
 
   private generation = 0;
   private pollTimer: number | null = null;
@@ -386,6 +435,7 @@ class PipelinesPanel implements PanelHandle {
   dispose(): void {
     this.disposed = true;
     this.stopAllTimers();
+    if (this.actionNoticeTimer != null) this.timers.clearTimeout(this.actionNoticeTimer);
     this.unsubReady?.();
     this.disposeHandles();
     clearNode(this.root);
@@ -437,6 +487,9 @@ class PipelinesPanel implements PanelHandle {
     }
     await this.loadUsername(gen, host);
     if (this.disposed || gen !== this.generation) return;
+    await this.loadTokenScopes(gen, host);
+    if (this.disposed || gen !== this.generation) return;
+    this.ensureCapability(gen, this.resolved.project);
     await this.loadPipelines(gen, this.resolved, true);
   }
 
@@ -455,6 +508,57 @@ class PipelinesPanel implements PanelHandle {
     // so replacing the token updates the username without a reload.
     if (!result.ok) this.usernameHost = null;
     this.render();
+  }
+
+  /**
+   * Whether the Access token can write. Read once per host from the token's own
+   * self route; a refused or unreadable route leaves it unknown, never "no".
+   */
+  private async loadTokenScopes(gen: number, host: string): Promise<void> {
+    if (this.tokenScopesHost === host) return;
+    const result = await fetchTokenScopes(this.requester());
+    if (this.disposed || gen !== this.generation) return;
+    this.tokenScopesHost = host;
+    const scopes = result.ok ? result.data.scopes : null;
+    this.tokenCanWrite = Array.isArray(scopes) ? scopes.includes('api') : null;
+  }
+
+  /** Read a project's role and cancel restriction, once, cached by path. */
+  private ensureCapability(gen: number, project: string): void {
+    if (!project || this.capabilities.has(project)) return;
+    void this.loadCapability(gen, project);
+  }
+
+  private async loadCapability(gen: number, project: string): Promise<void> {
+    const result = await fetchProject(this.requester(), project);
+    if (this.disposed || gen !== this.generation) return;
+    if (!result.ok) return;
+    const permissions = result.data.permissions;
+    const accessLevel = Math.max(
+      permissions?.project_access?.access_level ?? 0,
+      permissions?.group_access?.access_level ?? 0,
+    );
+    this.capabilities.set(project, {
+      accessLevel: accessLevel > 0 ? accessLevel : null,
+      canWrite: this.tokenCanWrite,
+      cancelRole: cancelRoleOf(result.data.ci_restrict_pipeline_cancellation_role),
+    });
+    this.render();
+  }
+
+  private capabilityFor(project: string): Capability | null {
+    return this.capabilities.get(project) ?? null;
+  }
+
+  /**
+   * Drop cached capabilities and the token scope when the host, project override
+   * or token changes, so the Panel re-reads them rather than trusting stale access.
+   */
+  private invalidateCapability(): void {
+    this.capabilities.clear();
+    this.tokenCanWrite = null;
+    this.tokenScopesHost = null;
+    this.scopeNoticeDismissed = false;
   }
 
   /**
@@ -479,6 +583,7 @@ class PipelinesPanel implements PanelHandle {
     this.healNotice = null;
     this.username = null;
     this.usernameHost = null;
+    this.invalidateCapability();
   }
 
   private async deriveProject(host: string): Promise<ProjectResolution> {
@@ -631,6 +736,7 @@ class PipelinesPanel implements PanelHandle {
     if (
       failure.kind === 'no-token' ||
       failure.kind === 'unauthorized' ||
+      failure.kind === 'forbidden' ||
       failure.kind === 'not-found' ||
       failure.kind === 'service'
     ) {
@@ -737,6 +843,7 @@ class PipelinesPanel implements PanelHandle {
 
   private async loadJobs(gen: number, project: string, pipelineId: number, silent: boolean): Promise<void> {
     const key = pipelineKey(project, pipelineId);
+    this.ensureCapability(gen, project);
     if (!silent || !Array.isArray(this.jobs.get(key))) {
       this.jobs.set(key, 'loading');
       this.render();
@@ -760,6 +867,12 @@ class PipelinesPanel implements PanelHandle {
     if (this.disposed || gen !== this.generation) return;
     if (result.ok) {
       this.bridges.set(key, triggerRows(result.data, project));
+      // A Downstream card's actions are gated by its own project, so its
+      // capability is read when the bridge reveals it.
+      for (const bridge of result.data) {
+        const path = bridge.downstream_pipeline ? downstreamProject(bridge.downstream_pipeline) : null;
+        if (path) this.ensureCapability(gen, path);
+      }
     } else if (silent) {
       // Keep the last known count rather than let a poll failure clear it.
     } else {
@@ -933,6 +1046,165 @@ class PipelinesPanel implements PanelHandle {
     this.handoffJobId = null;
     this.handoffError = error;
     this.render();
+  }
+
+  // -- pipeline actions -----------------------------------------------------
+
+  /** Why a write failed, in the user's words. */
+  private actionFailureText(id: ActionId, failure: ClientFailure): string {
+    const action = ACTION_LABELS[id];
+    switch (failure.kind) {
+      case 'forbidden':
+        return `${action} was refused. The token may lack the api scope, or you may not have permission for this project.`;
+      case 'unauthorized':
+        return `${action} was refused: the Access token was rejected.`;
+      case 'not-found':
+        return `${action} failed: that Job or Pipeline no longer exists.`;
+      case 'no-token':
+        return `${action} failed: no Access token is configured for this host.`;
+      case 'service':
+        return `${action} failed: the Proxy service is unavailable.`;
+      case 'http':
+        return failure.status === 429
+          ? `${action} was rate-limited by GitLab. Try again shortly.`
+          : `${action} failed: GitLab returned ${failure.status}.`;
+      default:
+        return `${action} failed: could not reach GitLab.`;
+    }
+  }
+
+  /** Dispatch an action to its one GitLab call. */
+  private performAction(
+    project: string,
+    pipelineId: number,
+    jobId: number,
+    id: ActionId,
+  ): Promise<WriteResult> {
+    const requester = this.requester();
+    switch (id) {
+      case 'retry-job':
+        return retryJob(requester, project, jobId);
+      case 'play-job':
+        return playJob(requester, project, jobId);
+      case 'cancel-job':
+        return cancelJob(requester, project, jobId, false);
+      case 'force-cancel-job':
+        return cancelJob(requester, project, jobId, true);
+      case 'retry-pipeline':
+        return retryPipeline(requester, project, pipelineId);
+      case 'cancel-pipeline':
+        return cancelPipeline(requester, project, pipelineId);
+      case 'run-pipeline':
+        return triggerPipeline(requester, project, this.resolved?.ref ?? '');
+    }
+  }
+
+  private async runAction(
+    project: string,
+    pipelineId: number,
+    jobId: number,
+    id: ActionId,
+  ): Promise<void> {
+    if (this.actionBusy) return;
+    this.actionBusy = true;
+    this.render();
+    const result = await this.performAction(project, pipelineId, jobId, id);
+    if (this.disposed) return;
+    this.actionBusy = false;
+    if (result.ok) {
+      this.showActionNotice('success', ACTION_SUCCESS[id]);
+      this.refresh();
+    } else {
+      this.showActionNotice('error', this.actionFailureText(id, result.failure));
+    }
+  }
+
+  private showActionNotice(kind: 'success' | 'error', text: string): void {
+    if (this.actionNoticeTimer != null) {
+      this.timers.clearTimeout(this.actionNoticeTimer);
+      this.actionNoticeTimer = null;
+    }
+    this.actionNotice = { kind, text };
+    if (kind === 'success') {
+      // Success is momentary; a failure stays until dismissed.
+      this.actionNoticeTimer = this.timers.setTimeout(() => {
+        this.actionNoticeTimer = null;
+        this.actionNotice = null;
+        this.render();
+      }, ACTION_NOTICE_MS);
+    }
+    this.render();
+  }
+
+  /** The `⋯` menu for a Job row or the drawer header, or null when there is nothing to offer. */
+  private renderJobActions(project: string, pipelineId: number, job: Job): HTMLElement | null {
+    const capability = this.capabilityFor(project);
+    if (!capability) return null;
+    const state = menuState('job', job.status, capability);
+    if (state.state === 'hidden') return null;
+    const root = el('div', 'gp-actions');
+    if (state.state === 'disabled') this.mountDisabledActions(root);
+    else this.mountActionsMenu(root, state.items, project, pipelineId, job.id);
+    return root;
+  }
+
+  /** The `⋯` menu for a Pipeline row or a Downstream card. */
+  private renderPipelineActions(project: string, pipelineId: number, status: string): HTMLElement | null {
+    const capability = this.capabilityFor(project);
+    if (!capability) return null;
+    const state = menuState('pipeline', status, capability);
+    if (state.state === 'hidden') return null;
+    const root = el('div', 'gp-actions');
+    if (state.state === 'disabled') this.mountDisabledActions(root);
+    else this.mountActionsMenu(root, state.items, project, pipelineId, 0);
+    return root;
+  }
+
+  private mountActionsMenu(
+    root: HTMLElement,
+    items: ActionId[],
+    project: string,
+    pipelineId: number,
+    jobId: number,
+  ): void {
+    const handle = mountMenu(root, {
+      label: '⋯',
+      variant: 'ghost',
+      size: 'xs',
+      items: items.map((id) => ({
+        id,
+        label: ACTION_LABELS[id],
+        ...(id === 'force-cancel-job' ? { destructive: true } : {}),
+      })),
+      onSelect: (id) => void this.runAction(project, pipelineId, jobId, id as ActionId),
+    });
+    this.handles.push(handle);
+    this.patchMenuTrigger(root);
+    root.addEventListener('click', (event) => event.stopPropagation());
+  }
+
+  /** A menu with its items withheld because the token cannot write. */
+  private mountDisabledActions(root: HTMLElement): void {
+    const handle = mountMenu(root, {
+      label: '⋯',
+      variant: 'ghost',
+      size: 'xs',
+      items: [],
+      onSelect: () => {},
+    });
+    this.handles.push(handle);
+    const trigger = this.patchMenuTrigger(root, 'Pipeline actions need an api-scoped token.');
+    if (trigger) trigger.disabled = true;
+    root.addEventListener('click', (event) => event.stopPropagation());
+  }
+
+  /** Name the glyph-only trigger for assistive tech, which reads '⋯' as punctuation. */
+  private patchMenuTrigger(root: HTMLElement, title = 'Pipeline actions'): HTMLButtonElement | null {
+    const trigger = root.querySelector('button');
+    if (!trigger) return null;
+    trigger.setAttribute('aria-label', 'Pipeline actions');
+    trigger.title = title;
+    return trigger;
   }
 
   // -- polling --------------------------------------------------------------
@@ -1156,6 +1428,9 @@ class PipelinesPanel implements PanelHandle {
           return;
         }
         this.applyConfig(stored.config);
+        // A new token may carry different scopes; re-read them rather than
+        // keeping the previous token's capability.
+        this.invalidateCapability();
       }
       this.configOpen = false;
       this.configDraft = null;
@@ -1179,6 +1454,7 @@ class PipelinesPanel implements PanelHandle {
         return;
       }
       this.applyConfig(result.config);
+      this.invalidateCapability();
       this.refresh();
     } finally {
       this.configBusy = false;
@@ -1215,6 +1491,7 @@ class PipelinesPanel implements PanelHandle {
           method: request.method ?? 'GET',
           path: request.path,
           query: request.query ?? {},
+          ...(request.body != null ? { body: request.body } : {}),
         }),
       });
       return parseProxyEnvelope(response);
@@ -1243,6 +1520,10 @@ class PipelinesPanel implements PanelHandle {
     if (handoffNotice) this.root.append(handoffNotice);
     const healNotice = this.renderHealNotice();
     if (healNotice) this.root.append(healNotice);
+    const scopeNotice = this.renderScopeNotice();
+    if (scopeNotice) this.root.append(scopeNotice);
+    const actionNotice = this.renderActionNotice();
+    if (actionNotice) this.root.append(actionNotice);
 
     this.scrollEl = el('div', 'gp-scroll');
     const pad = el('div', 'gp-pad');
@@ -1305,6 +1586,22 @@ class PipelinesPanel implements PanelHandle {
       updated.append(dot, text);
     }
     row.append(updated);
+
+    const ref = this.resolved?.ref;
+    const capability = this.resolved ? this.capabilityFor(this.resolved.project) : null;
+    if (ref && capability && canRunPipeline(capability)) {
+      const runRoot = el('div', 'gp-run');
+      this.handles.push(
+        mountButton(runRoot, {
+          label: 'Run pipeline',
+          variant: 'outline',
+          size: 'sm',
+          disabled: this.actionBusy,
+          onClick: () => void this.runAction(this.resolved?.project ?? '', 0, 0, 'run-pipeline'),
+        }),
+      );
+      row.append(runRoot);
+    }
 
     const config = el('button', 'gp-iconbtn gp-config-open');
     config.type = 'button';
@@ -1381,7 +1678,7 @@ class PipelinesPanel implements PanelHandle {
     tokenInput.type = 'password';
     tokenInput.value = draft.token;
     tokenInput.autocomplete = 'off';
-    tokenInput.placeholder = tokenSet ? 'A token is saved' : 'read_api token';
+    tokenInput.placeholder = tokenSet ? 'A token is saved' : 'read_api or api token';
     tokenInput.addEventListener('input', () => {
       if (this.configDraft) this.configDraft.token = tokenInput.value;
     });
@@ -1568,8 +1865,11 @@ class PipelinesPanel implements PanelHandle {
     const item = el('div', 'gp-item');
     item.dataset.open = open ? 'true' : 'false';
 
-    const row = el('button', 'gp-row');
-    row.type = 'button';
+    // A div with button semantics, like the Job row, so the actions menu can nest
+    // a real button inside it without nesting buttons.
+    const row = el('div', 'gp-row');
+    row.tabIndex = 0;
+    row.setAttribute('role', 'button');
     row.setAttribute('aria-expanded', String(open));
 
     const caret = el('span', 'gp-caret');
@@ -1587,6 +1887,16 @@ class PipelinesPanel implements PanelHandle {
     if (count > 0) row.append(el('span', 'gp-downstream-badge', `↳ ${count} downstream`));
 
     row.addEventListener('click', () => this.togglePipeline(pipeline.id));
+    row.addEventListener('keydown', (event) => {
+      // Only when the row itself is focused; a nested control owns its own keys.
+      if (event.target !== row) return;
+      if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        this.togglePipeline(pipeline.id);
+      }
+    });
+    const actions = this.renderPipelineActions(project, pipeline.id, pipeline.status);
+    if (actions) row.append(actions);
     item.append(row);
 
     if (open) {
@@ -1733,6 +2043,8 @@ class PipelinesPanel implements PanelHandle {
       // Debug this job stays inside the open project: a multi-project Downstream
       // job renders without it, since the checkout cannot fix another project.
       if (isHandoffJob(job) && this.canHandoffJob(project)) row.append(this.renderHandoffAction(project, pipelineId, job));
+      const actions = this.renderJobActions(project, pipelineId, job);
+      if (actions) row.append(actions);
       stage.append(row);
     }
     for (const trigger of group.triggers) stage.append(this.renderTriggerRow(project, pipelineId, trigger));
@@ -1784,6 +2096,8 @@ class PipelinesPanel implements PanelHandle {
     const projectPath = downstreamProject(downstream);
     const parent = parentNode ?? this.nodeFor(project, pipelineId);
     const cardProject = projectPath ?? '';
+    const actions = this.renderPipelineActions(cardProject, downstream.id, downstream.status);
+    if (actions) meta.append(actions);
 
     if (projectPath && this.nodeFor(cardProject, downstream.id)) {
       const entry = this.bridges.get(pipelineKey(cardProject, downstream.id));
@@ -1944,6 +2258,52 @@ class PipelinesPanel implements PanelHandle {
     return notice;
   }
 
+  /** A one-time note that the token is read-only, so a withheld menu has its reason on screen. */
+  private renderScopeNotice(): HTMLElement | null {
+    if (this.tokenCanWrite !== false || this.scopeNoticeDismissed) return null;
+    const notice = el('div', 'gp-notice');
+    notice.dataset.tone = 'info';
+    notice.setAttribute('role', 'status');
+    notice.append(
+      el(
+        'span',
+        'gp-notice-text',
+        'Pipeline actions need a token with the api scope. This token is read-only.',
+      ),
+    );
+    const dismiss = el('button', 'gp-notice-close');
+    dismiss.type = 'button';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', () => {
+      this.scopeNoticeDismissed = true;
+      this.render();
+    });
+    notice.append(dismiss);
+    return notice;
+  }
+
+  /** The last action's outcome: success auto-dismisses, failure stays until dismissed. */
+  private renderActionNotice(): HTMLElement | null {
+    if (!this.actionNotice) return null;
+    const notice = el('div', 'gp-notice');
+    notice.dataset.tone = this.actionNotice.kind;
+    notice.setAttribute('role', this.actionNotice.kind === 'error' ? 'alert' : 'status');
+    notice.append(el('span', 'gp-notice-text', this.actionNotice.text));
+    const dismiss = el('button', 'gp-notice-close');
+    dismiss.type = 'button';
+    dismiss.textContent = 'Dismiss';
+    dismiss.addEventListener('click', () => {
+      if (this.actionNoticeTimer != null) {
+        this.timers.clearTimeout(this.actionNoticeTimer);
+        this.actionNoticeTimer = null;
+      }
+      this.actionNotice = null;
+      this.render();
+    });
+    notice.append(dismiss);
+    return notice;
+  }
+
   private renderDrawer(reference: OpenJob): HTMLElement {
     const drawer = el('div', 'gp-drawer');
     const job = this.jobById(reference.project, reference.pipelineId, reference.jobId);
@@ -1955,6 +2315,10 @@ class PipelinesPanel implements PanelHandle {
     // Debug this job only inside the open project, matching the row's own gating.
     if (job && isHandoffJob(job) && this.canHandoffJob(reference.project)) {
       head.append(this.renderHandoffAction(reference.project, reference.pipelineId, job));
+    }
+    if (job) {
+      const actions = this.renderJobActions(reference.project, reference.pipelineId, job);
+      if (actions) head.append(actions);
     }
     const close = el('button', 'gp-drawer-close');
     close.type = 'button';
@@ -1995,7 +2359,9 @@ class PipelinesPanel implements PanelHandle {
 
   private renderFooter(): HTMLElement {
     const foot = el('div', 'gp-foot');
-    foot.append(el('span', '', 'Read-only'));
+    const capability = this.resolved ? this.capabilityFor(this.resolved.project) : null;
+    const writable = capability != null && canRunPipeline(capability);
+    foot.append(el('span', '', writable ? 'Read + pipeline actions' : 'Read-only'));
     return foot;
   }
 }
@@ -2118,7 +2484,7 @@ function noTokenProblem(configuredHost: string): Problem {
     kind: 'no-token',
     title: 'No Access token',
     body: `No Access token is stored for ${configuredHost}, so its pipelines cannot be read.`,
-    hint: 'Add a personal access token with the read_api scope in the configuration form.',
+    hint: 'Add a personal access token — read_api to read, api to also run pipeline actions.',
     configure: true,
   };
 }
@@ -2162,6 +2528,15 @@ function failureProblem(failure: ClientFailure, configuredHost: string): Problem
       kind: 'unauthorized',
       title: 'GitLab token rejected',
       body: 'The stored Access token cannot read this project. It may be invalid or expired, or lack the read_api scope.',
+      hint: 'Replace it in the configuration form.',
+      configure: true,
+    };
+  }
+  if (failure.kind === 'forbidden') {
+    return {
+      kind: 'forbidden',
+      title: 'GitLab refused this request',
+      body: 'The stored Access token is not allowed to read this project. It may lack the read_api scope, or the account may not have access.',
       hint: 'Replace it in the configuration form.',
       configure: true,
     };

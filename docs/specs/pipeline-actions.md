@@ -1,6 +1,6 @@
 # Spec: Pipeline and Job actions
 
-Status: not started.
+Status: implemented — see tickets `pipeline-actions/01`–`07` (mapped in [`README.md`](README.md)).
 Feature: `pipeline-actions`
 Follows: [`pipelines-panel.md`](pipelines-panel.md) (whose Out of Scope deferred "any write action"),
 [`downstream-pipelines.md`](downstream-pipelines.md) (which deferred retry/cancel/play/trigger), and

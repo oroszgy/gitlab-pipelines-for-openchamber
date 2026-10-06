@@ -1,8 +1,9 @@
 # GitLab Pipelines extension
 
 An OpenChamber extension that shows GitLab CI/CD pipelines for a single project over the GitLab REST
-API, and follows that project's Trigger jobs into their Downstream pipelines. Its access to GitLab is
-read-only; it may also act on the host by starting an agent session from a failed Job. Built on
+API, and follows that project's Trigger jobs into their Downstream pipelines. Its GitLab access is
+read-only unless the Access token allows writes, in which case it can run a small set of Pipeline
+actions; it may also act on the host by starting an agent session from a failed Job. Built on
 `@openchamber/sdk`.
 
 ## Language
@@ -112,3 +113,10 @@ tail so an agent can investigate the failure in the open project. The Extension'
 action; it never writes to GitLab. Only a Job of the open project can seed one — a Job of a Downstream
 pipeline in another project is not in the checkout the session runs in.
 _Avoid_: hand-off, escalation, fix-it button
+
+**Pipeline action**:
+A GitLab write the Panel may perform on a Pipeline or Job — retry, play a manual Job, cancel (or
+force-cancel), or trigger a new Pipeline on the current Ref. Offered only when the Access token's
+`api` scope and the user's project role allow it, gated per row by Status, and sent as `POST` under
+`/api/v4/`. Never confirmed, and parameterless.
+_Avoid_: command, mutation, operation

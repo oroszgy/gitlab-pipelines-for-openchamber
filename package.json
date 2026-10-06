@@ -1,8 +1,8 @@
 {
   "name": "gitlab-pipelines",
-  "version": "0.7.8",
+  "version": "0.8.0",
   "private": false,
-  "description": "Read-only OpenChamber panel showing GitLab CI/CD pipelines for the open project.",
+  "description": "OpenChamber panel showing GitLab CI/CD pipelines for the open project, with capability-gated pipeline actions.",
   "license": "MIT",
   "type": "module",
   "engines": {

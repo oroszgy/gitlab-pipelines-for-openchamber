@@ -30,9 +30,9 @@ Open the panel and press the gear in its header. The form has three fields:
   or a path is refused. Clear it to return to `gitlab.com`.
 - **Project override** — the GitLab project path (`group/subgroup/project`) to read when the open
   checkout's git remote cannot name one. Leave it empty to derive the project from the remote.
-- **Access token** — a GitLab personal access token with the `read_api` scope. It is a masked field,
-  posted once, and never read back; once saved it shows only as *a token is saved*. Use **Clear
-  token** to remove it.
+- **Access token** — a GitLab personal access token. Use the `read_api` scope to read pipelines; add
+  the `api` scope if you also want the pipeline actions. It is a masked field, posted once, and never
+  read back; once saved it shows only as *a token is saved*. Use **Clear token** to remove it.
 
 One Access token is kept **per host**, so switching between `gitlab.com` and a self-managed instance
 does not lose either token. The form's **Configured host** also decides `host-mismatch`: a project
@@ -53,9 +53,12 @@ A correct token is confirmed by the username shown in the panel header.
 - **The service is local.** It binds loopback only and requires the host-issued bearer on every
   route, so nothing else on the machine can use it as an open relay. It talks `https` only, verifies
   TLS with no opt-out, and caps every response.
-- **GitLab access is read-only.** The extension never retries, cancels, plays or triggers anything.
-  Its one outbound action is starting an OpenChamber session from a failed Job, in your open
-  checkout.
+- **GitLab access is read-only unless your token allows actions.** The panel can retry, play, cancel
+  and trigger Pipelines and Jobs, but only when the Access token has the `api` scope and your account
+  has Developer or higher on the project; a `read_api` token never sees an action that can only fail.
+  The service refuses every write method except `POST` under GitLab's `/api/v4/` prefix, so the token
+  can only be used for GitLab's own API.
+- **The one host action is starting an OpenChamber session** from a failed Job, in your open checkout.
 
 ## Notes
 
