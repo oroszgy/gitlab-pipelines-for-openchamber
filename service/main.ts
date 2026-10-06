@@ -1,8 +1,8 @@
 /**
- * The proxy service's loopback shell. A thin wrapper around the pure handlers:
- * it reads the host-issued port and bearer, enforces the bearer on every
- * request, and delegates to `handleProxy`, `resolveGitConfig` and the
- * configuration routes. It holds no GitLab knowledge.
+ * The proxy service's loopback shell. It reads the host-issued port and bearer,
+ * then hands every request to `handleRequest`, which owns the routes' logic and
+ * answers an unexpected failure as a 500. This module only binds the socket and
+ * wires the real filesystem and `fetch` in.
  *
  * Contract: `@openchamber/sdk/GUEST_SERVICES.md` — bind 127.0.0.1 on
  * `OPENCHAMBER_SERVICE_PORT`, require `Authorization: Bearer
@@ -11,24 +11,21 @@
  * route and one proxy route.
  */
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
-import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
+import { createServer } from 'node:http';
 import { configPath, type ConfigFs } from './config';
-import { resolveGitConfig, type GitConfigFs } from './git-config';
-import {
-  proxyWithConfig,
-  readConfigRoute,
-  writeConfigRoute,
-  writeTokenRoute,
-  type ProxyRouteRequest,
-} from './routes';
+import type { GitConfigFs } from './git-config';
+import { handleRequest, parsePort, type ServiceDeps } from './server';
 
-const PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT ?? 0);
-const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
 const CONFIG_PATH = configPath(process.env);
-const GIT_CONFIG_ROUTE = '/git-config';
-const CONFIG_ROUTE = '/config';
-const TOKEN_ROUTE = '/token';
-const PROXY_ROUTE = '/proxy';
+const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
+
+let PORT: number;
+try {
+  PORT = parsePort(process.env.OPENCHAMBER_SERVICE_PORT);
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
+  process.exit(1);
+}
 
 const gitConfigFs: GitConfigFs = {
   async stat(path) {
@@ -54,110 +51,20 @@ const configFs: ConfigFs = {
   },
 };
 
-function authorized(request: IncomingMessage): boolean {
-  return TOKEN.length > 0 && request.headers.authorization === `Bearer ${TOKEN}`;
-}
-
-function send(response: ServerResponse, status: number, body: string): void {
-  response.writeHead(status, { 'content-type': 'application/json' });
-  response.end(body);
-}
-
-async function readBody(request: IncomingMessage): Promise<string> {
-  const chunks: Buffer[] = [];
-  for await (const chunk of request) chunks.push(chunk as Buffer);
-  return Buffer.concat(chunks).toString('utf8');
-}
-
-/** Parse a JSON request body, or `null` when it is not a JSON object. */
-async function readJson(request: IncomingMessage): Promise<Record<string, unknown> | null> {
-  try {
-    const parsed = JSON.parse(await readBody(request)) as unknown;
-    return typeof parsed === 'object' && parsed !== null ? (parsed as Record<string, unknown>) : null;
-  } catch {
-    return null;
-  }
-}
+const deps: ServiceDeps = {
+  token: TOKEN,
+  configFs,
+  configPath: CONFIG_PATH,
+  gitConfigFs,
+  fetchImpl: fetch,
+};
 
 const server = createServer((request, response) => {
-  void (async () => {
-    if (!authorized(request)) {
-      send(response, 401, '{"error":"unauthorized"}');
-      return;
-    }
-    const url = new URL(request.url ?? '/', 'http://127.0.0.1');
-    if (url.pathname === '/health') {
-      send(response, 200, '{"status":"ok"}');
-      return;
-    }
-    if (url.pathname === CONFIG_ROUTE) {
-      if (request.method === 'GET') {
-        send(response, 200, JSON.stringify({ config: await readConfigRoute(configFs, CONFIG_PATH) }));
-        return;
-      }
-      const body = await readJson(request);
-      if (!body) {
-        send(response, 400, '{"error":"invalid request body"}');
-        return;
-      }
-      const result = await writeConfigRoute(configFs, CONFIG_PATH, body);
-      if (!result.ok) {
-        send(response, 400, JSON.stringify({ error: result.error }));
-        return;
-      }
-      send(response, 200, JSON.stringify({ config: result.view }));
-      return;
-    }
-    if (url.pathname === TOKEN_ROUTE) {
-      const body = await readJson(request);
-      if (!body) {
-        send(response, 400, '{"error":"invalid request body"}');
-        return;
-      }
-      const result = await writeTokenRoute(configFs, CONFIG_PATH, body);
-      if (!result.ok) {
-        send(response, 400, JSON.stringify({ error: result.error }));
-        return;
-      }
-      send(response, 200, JSON.stringify({ config: result.view }));
-      return;
-    }
-    if (url.pathname === GIT_CONFIG_ROUTE) {
-      // Unchanged from before the configuration routes: parse the body
-      // directly, so this route's contract stays as ADR-0005 froze it.
-      let body: { directory?: unknown };
-      try {
-        body = JSON.parse(await readBody(request)) as { directory?: unknown };
-      } catch {
-        send(response, 400, '{"error":"invalid request body"}');
-        return;
-      }
-      const directory = typeof body.directory === 'string' ? body.directory : '';
-      const result = await resolveGitConfig({ directory }, gitConfigFs);
-      if (!result.ok) {
-        send(response, 404, JSON.stringify({ error: result.error }));
-        return;
-      }
-      send(response, 200, JSON.stringify({ config: result.config }));
-      return;
-    }
-    if (url.pathname !== PROXY_ROUTE) {
-      send(response, 404, '{"error":"not found"}');
-      return;
-    }
-    const body = await readJson(request);
-    if (!body) {
-      send(response, 400, '{"error":"invalid request body"}');
-      return;
-    }
-    const result = await proxyWithConfig(configFs, CONFIG_PATH, body as ProxyRouteRequest, fetch);
-    if (!result.ok) {
-      // The error is already redacted of any token by the handler.
-      send(response, 502, JSON.stringify({ error: result.error, ...(result.code ? { code: result.code } : {}) }));
-      return;
-    }
-    send(response, 200, JSON.stringify({ status: result.status, body: result.body, truncated: result.truncated }));
-  })();
+  // `handleRequest` never rejects: it answers every failure itself.
+  void handleRequest(request, deps).then((result) => {
+    response.writeHead(result.status, { 'content-type': 'application/json' });
+    response.end(result.body);
+  });
 });
 
 server.listen(PORT, '127.0.0.1', () => {

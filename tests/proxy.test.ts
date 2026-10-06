@@ -75,6 +75,39 @@ describe('the proxy refuses a base URL it should not trust', () => {
   }
 });
 
+describe('the proxy never leaves the configured host', () => {
+  const escaping = ['//evil.example.com/collect', '/\\evil.example.com/collect'];
+
+  for (const path of escaping) {
+    test(`refuses ${JSON.stringify(path)} before attaching the token`, async () => {
+      const fetchImpl = fakeFetch();
+      const result = await handleProxy(request({ path }), fetchImpl);
+      expect(result.ok).toBe(false);
+      expect(fetchImpl.calls).toHaveLength(0);
+    });
+  }
+
+  test('still allows a path whose authority is the configured host', async () => {
+    const fetchImpl = fakeFetch();
+    const result = await handleProxy(
+      request({ path: '//gitlab.example.com/api/v4/x', query: {} }),
+      fetchImpl,
+    );
+    expect(result.ok).toBe(true);
+    expect(fetchImpl.calls[0]?.url).toBe('https://gitlab.example.com/api/v4/x');
+  });
+
+  test('keeps absolute-looking and percent-encoded paths on the configured host', async () => {
+    const spellings = ['https://evil.example.com/collect', '/%2F%2Fevil.example.com/collect'];
+    for (const path of spellings) {
+      const fetchImpl = fakeFetch();
+      const result = await handleProxy(request({ path, query: {} }), fetchImpl);
+      expect(result.ok).toBe(true);
+      expect(new URL(fetchImpl.calls[0]?.url ?? '').origin).toBe('https://gitlab.example.com');
+    }
+  });
+});
+
 describe('the proxy forwards exactly what it was asked for', () => {
   test('sends the bearer token and the method to the target', async () => {
     const fetchImpl = fakeFetch();
@@ -95,12 +128,23 @@ describe('the proxy forwards exactly what it was asked for', () => {
     const result = await handleProxy(request(), fakeFetch({ status: 404, body: '' }));
     expect(result).toEqual({ ok: true, status: 404, body: '', truncated: false });
   });
+});
 
-  test('allows a body on a write method', async () => {
+describe('the proxy is read-only at the boundary', () => {
+  for (const method of ['POST', 'PUT', 'PATCH', 'DELETE'] as const) {
+    test(`refuses ${method} before attaching the token`, async () => {
+      const fetchImpl = fakeFetch();
+      const result = await handleProxy(request({ method, body: '{"x":1}' }), fetchImpl);
+      expect(result.ok).toBe(false);
+      expect(fetchImpl.calls).toHaveLength(0);
+    });
+  }
+
+  test('still forwards GET', async () => {
     const fetchImpl = fakeFetch();
-    await handleProxy(request({ method: 'POST', body: '{"x":1}' }), fetchImpl);
-    expect(fetchImpl.calls[0]?.init.method).toBe('POST');
-    expect(fetchImpl.calls[0]?.init.body).toBe('{"x":1}');
+    const result = await handleProxy(request(), fetchImpl);
+    expect(result.ok).toBe(true);
+    expect(fetchImpl.calls[0]?.init.method).toBe('GET');
   });
 });
 
@@ -134,6 +178,49 @@ describe('the proxy is bounded', () => {
     const result = await handleProxy(request(), fakeFetch({ body: 'small' }));
     expect(result.ok).toBe(true);
     expect(result.truncated).toBe(false);
+  });
+
+  test('stops reading a huge stream at the cap instead of buffering it whole', async () => {
+    const chunkSize = 1000;
+    const totalChunks = 2000; // Two megabytes: four times the cap.
+    let pulled = 0;
+    const stream = new ReadableStream<Uint8Array>({
+      pull(controller) {
+        if (pulled >= totalChunks) {
+          controller.close();
+          return;
+        }
+        pulled += 1;
+        controller.enqueue(new Uint8Array(chunkSize).fill(120));
+      },
+    });
+    const fetchImpl = (async () => ({
+      status: 200,
+      body: stream,
+      text: () => Promise.resolve(''),
+    })) as unknown as ProxyFetch;
+
+    const result = await handleProxy(request(), fetchImpl);
+    expect(result.ok).toBe(true);
+    expect(result.body?.length).toBe(PROXY_BODY_MAX);
+    expect(result.truncated).toBe(true);
+    // The reader stops within one chunk of the cap (plus the stream's own
+    // one-chunk read-ahead); it never pulls the whole body.
+    expect(pulled).toBeLessThanOrEqual(Math.floor(PROXY_BODY_MAX / chunkSize) + 2);
+  });
+
+  test('turns a streamed body-read failure into an error', async () => {
+    const failing = (async () => ({
+      status: 200,
+      body: new ReadableStream<Uint8Array>({
+        start(controller) {
+          queueMicrotask(() => controller.error(new Error('connection reset')));
+        },
+      }),
+      text: () => Promise.resolve(''),
+    })) as unknown as ProxyFetch;
+    const result = await handleProxy(request(), failing);
+    expect(result.ok).toBe(false);
   });
 
   test('turns a transport failure into a network error without the token', async () => {

@@ -8,8 +8,9 @@ import { dirname, posix, win32 } from "node:path";
 // service/proxy.ts
 var PROXY_TIMEOUT_MS = 20000;
 var PROXY_BODY_MAX = 256000;
-var METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"];
+var METHODS = ["GET"];
 var HOST_ERROR = "The GitLab host must be an https origin with no credentials or path.";
+var PATH_ERROR = "The proxy path must stay on the configured GitLab host.";
 function normalizeBaseUrl(baseUrl) {
   const raw = baseUrl.trim();
   if (!raw)
@@ -45,6 +46,33 @@ function redact(text, token) {
     return text;
   return text.split(token).join("[redacted]");
 }
+async function readCapped(response) {
+  const reader = response.body?.getReader();
+  if (!reader) {
+    const text2 = await response.text();
+    return text2.length > PROXY_BODY_MAX ? { text: text2.slice(0, PROXY_BODY_MAX), truncated: true } : { text: text2, truncated: false };
+  }
+  const decoder = new TextDecoder;
+  let text = "";
+  let truncated = false;
+  for (;; ) {
+    const { done, value } = await reader.read();
+    if (done)
+      break;
+    if (value)
+      text += decoder.decode(value, { stream: true });
+    if (text.length > PROXY_BODY_MAX) {
+      truncated = true;
+      text = text.slice(0, PROXY_BODY_MAX);
+      if (reader.cancel)
+        await reader.cancel();
+      break;
+    }
+  }
+  if (!truncated)
+    text += decoder.decode();
+  return { text, truncated };
+}
 async function handleProxy(request, fetchImpl) {
   const origin = normalizeBaseUrl(request.baseUrl);
   if (!origin) {
@@ -54,6 +82,9 @@ async function handleProxy(request, fetchImpl) {
     return { ok: false, error: `Unsupported method ${request.method}.` };
   }
   const url = buildTargetUrl(origin, request.path, request.query ?? {});
+  if (new URL(url).origin !== origin) {
+    return { ok: false, error: PATH_ERROR };
+  }
   const headers = { Authorization: `Bearer ${request.token}` };
   if (request.body != null)
     headers["Content-Type"] = "application/json";
@@ -61,6 +92,7 @@ async function handleProxy(request, fetchImpl) {
   const timer = setTimeout(() => controller.abort(), PROXY_TIMEOUT_MS);
   let response;
   let text;
+  let truncated;
   try {
     response = await fetchImpl(url, {
       method: request.method,
@@ -73,15 +105,13 @@ async function handleProxy(request, fetchImpl) {
     return { ok: false, error: redact(`Could not reach ${origin}: ${message}`, request.token) };
   }
   try {
-    text = await response.text();
+    ({ text, truncated } = await readCapped(response));
   } catch {
     return { ok: false, error: "The GitLab host returned no readable body." };
   } finally {
     clearTimeout(timer);
   }
-  const truncated = text.length > PROXY_BODY_MAX;
-  const body = truncated ? text.slice(0, PROXY_BODY_MAX) : text;
-  return { ok: true, status: response.status, body: redact(body, request.token), truncated };
+  return { ok: true, status: response.status, body: redact(text, request.token), truncated };
 }
 
 // service/config.ts
@@ -281,14 +311,130 @@ async function proxyWithConfig(fs, path, request, fetchImpl) {
   }, fetchImpl);
 }
 
-// service/main.ts
-var PORT = Number(process.env.OPENCHAMBER_SERVICE_PORT ?? 0);
-var TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
-var CONFIG_PATH = configPath(process.env);
-var GIT_CONFIG_ROUTE = "/git-config";
+// service/server.ts
+var HEALTH_ROUTE = "/health";
 var CONFIG_ROUTE = "/config";
 var TOKEN_ROUTE = "/token";
+var GIT_CONFIG_ROUTE = "/git-config";
 var PROXY_ROUTE = "/proxy";
+var REQUEST_BODY_MAX = 256000;
+
+class BodyTooLargeError extends Error {
+}
+function parsePort(raw) {
+  const value = (raw ?? "").trim();
+  if (!/^\d+$/.test(value)) {
+    throw new Error(`OPENCHAMBER_SERVICE_PORT must be an integer port, got ${JSON.stringify(raw ?? "")}.`);
+  }
+  const port = Number(value);
+  if (port < 1 || port > 65535) {
+    throw new Error(`OPENCHAMBER_SERVICE_PORT must be between 1 and 65535, got ${port}.`);
+  }
+  return port;
+}
+function json(status, payload) {
+  return { status, body: JSON.stringify(payload) };
+}
+function authorized(request, token) {
+  return token.length > 0 && request.headers.authorization === `Bearer ${token}`;
+}
+async function readBody(request) {
+  const chunks = [];
+  let total = 0;
+  for await (const chunk of request) {
+    total += chunk.length;
+    if (total > REQUEST_BODY_MAX)
+      throw new BodyTooLargeError;
+    chunks.push(chunk);
+  }
+  return Buffer.concat(chunks).toString("utf8");
+}
+async function readJson(request) {
+  try {
+    const parsed = JSON.parse(await readBody(request));
+    return typeof parsed === "object" && parsed !== null ? parsed : null;
+  } catch (error) {
+    if (error instanceof BodyTooLargeError)
+      throw error;
+    return null;
+  }
+}
+async function route(request, deps) {
+  if (!authorized(request, deps.token))
+    return json(401, { error: "unauthorized" });
+  const url = new URL(request.url ?? "/", "http://127.0.0.1");
+  const method = request.method ?? "GET";
+  if (url.pathname === HEALTH_ROUTE)
+    return json(200, { status: "ok" });
+  if (url.pathname === CONFIG_ROUTE) {
+    if (method === "GET") {
+      return json(200, { config: await readConfigRoute(deps.configFs, deps.configPath) });
+    }
+    const body2 = await readJson(request);
+    if (!body2)
+      return json(400, { error: "invalid request body" });
+    const result2 = await writeConfigRoute(deps.configFs, deps.configPath, body2);
+    if (!result2.ok)
+      return json(400, { error: result2.error });
+    return json(200, { config: result2.view });
+  }
+  if (url.pathname === TOKEN_ROUTE) {
+    const body2 = await readJson(request);
+    if (!body2)
+      return json(400, { error: "invalid request body" });
+    const result2 = await writeTokenRoute(deps.configFs, deps.configPath, body2);
+    if (!result2.ok)
+      return json(400, { error: result2.error });
+    return json(200, { config: result2.view });
+  }
+  if (url.pathname === GIT_CONFIG_ROUTE) {
+    let body2;
+    try {
+      body2 = JSON.parse(await readBody(request));
+    } catch (error) {
+      if (error instanceof BodyTooLargeError)
+        throw error;
+      return json(400, { error: "invalid request body" });
+    }
+    const directory = typeof body2.directory === "string" ? body2.directory : "";
+    const result2 = await resolveGitConfig({ directory }, deps.gitConfigFs);
+    if (!result2.ok)
+      return json(404, { error: result2.error });
+    return json(200, { config: result2.config });
+  }
+  if (url.pathname !== PROXY_ROUTE)
+    return json(404, { error: "not found" });
+  const body = await readJson(request);
+  if (!body)
+    return json(400, { error: "invalid request body" });
+  const result = await proxyWithConfig(deps.configFs, deps.configPath, body, deps.fetchImpl);
+  if (!result.ok) {
+    return json(502, { error: result.error, ...result.code ? { code: result.code } : {} });
+  }
+  return json(200, { status: result.status, body: result.body, truncated: result.truncated });
+}
+async function handleRequest(request, deps) {
+  try {
+    return await route(request, deps);
+  } catch (error) {
+    if (error instanceof BodyTooLargeError) {
+      return json(413, { error: "The request body is too large." });
+    }
+    return json(500, { error: "The service could not complete the request." });
+  }
+}
+
+// service/main.ts
+var CONFIG_PATH = configPath(process.env);
+var TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
+var PORT;
+try {
+  PORT = parsePort(process.env.OPENCHAMBER_SERVICE_PORT);
+} catch (error) {
+  process.stderr.write(`${error instanceof Error ? error.message : String(error)}
+`);
+  process.exit(1);
+}
 var gitConfigFs = {
   async stat(path) {
     try {
@@ -312,103 +458,18 @@ var configFs = {
     await mkdir(path, { recursive: true });
   }
 };
-function authorized(request) {
-  return TOKEN.length > 0 && request.headers.authorization === `Bearer ${TOKEN}`;
-}
-function send(response, status, body) {
-  response.writeHead(status, { "content-type": "application/json" });
-  response.end(body);
-}
-async function readBody(request) {
-  const chunks = [];
-  for await (const chunk of request)
-    chunks.push(chunk);
-  return Buffer.concat(chunks).toString("utf8");
-}
-async function readJson(request) {
-  try {
-    const parsed = JSON.parse(await readBody(request));
-    return typeof parsed === "object" && parsed !== null ? parsed : null;
-  } catch {
-    return null;
-  }
-}
+var deps = {
+  token: TOKEN,
+  configFs,
+  configPath: CONFIG_PATH,
+  gitConfigFs,
+  fetchImpl: fetch
+};
 var server = createServer((request, response) => {
-  (async () => {
-    if (!authorized(request)) {
-      send(response, 401, '{"error":"unauthorized"}');
-      return;
-    }
-    const url = new URL(request.url ?? "/", "http://127.0.0.1");
-    if (url.pathname === "/health") {
-      send(response, 200, '{"status":"ok"}');
-      return;
-    }
-    if (url.pathname === CONFIG_ROUTE) {
-      if (request.method === "GET") {
-        send(response, 200, JSON.stringify({ config: await readConfigRoute(configFs, CONFIG_PATH) }));
-        return;
-      }
-      const body2 = await readJson(request);
-      if (!body2) {
-        send(response, 400, '{"error":"invalid request body"}');
-        return;
-      }
-      const result2 = await writeConfigRoute(configFs, CONFIG_PATH, body2);
-      if (!result2.ok) {
-        send(response, 400, JSON.stringify({ error: result2.error }));
-        return;
-      }
-      send(response, 200, JSON.stringify({ config: result2.view }));
-      return;
-    }
-    if (url.pathname === TOKEN_ROUTE) {
-      const body2 = await readJson(request);
-      if (!body2) {
-        send(response, 400, '{"error":"invalid request body"}');
-        return;
-      }
-      const result2 = await writeTokenRoute(configFs, CONFIG_PATH, body2);
-      if (!result2.ok) {
-        send(response, 400, JSON.stringify({ error: result2.error }));
-        return;
-      }
-      send(response, 200, JSON.stringify({ config: result2.view }));
-      return;
-    }
-    if (url.pathname === GIT_CONFIG_ROUTE) {
-      let body2;
-      try {
-        body2 = JSON.parse(await readBody(request));
-      } catch {
-        send(response, 400, '{"error":"invalid request body"}');
-        return;
-      }
-      const directory = typeof body2.directory === "string" ? body2.directory : "";
-      const result2 = await resolveGitConfig({ directory }, gitConfigFs);
-      if (!result2.ok) {
-        send(response, 404, JSON.stringify({ error: result2.error }));
-        return;
-      }
-      send(response, 200, JSON.stringify({ config: result2.config }));
-      return;
-    }
-    if (url.pathname !== PROXY_ROUTE) {
-      send(response, 404, '{"error":"not found"}');
-      return;
-    }
-    const body = await readJson(request);
-    if (!body) {
-      send(response, 400, '{"error":"invalid request body"}');
-      return;
-    }
-    const result = await proxyWithConfig(configFs, CONFIG_PATH, body, fetch);
-    if (!result.ok) {
-      send(response, 502, JSON.stringify({ error: result.error, ...result.code ? { code: result.code } : {} }));
-      return;
-    }
-    send(response, 200, JSON.stringify({ status: result.status, body: result.body, truncated: result.truncated }));
-  })();
+  handleRequest(request, deps).then((result) => {
+    response.writeHead(result.status, { "content-type": "application/json" });
+    response.end(result.body);
+  });
 });
 server.listen(PORT, "127.0.0.1", () => {
   process.stdout.write(`proxy listening on 127.0.0.1:${PORT}

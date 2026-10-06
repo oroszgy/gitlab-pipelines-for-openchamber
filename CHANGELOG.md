@@ -7,6 +7,21 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.7.5] - 2026-10-06
+
+### Fixed
+
+- The proxy service refuses any request whose path resolves off the Configured GitLab host, so a crafted
+  protocol-relative path can no longer carry the Access token to another host.
+- The proxy service forwards only `GET`, so GitLab access is read-only at the service boundary rather
+  than relying on every caller to be.
+- The proxy service reads a GitLab response incrementally and stops at the size cap, so a huge response
+  can no longer be fully buffered in memory before it is trimmed.
+- The service rejects a request body over its cap with `413`, and an invalid `OPENCHAMBER_SERVICE_PORT`
+  now fails at startup with a clear message instead of a `NaN` listen crash.
+- A configuration-write failure — an unwritable config directory, say — now answers `500` instead of
+  leaving the Panel's request unanswered.
+
 ## [0.7.4] - 2026-10-02
 
 ### Fixed
