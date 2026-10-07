@@ -58,6 +58,11 @@ export type HostPort = {
   /** The Panel's only outbound action: start a seeded OpenChamber session. */
   startSession(request: StartSessionRequest): Promise<StartSessionResult>;
   openUrl(url: string): Promise<void>;
+  /**
+   * Switch host chrome to another surface by its id. The Status section uses it
+   * to open the rail panel (`openSurface(PANEL_ID)`). Ungated on the host.
+   */
+  openSurface(surfaceId: string): Promise<void>;
   /** Put text on the user's clipboard, for Copy the Trace. Ungated on the host. */
   writeClipboard(text: string): Promise<void>;
   /**
@@ -98,6 +103,7 @@ export function createHostPort(): HostPort {
     listWorktrees: (projectId) => host.listWorktrees(projectId),
     startSession: (request) => host.startSession(request),
     openUrl: (url) => host.openUrl(url),
+    openSurface: (surfaceId) => host.openSurface(surfaceId),
     writeClipboard: (text) => host.writeClipboard(text),
     setBadge: (count) => host.setBadge(count),
     toast: (request) => host.toast(request),

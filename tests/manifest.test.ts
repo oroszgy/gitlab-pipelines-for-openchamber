@@ -83,4 +83,28 @@ describe('package manifest', () => {
     expect(html).toContain(`<script src="./main.js?v=${version}"></script>`);
     requireBuiltBundle('panel/main.js');
   });
+
+  test('declares a Work Status section with its own bundle', () => {
+    if (!parsed.ok) throw new Error('manifest did not parse');
+    const status = parsed.manifest.contributes.statusSection;
+    expect(status).toBeDefined();
+    if (typeof status !== 'object' || status === null) {
+      throw new Error('contributes.statusSection must be the object form with its own entry');
+    }
+    expect(status.entry).toBe('status/index.html');
+    // A status-only package needs no panel page, but the section HTML and the
+    // built bundle both ship. ADR-0007: the bundle is committed.
+    expect(existsSync(join(root, 'status/index.html'))).toBe(true);
+    const html = readFileSync(join(root, 'status/index.html'), 'utf8');
+    const version = JSON.parse(raw).version as string;
+    expect(html).toContain(`<script src="./main.js?v=${version}"></script>`);
+    requireBuiltBundle('status/main.js');
+  });
+
+  test('adds no capability for the status section', () => {
+    if (!parsed.ok) throw new Error('manifest did not parse');
+    const capabilities = parsed.manifest.contributes.capabilities ?? [];
+    expect([...capabilities].sort()).toEqual(['files', 'prompt', 'sessions']);
+    expect(capabilities).not.toContain('network');
+  });
 });

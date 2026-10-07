@@ -41,6 +41,8 @@ export class FakeHost implements HostPort {
   serviceRequests: HostRequest[] = [];
   gitlabRequests: HostRequest[] = [];
   openUrls: string[] = [];
+  /** Every `openSurface` call, in order. */
+  openSurfaces: string[] = [];
   /** Text written through `writeClipboard`, in order. */
   clipboard: string[] = [];
   /** Every `setBadge` call, in order; `null` clears. */
@@ -246,6 +248,10 @@ export class FakeHost implements HostPort {
 
   async openUrl(url: string): Promise<void> {
     this.openUrls.push(url);
+  }
+
+  async openSurface(surfaceId: string): Promise<void> {
+    this.openSurfaces.push(surfaceId);
   }
 
   async writeClipboard(text: string): Promise<void> {
