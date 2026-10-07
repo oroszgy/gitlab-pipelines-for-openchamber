@@ -22,34 +22,39 @@ function rowHeight(el: Element): number {
   return Math.max(1, Math.ceil((el.textContent ?? '').length / CHARS_PER_ROW)) * ROW_H;
 }
 
-const originals = {
-  clientHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientHeight'),
-  clientWidth: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'clientWidth'),
-  scrollHeight: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollHeight'),
-  scrollTop: Object.getOwnPropertyDescriptor(HTMLElement.prototype, 'scrollTop'),
-  getBoundingClientRect: HTMLElement.prototype.getBoundingClientRect,
-  getContext: HTMLCanvasElement.prototype.getContext,
-};
-
 let scrollTopValue = 0;
 /** When set, the drawer body reports this height instead of BODY_H (to force the fallback). */
 let forcedBodyHeight: number | null = null;
 
+/**
+ * Patches that shadow prototype members for the emulated layout. Each records its
+ * own prior descriptor so teardown can restore it exactly — `scrollHeight`,
+ * `scrollTop` and `getBoundingClientRect` live on `Element.prototype`, not
+ * `HTMLElement.prototype`, so a naive descriptor lookup would miss them and leak
+ * the patch into other test files.
+ */
+const patches: Array<{ target: object; key: string; own: PropertyDescriptor | undefined }> = [];
+
+function patch(target: object, key: string, descriptor: PropertyDescriptor): void {
+  patches.push({ target, key, own: Object.getOwnPropertyDescriptor(target, key) });
+  Object.defineProperty(target, key, descriptor);
+}
+
 beforeAll(() => {
-  Object.defineProperty(HTMLElement.prototype, 'clientHeight', {
+  patch(HTMLElement.prototype, 'clientHeight', {
     configurable: true,
     get(this: HTMLElement) {
       if (!this.isConnected || !this.classList.contains('gp-drawer-body')) return 0;
       return forcedBodyHeight ?? BODY_H;
     },
   });
-  Object.defineProperty(HTMLElement.prototype, 'clientWidth', {
+  patch(HTMLElement.prototype, 'clientWidth', {
     configurable: true,
     get(this: HTMLElement) {
       return this.isConnected && this.classList.contains('gp-drawer-body') ? BODY_W : 0;
     },
   });
-  Object.defineProperty(HTMLElement.prototype, 'scrollHeight', {
+  patch(HTMLElement.prototype, 'scrollHeight', {
     configurable: true,
     get(this: HTMLElement) {
       if (!this.isConnected || !this.classList.contains('gp-drawer-body')) return 0;
@@ -61,7 +66,7 @@ beforeAll(() => {
       return height;
     },
   });
-  Object.defineProperty(HTMLElement.prototype, 'scrollTop', {
+  patch(HTMLElement.prototype, 'scrollTop', {
     configurable: true,
     get(this: HTMLElement) {
       return this.classList.contains('gp-drawer-body') ? scrollTopValue : 0;
@@ -72,23 +77,30 @@ beforeAll(() => {
       scrollTopValue = Math.min(Math.max(0, value), max);
     },
   });
-  HTMLElement.prototype.getBoundingClientRect = function (this: HTMLElement): DOMRect {
-    if (this.isConnected && this.classList.contains('gp-log-line')) {
-      const height = rowHeight(this);
-      return { height, width: BODY_W, top: 0, left: 0, right: BODY_W, bottom: height, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
-    }
-    return { height: 0, width: 0, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
-  };
-  HTMLCanvasElement.prototype.getContext = function (this: HTMLCanvasElement): unknown {
-    return { font: '', measureText: (text: string) => ({ width: text.length * CHAR_W }) };
-  } as never;
+  patch(HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    writable: true,
+    value: function (this: HTMLElement): DOMRect {
+      if (this.isConnected && this.classList.contains('gp-log-line')) {
+        const height = rowHeight(this);
+        return { height, width: BODY_W, top: 0, left: 0, right: BODY_W, bottom: height, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+      }
+      return { height: 0, width: 0, top: 0, left: 0, right: 0, bottom: 0, x: 0, y: 0, toJSON: () => ({}) } as DOMRect;
+    },
+  });
+  patch(HTMLCanvasElement.prototype, 'getContext', {
+    configurable: true,
+    writable: true,
+    value: function (this: HTMLCanvasElement): unknown {
+      return { font: '', measureText: (text: string) => ({ width: text.length * CHAR_W }) };
+    },
+  });
 });
 
 afterAll(() => {
-  for (const [key, descriptor] of Object.entries(originals)) {
-    if (key === 'getBoundingClientRect') HTMLElement.prototype.getBoundingClientRect = descriptor as never;
-    else if (key === 'getContext') HTMLCanvasElement.prototype.getContext = descriptor as never;
-    else if (descriptor) Object.defineProperty(HTMLElement.prototype, key, descriptor);
+  for (const { target, key, own } of patches.splice(0).reverse()) {
+    if (own) Object.defineProperty(target, key, own);
+    else delete (target as Record<string, unknown>)[key];
   }
 });
 
