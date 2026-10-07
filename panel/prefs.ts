@@ -9,10 +9,18 @@ import type { Scope } from './types';
 export type Prefs = {
   scope?: Scope;
   pipelineId?: number;
-  downstream?: JsonValue;
+  downstream?: PrefDownstreamNode[];
   jobId?: number;
   /** When the record was last written, so writes can be LRU-pruned. */
   savedAt?: number;
+};
+
+/** One node of the remembered Downstream chain: what to reopen, and its path. */
+export type PrefDownstreamNode = {
+  project: string;
+  pipelineId: number;
+  generation: number;
+  ancestors: Array<{ project: string; pipelineId: number }>;
 };
 
 /**
@@ -47,17 +55,63 @@ export function parsePrefs(value: JsonValue | undefined): Prefs {
   const prefs: Prefs = {};
   if (record.scope === 'branch' || record.scope === 'all') prefs.scope = record.scope;
   if (typeof record.pipelineId === 'number') prefs.pipelineId = record.pipelineId;
-  if (Array.isArray(record.downstream)) prefs.downstream = record.downstream;
+  const downstream = parseDownstream(record.downstream);
+  if (downstream) prefs.downstream = downstream;
   if (typeof record.jobId === 'number') prefs.jobId = record.jobId;
   if (typeof record.savedAt === 'number') prefs.savedAt = record.savedAt;
   return prefs;
+}
+
+function parsePipelineKey(value: JsonValue | undefined): { project: string; pipelineId: number } | null {
+  if (value == null || typeof value !== 'object' || Array.isArray(value)) return null;
+  const key = value as Record<string, JsonValue>;
+  if (typeof key.project !== 'string' || typeof key.pipelineId !== 'number') return null;
+  return { project: key.project, pipelineId: key.pipelineId };
+}
+
+/** Accept a stored Downstream chain only when every node is the shape we wrote. */
+export function parseDownstream(value: JsonValue | undefined): PrefDownstreamNode[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const nodes: PrefDownstreamNode[] = [];
+  for (const entry of value) {
+    if (entry == null || typeof entry !== 'object' || Array.isArray(entry)) return undefined;
+    const node = entry as Record<string, JsonValue>;
+    if (
+      typeof node.project !== 'string' ||
+      typeof node.pipelineId !== 'number' ||
+      typeof node.generation !== 'number' ||
+      !Array.isArray(node.ancestors)
+    ) {
+      return undefined;
+    }
+    const ancestors: Array<{ project: string; pipelineId: number }> = [];
+    for (const ancestor of node.ancestors) {
+      const key = parsePipelineKey(ancestor);
+      if (!key) return undefined;
+      ancestors.push(key);
+    }
+    nodes.push({ project: node.project, pipelineId: node.pipelineId, generation: node.generation, ancestors });
+  }
+  return nodes;
+}
+
+/** The stored form of a Downstream chain: plain JSON objects, no host types. */
+export function serializeDownstream(nodes: readonly PrefDownstreamNode[]): JsonValue {
+  return nodes.map(
+    (node): JsonValue => ({
+      project: node.project,
+      pipelineId: node.pipelineId,
+      generation: node.generation,
+      ancestors: node.ancestors.map((key): JsonValue => ({ project: key.project, pipelineId: key.pipelineId })),
+    }),
+  );
 }
 
 function serializePrefs(prefs: Prefs): JsonValue {
   const record: Record<string, JsonValue> = {};
   if (prefs.scope != null) record.scope = prefs.scope;
   if (prefs.pipelineId != null) record.pipelineId = prefs.pipelineId;
-  if (prefs.downstream != null) record.downstream = prefs.downstream;
+  if (prefs.downstream != null) record.downstream = serializeDownstream(prefs.downstream);
   if (prefs.jobId != null) record.jobId = prefs.jobId;
   if (prefs.savedAt != null) record.savedAt = prefs.savedAt;
   return record;

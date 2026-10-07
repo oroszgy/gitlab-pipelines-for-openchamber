@@ -897,6 +897,124 @@ describe('branch / all refs scope', () => {
   });
 });
 
+describe('the remembered view', () => {
+  test('restores the expanded Pipeline on remount, without opening a drawer', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9, name: 'build' })],
+    });
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    (first.root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(text(first.root)).toContain('build');
+    first.panel.dispose();
+
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('.gp-row')?.getAttribute('aria-expanded')).toBe('true');
+    expect(text(second.root)).toContain('build');
+    expect(second.root.querySelector('.gp-drawer')).toBeNull();
+  });
+
+  test('reopens the remembered Job drawer on remount', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9, name: 'build' })],
+      trace: 'remembered log',
+    });
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    (first.root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (first.root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    expect(first.root.querySelector('.gp-drawer-body')?.textContent).toBe('remembered log');
+    first.panel.dispose();
+
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('.gp-drawer')).not.toBeNull();
+    expect(second.root.querySelector('.gp-drawer-body')?.textContent).toBe('remembered log');
+  });
+
+  test('a remembered Pipeline that is gone leaves nothing expanded', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })] });
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    (first.root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    first.panel.dispose();
+
+    // The Pipeline is deleted between visits: the view must not dangle.
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 8 })] });
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('.gp-item[data-open="true"]')).toBeNull();
+    expect(second.root.querySelector('.gp-drawer')).toBeNull();
+    expect(text(second.root)).toContain('main');
+  });
+
+  test('a remembered Job that is gone leaves the expansion but no drawer', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 9, name: 'build' })],
+      trace: 'remembered log',
+    });
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    (first.root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (first.root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    first.panel.dispose();
+
+    // The Job is deleted between visits: the Pipeline stays expanded, no drawer.
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7 })],
+      jobs: [job({ id: 10, name: 'other' })],
+    });
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('.gp-row')?.getAttribute('aria-expanded')).toBe('true');
+    expect(second.root.querySelector('.gp-drawer')).toBeNull();
+    expect(text(second.root)).toContain('other');
+  });
+
+  test('restores the remembered Downstream chain on remount', async () => {
+    const host = configuredHost();
+    const other = downstreamPipeline({ id: 42, project_id: 9, web_url: 'https://gitlab.com/other/project/-/pipelines/42' });
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: other })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 1 })]) };
+      }
+      if (request.path === '/api/v4/projects/other%2Fproject/pipelines/42/jobs') {
+        return { status: 200, body: JSON.stringify([job({ id: 99, name: 'e2e', stage: 'test', status: 'failed' })]) };
+      }
+      if (request.path.endsWith('/bridges')) return { status: 200, body: '[]' };
+      return { status: 200, body: '[]' };
+    };
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    (first.root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    (first.root.querySelector('.gp-downstream-open') as HTMLElement).click();
+    await flush();
+    expect(text(first.root)).toContain('e2e');
+    first.panel.dispose();
+
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('.gp-downstream-card')).not.toBeNull();
+    expect(text(second.root)).toContain('e2e');
+  });
+});
+
 /** An empty branch, but another Ref has a Pipeline, for the fallback tests. */
 function emptyBranchHandler(): (request: HostRequest) => HostResponse {
   return (request) => {

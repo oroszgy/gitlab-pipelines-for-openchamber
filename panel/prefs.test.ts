@@ -39,6 +39,28 @@ describe('prefs records', () => {
     expect((await readPrefs(store, key)).scope).toBe('all');
   });
 
+  test('the expansion record round-trips, and a malformed chain is dropped', async () => {
+    const { store, map } = memoryStore();
+    const key = prefKey('gitlab.com', 'group/project', 'main');
+    const downstream = [
+      {
+        project: 'other/project',
+        pipelineId: 42,
+        generation: 1,
+        ancestors: [{ project: 'group/project', pipelineId: 7 }],
+      },
+    ];
+    await writePrefs(store, key, { pipelineId: 7, downstream, jobId: 99 }, 1_000);
+    const read = await readPrefs(store, key);
+    expect(read.pipelineId).toBe(7);
+    expect(read.jobId).toBe(99);
+    expect(read.downstream).toEqual(downstream);
+
+    // A chain missing a node's fields is no chain at all.
+    map.set(prefKey('h', 'p', 'bad'), { pipelineId: 7, downstream: [{ project: 'x' }] });
+    expect((await readPrefs(store, prefKey('h', 'p', 'bad'))).downstream).toBeUndefined();
+  });
+
   test('an unreadable or unwritable store is non-fatal', async () => {
     const failing: PrefStore = {
       get: async () => {

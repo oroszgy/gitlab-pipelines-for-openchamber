@@ -46,7 +46,7 @@ import {
   shouldPoll,
   widenForLowRateLimit,
 } from './poll';
-import { prefKey, readPrefs, writePrefs } from './prefs';
+import { prefKey, readPrefs, writePrefs, type Prefs } from './prefs';
 import {
   isLinkedWorktree,
   resolveProject,
@@ -304,8 +304,14 @@ class PipelinesPanel implements PanelHandle {
   private usernameHost: string | null = null;
 
   private scope: Scope = 'branch';
-  /** The storage key the current scope is remembered under, so it restores once per key. */
+  /** The storage key the current view is remembered under, so it restores once per key. */
   private prefsKey: string | null = null;
+  /** The record just read for a new key, applied once the Pipelines list has loaded. */
+  private pendingRestore: Prefs | null = null;
+  /** A remembered Job id waiting for its Pipeline's Jobs to load before it reopens. */
+  private pendingJobId: number | null = null;
+  /** Serializes best-effort preference writes, so an older one cannot land last. */
+  private prefsWrite: Promise<void> = Promise.resolve();
   private phase: 'init' | 'loading' | 'ready' | 'problem' = 'init';
   private resolved: Extract<ProjectResolution, { ok: true }> | null = null;
   private problem: Problem | null = null;
@@ -531,7 +537,7 @@ class PipelinesPanel implements PanelHandle {
     this.pipelines = [];
     this.pipelinesNextPage = null;
     this.pipelinesPage = 1;
-    this.persistScope();
+    this.persistView();
     this.refresh();
   }
 
@@ -690,6 +696,8 @@ class PipelinesPanel implements PanelHandle {
     this.resetTrace();
     this.expandedId = null;
     this.downstreamPath = [];
+    this.pendingRestore = null;
+    this.pendingJobId = null;
     this.updatedAt = null;
     this.healed.clear();
     this.derivedProject = null;
@@ -812,16 +820,26 @@ class PipelinesPanel implements PanelHandle {
     if (this.disposed || gen !== this.generation) return;
     // A different key with no record is a different view: fall back to Branch.
     this.scope = prefs.scope ?? 'branch';
+    // The rest of the record waits for the Pipelines list, so a remembered
+    // Pipeline can be checked against what is actually there.
+    this.pendingRestore = prefs;
   }
 
-  /** Remember the current scope for this host+project+ref. Best-effort. */
-  private persistScope(): void {
+  /** Remember the current view for this host+project+ref. Best-effort. */
+  private persistView(): void {
     const host = this.config?.host;
     const resolution = this.resolved;
     if (!host || !resolution?.ref) return;
     const key = prefKey(host, resolution.project, resolution.ref);
     this.prefsKey = key;
-    void writePrefs(this.port.storage, key, { scope: this.scope }, this.timers.now());
+    const now = this.timers.now();
+    const patch: Prefs = {
+      scope: this.scope,
+      pipelineId: this.expandedId ?? undefined,
+      downstream: this.downstreamPath.length > 0 ? this.downstreamPath : undefined,
+      jobId: this.openJob?.jobId ?? undefined,
+    };
+    this.prefsWrite = this.prefsWrite.then(() => writePrefs(this.port.storage, key, patch, now));
   }
 
   private async loadPipelines(
@@ -855,6 +873,7 @@ class PipelinesPanel implements PanelHandle {
     this.clearRateLimit();
     this.promoteHealNotice();
     this.pruneDownstreamNode();
+    this.applyRememberedExpansion(gen);
     if (seedBridges) {
       this.seedBridges(gen, resolution.project);
       // A manual refresh re-reads the expanded Pipeline's own Jobs. On a poll,
@@ -963,6 +982,36 @@ class PipelinesPanel implements PanelHandle {
     for (const pipeline of this.pipelines) {
       const key = pipelineKey(project, pipeline.id);
       if (!this.bridges.has(key)) void this.loadBridges(gen, project, pipeline.id, false);
+    }
+  }
+
+  /**
+   * Reopen the remembered expansion once the list has loaded. The remembered
+   * Pipeline must still be listed; otherwise the view stays collapsed, so a
+   * deleted Pipeline leaves nothing dangling.
+   */
+  private applyRememberedExpansion(gen: number): void {
+    const prefs = this.pendingRestore;
+    this.pendingRestore = null;
+    const pipelineId = prefs?.pipelineId;
+    if (pipelineId == null || !this.pipelines.some((pipeline) => pipeline.id === pipelineId)) {
+      this.pendingJobId = null;
+      return;
+    }
+    this.expandedId = pipelineId;
+    this.pendingJobId = prefs?.jobId ?? null;
+    this.downstreamPath = (prefs?.downstream ?? []).map((node) => ({
+      project: node.project,
+      pipelineId: node.pipelineId,
+      generation: node.generation,
+      ancestors: node.ancestors.map((key) => ({ project: key.project, pipelineId: key.pipelineId })),
+    }));
+    // Reopen each remembered card the way `toggleDownstream` would, so its own
+    // Jobs and Bridges fill in.
+    for (const node of this.downstreamPath) {
+      const key = pipelineKey(node.project, node.pipelineId);
+      if (!Array.isArray(this.jobs.get(key))) void this.loadJobs(gen, node.project, node.pipelineId, false);
+      if (!Array.isArray(this.bridges.get(key))) void this.loadBridges(gen, node.project, node.pipelineId, false);
     }
   }
 
@@ -1082,6 +1131,7 @@ class PipelinesPanel implements PanelHandle {
       this.expandedId = null;
       this.downstreamPath = [];
       this.openJob = null;
+      this.persistView();
       this.render();
       return;
     }
@@ -1094,6 +1144,7 @@ class PipelinesPanel implements PanelHandle {
       if (!Array.isArray(this.jobs.get(key))) void this.loadJobs(this.generation, project, id, false);
       if (!Array.isArray(this.bridges.get(key))) void this.loadBridges(this.generation, project, id, false);
     }
+    this.persistView();
     this.render();
   }
 
@@ -1114,7 +1165,22 @@ class PipelinesPanel implements PanelHandle {
       // A failed fetch is not an absence of jobs; say so rather than showing none.
       this.jobs.set(key, 'error');
     }
+    this.restorePendingJob(project, pipelineId);
     this.render();
+  }
+
+  /**
+   * Reopen the remembered Job once the Pipeline that holds it has loaded its
+   * Jobs. A Job that is not in this Pipeline leaves the pending id for another
+   * Pipeline's load; one that never appears simply stays closed.
+   */
+  private restorePendingJob(project: string, pipelineId: number): void {
+    const jobId = this.pendingJobId;
+    if (jobId == null) return;
+    const jobs = this.jobs.get(pipelineKey(project, pipelineId));
+    if (!Array.isArray(jobs) || !jobs.some((job) => job.id === jobId)) return;
+    this.pendingJobId = null;
+    this.openJobDrawer(project, pipelineId, jobId);
   }
 
   private async loadBridges(gen: number, project: string, pipelineId: number, silent: boolean): Promise<void> {
@@ -1146,6 +1212,7 @@ class PipelinesPanel implements PanelHandle {
     this.openJob = { project, pipelineId, jobId };
     this.followTail = true;
     this.drawerScrollTop = 0;
+    this.persistView();
     const key = jobKey(project, jobId);
     if (this.traces.has(key)) {
       this.render();
@@ -1242,6 +1309,7 @@ class PipelinesPanel implements PanelHandle {
     this.followTail = true;
     this.drawerScrollTop = 0;
     this.resetTrace();
+    this.persistView();
     this.render();
   }
 
@@ -2614,6 +2682,7 @@ class PipelinesPanel implements PanelHandle {
     // Re-opening retries a previous failure; a filled cache is reused.
     if (!Array.isArray(this.jobs.get(key))) void this.loadJobs(this.generation, downstreamProject, downstreamId, false);
     if (!Array.isArray(this.bridges.get(key))) void this.loadBridges(this.generation, downstreamProject, downstreamId, false);
+    this.persistView();
     this.render();
   }
 
