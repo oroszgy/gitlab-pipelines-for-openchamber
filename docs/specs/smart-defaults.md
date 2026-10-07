@@ -1,6 +1,6 @@
 # Spec: Smart defaults
 
-Status: specified — tickets `smart-defaults/01`–`05` are mapped in [`README.md`](README.md).
+Status: implemented — tickets `smart-defaults/01`–`04` are mapped in [`README.md`](README.md).
 Feature: `smart-defaults`
 Follows: [`docs/specs/pipelines-panel.md`](pipelines-panel.md) (its scope toggle and polling) and
 [`docs/specs/downstream-pipelines.md`](downstream-pipelines.md) (the expansion it restores).
