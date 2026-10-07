@@ -7,6 +7,18 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-10-07
+
+### Added
+
+- The Panel remembers your view per host, project and Ref: the scope, the
+  expanded Pipeline, its Downstream chain and the open Job drawer are restored
+  when you come back.
+- The newest running or failed Pipeline is expanded on load, so its stages are
+  visible without a click.
+- When the current Ref has no Pipelines, the Panel falls back to All refs once,
+  with a dismissible notice naming the Ref and a **Back to branch** action.
+
 ## [0.10.6] - 2026-10-06
 
 ### Fixed
