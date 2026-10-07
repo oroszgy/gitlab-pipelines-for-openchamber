@@ -118,8 +118,10 @@ feature is disabled with an explanation rather than failing.
 
 ## Development
 
-Development requires **[Bun](https://bun.sh) ≥ 1.3**. Install, build and tests all run on it, and
-Node alone will not work.
+Development requires **[Bun](https://bun.sh) ≥ 1.4**. Install, build and tests all run on it, and
+Node alone will not work. The exact version is pinned in `packageManager` (`bun@1.4.0`): the
+committed bundles are produced by Bun's bundler, whose output changes between Bun releases, so the
+same version must generate them every time.
 
 ```sh
 bun install

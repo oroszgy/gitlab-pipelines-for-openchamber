@@ -10,10 +10,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      # Match the floor declared in package.json's `engines.bun`, so CI proves it.
+      # `check:bundles` compares the committed bundles with a fresh build
+      # byte-for-byte, and Bun's bundler names minified identifiers differently
+      # from one release to the next. So CI must build with exactly the version
+      # that produced the committed bundles: `packageManager` in package.json
+      # pins it, and setup-bun reads that field when no `bun-version` is given.
       - uses: oven-sh/setup-bun@v2
-        with:
-          bun-version: 1.3.x
       - run: bun install --frozen-lockfile
       - run: bun run check
       # `check` rebuilds the bundles but never compares them with the committed

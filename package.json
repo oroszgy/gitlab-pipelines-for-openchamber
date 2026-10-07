@@ -5,8 +5,9 @@
   "description": "OpenChamber panel showing GitLab CI/CD pipelines for the open project, with capability-gated pipeline actions.",
   "license": "MIT",
   "type": "module",
+  "packageManager": "bun@1.4.0",
   "engines": {
-    "bun": ">=1.3.0"
+    "bun": ">=1.4.0"
   },
   "repository": {
     "type": "git",
@@ -36,7 +37,7 @@
   },
   "devDependencies": {
     "@openchamber/sdk": "2.0.3",
-    "@types/bun": "1.3.14",
+    "@types/bun": "1.4.0",
     "happy-dom": "^20.14.5",
     "husky": "^9.1.7",
     "typescript": "^5.9.2"
