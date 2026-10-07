@@ -3,7 +3,7 @@ import { applyHostReady, mountButton, mountEmpty, mountMenu, mountTabs } from '@
 
 import { accessLevelOf, canRunPipeline, cancelRoleOf, menuState, type ActionId, type Capability } from './actions';
 import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, POLL_INTERVAL_MS, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
-import { defaultExpansion } from './defaults';
+import { defaultExpansion, restoredChain, type DownstreamNode, type PipelineKey } from './defaults';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
   canExpand,
@@ -188,21 +188,11 @@ type TraceState = {
   truncated: TraceTruncation;
 };
 
-/** A Pipeline's identity: its id alone is not unique across projects in the view. */
-type PipelineKey = { project: string; pipelineId: number };
-
 /** A Job's identity: its id alone is not unique across projects in the view. */
 type JobKey = { project: string; jobId: number };
 
 /** The open Jobs drawer, pinned to the project and pipeline the Job belongs to. */
 type OpenJob = JobKey & { pipelineId: number };
-
-/** An expanded Downstream pipeline: what to fetch, how deep it sits, and its path. */
-type DownstreamNode = PipelineKey & {
-  generation: number;
-  /** Every ancestor (root last), so a cycle on one path is refused. */
-  ancestors: PipelineKey[];
-};
 
 /** A Pipeline's Trigger rows, or a failure. Keyed by project + pipeline id. */
 type BridgeEntry = TriggerRow[] | 'error';
@@ -305,8 +295,8 @@ class PipelinesPanel implements PanelHandle {
   private usernameHost: string | null = null;
 
   private scope: Scope = 'branch';
-  /** The storage key the current view is remembered under, so it restores once per key. */
-  private prefsKey: string | null = null;
+  /** The resolved host+project+Ref the in-memory view belongs to, so a switch resets it. */
+  private viewKey: string | null = null;
   /** The record just read for a new key, applied once the Pipelines list has loaded. */
   private pendingRestore: Prefs | null = null;
   /** A remembered Job id waiting for its Pipeline's Jobs to load before it reopens. */
@@ -363,7 +353,7 @@ class PipelinesPanel implements PanelHandle {
   private tokenScopesHost: string | null = null;
   /** The one-time notice that the token is read-only; dismissed by hand. */
   private scopeNoticeDismissed = false;
-  /** Refs whose all-refs fallback is suppressed for this session. */
+  /** Storage keys whose all-refs fallback is suppressed for this session. */
   private readonly fallbackRefs = new Set<string>();
   /** The all-refs fallback notice, naming the Ref, until dismissed or reversed. */
   private fallbackNotice: { ref: string } | null = null;
@@ -527,18 +517,31 @@ class PipelinesPanel implements PanelHandle {
   }
 
   setScope(scope: Scope): void {
+    this.switchScope(scope, true);
+  }
+
+  /**
+   * Change the scope and reload. A manual change is remembered; the automatic
+   * All-refs fallback is not (`persist: false`), so it stays a session-only
+   * detour and a remount tries the user's own scope again.
+   */
+  private switchScope(scope: Scope, persist: boolean): void {
     if (scope === this.scope) return;
     // A manual scope change suppresses the all-refs fallback for this Ref.
-    if (this.resolved?.ref) this.fallbackRefs.add(this.resolved.ref);
+    const fallbackKey = this.currentPrefKey();
+    if (fallbackKey) this.fallbackRefs.add(fallbackKey);
     this.scope = scope;
     this.expandedId = null;
     this.downstreamPath = [];
     this.openJob = null;
+    this.pendingJobId = null;
     this.resetTrace();
     this.pipelines = [];
     this.pipelinesNextPage = null;
     this.pipelinesPage = 1;
-    this.persistView();
+    if (persist) this.persistView();
+    // A scope change reloads a different list, so choose its expansion fresh.
+    this.pendingRestore = {};
     this.refresh();
   }
 
@@ -706,6 +709,7 @@ class PipelinesPanel implements PanelHandle {
     this.pendingHealNotice = null;
     this.healNotice = null;
     this.fallbackNotice = null;
+    this.fallbackRefs.clear();
     this.username = null;
     this.usernameHost = null;
     this.invalidateCapability();
@@ -802,6 +806,14 @@ class PipelinesPanel implements PanelHandle {
     return ref ? this.scope : 'all';
   }
 
+  /** The storage key for the resolved view, when it has a Ref. */
+  private currentPrefKey(): string | null {
+    const host = this.config?.host;
+    const resolution = this.resolved;
+    if (!host || !resolution?.ref) return null;
+    return prefKey(host, resolution.project, resolution.ref);
+  }
+
   /**
    * Restore the remembered scope for this host+project+ref, once per key. A
    * refresh for the same key keeps the in-memory scope, so a manual change is
@@ -813,10 +825,21 @@ class PipelinesPanel implements PanelHandle {
     resolution: { project: string; ref: string | null },
   ): Promise<void> {
     const ref = resolution.ref;
-    if (!ref) return;
+    const viewKey = `${host}\u0000${resolution.project}\u0000${ref ?? ''}`;
+    if (viewKey === this.viewKey) return;
+    this.viewKey = viewKey;
+    // A different view is a different record: drop the previous expansion so it
+    // cannot leak across Refs or Projects.
+    this.expandedId = null;
+    this.downstreamPath = [];
+    this.openJob = null;
+    this.pendingJobId = null;
+    if (!ref) {
+      // No Ref has no storage record, but a fresh view still auto-expands.
+      this.pendingRestore = {};
+      return;
+    }
     const key = prefKey(host, resolution.project, ref);
-    if (key === this.prefsKey) return;
-    this.prefsKey = key;
     const prefs = await readPrefs(this.port.storage, key);
     if (this.disposed || gen !== this.generation) return;
     // A different key with no record is a different view: fall back to Branch.
@@ -832,7 +855,6 @@ class PipelinesPanel implements PanelHandle {
     const resolution = this.resolved;
     if (!host || !resolution?.ref) return;
     const key = prefKey(host, resolution.project, resolution.ref);
-    this.prefsKey = key;
     const now = this.timers.now();
     const patch: Prefs = {
       scope: this.scope,
@@ -874,8 +896,10 @@ class PipelinesPanel implements PanelHandle {
     this.clearRateLimit();
     this.promoteHealNotice();
     this.pruneDownstreamNode();
-    this.applyRememberedExpansion(gen);
     if (seedBridges) {
+      // The remembered or default expansion is chosen once per fresh load; a
+      // poll must not re-expand after the user collapses.
+      this.applyRememberedExpansion(gen);
       this.seedBridges(gen, resolution.project);
       // A manual refresh re-reads the expanded Pipeline's own Jobs. On a poll,
       // `refetchVisible` owns every refetch, so this must not double up.
@@ -897,10 +921,13 @@ class PipelinesPanel implements PanelHandle {
   private fallBackToAllRefs(resolution: Extract<ProjectResolution, { ok: true }>): boolean {
     const ref = resolution.ref;
     if (this.scope !== 'branch' || ref == null) return false;
-    if (this.pipelines.length > 0 || this.fallbackRefs.has(ref)) return false;
-    this.fallbackRefs.add(ref);
+    const host = this.config?.host;
+    if (!host) return false;
+    const key = prefKey(host, resolution.project, ref);
+    if (this.pipelines.length > 0 || this.fallbackRefs.has(key)) return false;
+    this.fallbackRefs.add(key);
     this.fallbackNotice = { ref };
-    this.setScope('all');
+    this.switchScope('all', false);
     return true;
   }
 
@@ -999,31 +1026,77 @@ class PipelinesPanel implements PanelHandle {
     this.pendingRestore = null;
     if (prefs == null) return;
     const pipelineId = defaultExpansion(this.pipelines, prefs);
-    if (pipelineId == null) {
-      this.pendingJobId = null;
-      return;
-    }
+    // A fresh record always defines the expansion, so a previous Pipeline's
+    // chain and Job never survive a switch to another record.
     this.expandedId = pipelineId;
+    const restoring = pipelineId != null && prefs.pipelineId === pipelineId;
+    this.downstreamPath = [];
+    this.openJob = null;
+    this.pendingJobId = null;
     // The remembered Pipeline is the only one whose chain and Job to reopen; a
     // fallback auto-expansion starts collapsed beyond its own row.
-    if (prefs.pipelineId !== pipelineId) {
+    if (!restoring) return;
+    this.pendingJobId = prefs.jobId ?? null;
+    const root = this.resolved?.project ?? '';
+    this.downstreamPath = restoredChain(prefs.downstream ?? [], { project: root, pipelineId });
+    // Walk the restored chain as each parent's Bridges confirm it, starting from
+    // the root's own Bridges (seeded below), so a vanished node is never fetched.
+    this.walkRestoredChain(gen, root, pipelineId);
+  }
+
+  /**
+   * Descend a restored Downstream chain from a Pipeline whose Bridges have just
+   * loaded: load the next remembered card when its parent's Bridge still lists
+   * it, and drop it — with everything below it — when it does not. A vanished
+   * Downstream Pipeline therefore leaves no dangling card and is never fetched.
+   */
+  private walkRestoredChain(gen: number, parentProject: string, parentPipelineId: number): void {
+    const index = this.restoredChildIndex(parentProject, parentPipelineId);
+    if (index < 0 || index >= this.downstreamPath.length) return;
+    const entry = this.bridges.get(pipelineKey(parentProject, parentPipelineId));
+    if (!Array.isArray(entry)) return;
+    const node = this.downstreamPath[index]!;
+    if (!this.bridgeLists(entry, node)) {
+      this.downstreamPath = this.downstreamPath.slice(0, index);
+      // The remembered Job rode the dropped card, so it has nowhere to reopen.
       this.pendingJobId = null;
+      if (this.openJob && !this.openPathHas(this.openJob.project, this.openJob.pipelineId)) {
+        this.openJob = null;
+      }
       return;
     }
-    this.pendingJobId = prefs.jobId ?? null;
-    this.downstreamPath = (prefs.downstream ?? []).map((node) => ({
-      project: node.project,
-      pipelineId: node.pipelineId,
-      generation: node.generation,
-      ancestors: node.ancestors.map((key) => ({ project: key.project, pipelineId: key.pipelineId })),
-    }));
-    // Reopen each remembered card the way `toggleDownstream` would, so its own
-    // Jobs and Bridges fill in.
-    for (const node of this.downstreamPath) {
-      const key = pipelineKey(node.project, node.pipelineId);
-      if (!Array.isArray(this.jobs.get(key))) void this.loadJobs(gen, node.project, node.pipelineId, false);
-      if (!Array.isArray(this.bridges.get(key))) void this.loadBridges(gen, node.project, node.pipelineId, false);
-    }
+    const key = pipelineKey(node.project, node.pipelineId);
+    if (!Array.isArray(this.jobs.get(key))) void this.loadJobs(gen, node.project, node.pipelineId, false);
+    if (!Array.isArray(this.bridges.get(key))) void this.loadBridges(gen, node.project, node.pipelineId, false);
+  }
+
+  /** The restored node whose parent is this Pipeline, or -1 when there is none. */
+  private restoredChildIndex(parentProject: string, parentPipelineId: number): number {
+    if (parentPipelineId === this.expandedId && samePath(parentProject, this.resolved?.project ?? '')) return 0;
+    const parent = this.downstreamPath.findIndex(
+      (node) => node.pipelineId === parentPipelineId && samePath(node.project, parentProject),
+    );
+    return parent < 0 ? -1 : parent + 1;
+  }
+
+  /** Whether a parent's Trigger rows still list this Downstream node. */
+  private bridgeLists(entry: TriggerRow[], node: DownstreamNode): boolean {
+    return entry.some((row) => {
+      const downstream = row.downstream;
+      return (
+        downstream != null &&
+        downstream.id === node.pipelineId &&
+        samePath(downstreamProject(downstream) ?? '', node.project)
+      );
+    });
+  }
+
+  /** Whether a Pipeline is still on the open path: the root or a restored card. */
+  private openPathHas(project: string, pipelineId: number): boolean {
+    if (pipelineId === this.expandedId && samePath(project, this.resolved?.project ?? '')) return true;
+    return this.downstreamPath.some(
+      (node) => node.pipelineId === pipelineId && samePath(node.project, project),
+    );
   }
 
   /** Drop an expanded Downstream chain whose root Pipeline is no longer listed. */
@@ -1206,6 +1279,9 @@ class PipelinesPanel implements PanelHandle {
         const path = bridge.downstream_pipeline ? downstreamProject(bridge.downstream_pipeline) : null;
         if (path) this.ensureCapability(gen, path);
       }
+      // Descend a restored chain once this parent's Bridges are known, so a
+      // vanished Downstream Pipeline drops instead of dangling.
+      this.walkRestoredChain(gen, project, pipelineId);
     } else if (silent) {
       // Keep the last known count rather than let a poll failure clear it.
     } else {

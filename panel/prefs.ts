@@ -49,7 +49,7 @@ export function prefKey(host: string, project: string, ref: string): string {
 }
 
 /** Accept a stored value only when it is the record shape we wrote; else no record. */
-export function parsePrefs(value: JsonValue | undefined): Prefs {
+function parsePrefs(value: JsonValue | undefined): Prefs {
   if (value == null || typeof value !== 'object' || Array.isArray(value)) return {};
   const record = value as Record<string, JsonValue>;
   const prefs: Prefs = {};
@@ -70,7 +70,7 @@ function parsePipelineKey(value: JsonValue | undefined): { project: string; pipe
 }
 
 /** Accept a stored Downstream chain only when every node is the shape we wrote. */
-export function parseDownstream(value: JsonValue | undefined): PrefDownstreamNode[] | undefined {
+function parseDownstream(value: JsonValue | undefined): PrefDownstreamNode[] | undefined {
   if (!Array.isArray(value)) return undefined;
   const nodes: PrefDownstreamNode[] = [];
   for (const entry of value) {
@@ -96,7 +96,7 @@ export function parseDownstream(value: JsonValue | undefined): PrefDownstreamNod
 }
 
 /** The stored form of a Downstream chain: plain JSON objects, no host types. */
-export function serializeDownstream(nodes: readonly PrefDownstreamNode[]): JsonValue {
+function serializeDownstream(nodes: readonly PrefDownstreamNode[]): JsonValue {
   return nodes.map(
     (node): JsonValue => ({
       project: node.project,

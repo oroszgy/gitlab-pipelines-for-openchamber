@@ -921,6 +921,28 @@ describe('auto-expanding on load', () => {
     expect(text(root)).toContain('compile');
     expect(root.querySelector('.gp-drawer')).toBeNull();
   });
+
+  test('a detached HEAD with no Ref still expands the newest active Pipeline', async () => {
+    const host = configuredHost();
+    host.worktrees = [];
+    host.files.set('.git/HEAD', 'abcdef1234567890\n');
+    host.gitlabHandler = handlerFor({
+      pipelines: [
+        pipeline({ id: 9, status: 'success' }),
+        pipeline({ id: 8, status: 'running', finished_at: null }),
+      ],
+      jobs: [job({ id: 1, stage: 'build', name: 'compile', status: 'running' })],
+    });
+    const { root } = await mount(host, new FakeTimers());
+
+    const expanded = [...root.querySelectorAll<HTMLElement>('.gp-row')].filter(
+      (row) => row.getAttribute('aria-expanded') === 'true',
+    );
+    expect(expanded).toHaveLength(1);
+    expect(expanded[0]?.querySelector('.gp-icon')?.getAttribute('aria-label')).toBe('Running');
+    expect(text(root)).toContain('compile');
+    expect(root.querySelector('.gp-drawer')).toBeNull();
+  });
 });
 
 describe('the remembered view', () => {
@@ -1009,6 +1031,38 @@ describe('the remembered view', () => {
     expect(text(second.root)).toContain('other');
   });
 
+  test('switching to a different Ref does not leak the previous expansion', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 7, ref: 'main' })],
+      jobs: [job({ id: 9, name: 'build' })],
+    });
+    const timers = new FakeTimers();
+    const { root, panel } = await mount(host, timers);
+    (root.querySelector('.gp-row') as HTMLElement).click();
+    await flush();
+    expect(text(root)).toContain('build');
+
+    // A different Ref is a different record: the settled list expands nothing,
+    // and the old Pipeline's Jobs are not fetched under the new Ref.
+    host.files.set('.git/HEAD', 'ref: refs/heads/other\n');
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'other', status: 'ready' }];
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 21, ref: 'other' })],
+      jobs: [job({ id: 99, name: 'other-job' })],
+    });
+    const before = host.gitlabRequests.filter((request) => request.path.endsWith('/pipelines/7/jobs')).length;
+    panel.refresh();
+    await flush();
+
+    const expanded = [...root.querySelectorAll<HTMLElement>('.gp-row')].filter(
+      (row) => row.getAttribute('aria-expanded') === 'true',
+    );
+    expect(expanded).toHaveLength(0);
+    const after = host.gitlabRequests.filter((request) => request.path.endsWith('/pipelines/7/jobs')).length;
+    expect(after).toBe(before);
+  });
+
   test('restores the remembered Downstream chain on remount', async () => {
     const host = configuredHost();
     const other = downstreamPipeline({ id: 42, project_id: 9, web_url: 'https://gitlab.com/other/project/-/pipelines/42' });
@@ -1040,6 +1094,67 @@ describe('the remembered view', () => {
     const second = await mount(host, timers);
     expect(second.root.querySelector('.gp-downstream-card')).not.toBeNull();
     expect(text(second.root)).toContain('e2e');
+  });
+
+  test('a vanished middle Downstream Pipeline drops from the restored chain', async () => {
+    const host = configuredHost();
+    // A remembered chain root(7) -> A(42) -> B(99) -> C(123), where A's own
+    // Bridge no longer lists B: B and everything below it must drop.
+    host.stored.set('gp:v1:gitlab.com:group/project:main', {
+      scope: 'branch',
+      pipelineId: 7,
+      downstream: [
+        {
+          project: 'other/project',
+          pipelineId: 42,
+          generation: 1,
+          ancestors: [{ project: 'group/project', pipelineId: 7 }],
+        },
+        {
+          project: 'third/project',
+          pipelineId: 99,
+          generation: 2,
+          ancestors: [
+            { project: 'group/project', pipelineId: 7 },
+            { project: 'other/project', pipelineId: 42 },
+          ],
+        },
+        {
+          project: 'fourth/project',
+          pipelineId: 123,
+          generation: 3,
+          ancestors: [
+            { project: 'group/project', pipelineId: 7 },
+            { project: 'other/project', pipelineId: 42 },
+            { project: 'third/project', pipelineId: 99 },
+          ],
+        },
+      ],
+    });
+    const other = downstreamPipeline({ id: 42, project_id: 9, web_url: 'https://gitlab.com/other/project/-/pipelines/42' });
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7 })]) };
+      }
+      if (request.path === '/api/v4/projects/group%2Fproject/pipelines/7/bridges') {
+        return { status: 200, body: JSON.stringify([bridge({ downstream_pipeline: other })]) };
+      }
+      // The middle Downstream Pipeline is gone: its parent's Bridge no longer lists it.
+      if (request.path === '/api/v4/projects/other%2Fproject/pipelines/42/bridges') {
+        return { status: 200, body: '[]' };
+      }
+      return { status: 200, body: '[]' };
+    };
+    const { root } = await mount(host, new FakeTimers());
+
+    expect(text(root)).toContain('other/project');
+    expect(text(root)).not.toContain('third/project');
+    expect(text(root)).not.toContain('fourth/project');
+    // A dropped node is never fetched, so no dangling card can fill in.
+    const stale = host.gitlabRequests.filter(
+      (request) => request.path.includes('third%2Fproject') || request.path.includes('fourth%2Fproject'),
+    );
+    expect(stale).toHaveLength(0);
   });
 });
 
@@ -1074,6 +1189,61 @@ describe('automatic all-refs fallback', () => {
     expect(active?.textContent).toContain('All refs');
     expect(text(root)).toContain('main');
     expect(backToBranch(root)).toBeDefined();
+  });
+
+  test('the fallback expands the newest active Pipeline in the all-refs list', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = (request) => {
+      if (!request.path.endsWith('/pipelines')) return { status: 200, body: '[]' };
+      return request.query?.ref
+        ? { status: 200, body: '[]' }
+        : {
+            status: 200,
+            body: JSON.stringify([pipeline({ id: 7, ref: 'other', status: 'running', finished_at: null })]),
+          };
+    };
+    const { root } = await mount(host, new FakeTimers());
+
+    const expanded = [...root.querySelectorAll<HTMLElement>('.gp-row')].filter(
+      (row) => row.getAttribute('aria-expanded') === 'true',
+    );
+    expect(expanded).toHaveLength(1);
+    expect(root.querySelector('.gp-drawer')).toBeNull();
+  });
+
+  test('the fallback is not remembered as the scope', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = emptyBranchHandler();
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    expect(first.root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('All refs');
+    const before = pipelineRequests(host).length;
+    first.panel.dispose();
+
+    // The fallback was for this session only: a remount tries Branch again.
+    const second = await mount(host, timers);
+    const requests = pipelineRequests(host);
+    expect(requests[before]?.query?.ref).toBe('main');
+    expect(requests[before + 1]?.query?.ref).toBeUndefined();
+    expect(second.root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('All refs');
+  });
+
+  test('an empty Ref on one Project does not suppress the fallback on another', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = emptyBranchHandler();
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('All refs');
+
+    // The same Ref in a different Project is its own record, so it falls back too.
+    host.files.set('.git/config', GIT_CONFIG.replace('group/project', 'group/other'));
+    const before = pipelineRequests(host).length;
+    panel.refresh();
+    await flush();
+
+    const requests = pipelineRequests(host);
+    expect(requests[before]?.query?.ref).toBe('main');
+    expect(requests[before + 1]?.query?.ref).toBeUndefined();
+    expect(root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('All refs');
   });
 
   test('Back to branch returns and suppresses the fallback for the ref', async () => {
