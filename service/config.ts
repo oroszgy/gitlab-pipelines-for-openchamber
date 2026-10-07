@@ -16,8 +16,25 @@ export type Env = Record<string, string | undefined>;
 
 export const DEFAULT_HOST = 'gitlab.com';
 
-/** A Watched Ref: the one Ref a project is watched on, and when it was set. */
-export type Watch = { ref: string; addedAt: string };
+/** A Watched Ref: the one Ref a project is watched on, when it was set, and any poll error. */
+export type Watch = { ref: string; addedAt: string; error?: string };
+
+/**
+ * A Terminal event: a Pipeline on a Watched Ref reaching a settled Status. The
+ * identity is host + project + ref + pipelineId + status, so the same outcome
+ * recorded twice is one event.
+ */
+export type Event = {
+  host: string;
+  project: string;
+  ref: string;
+  pipelineId: number;
+  status: string;
+  at: string;
+};
+
+/** How many Terminal events the log keeps; the oldest is dropped past this. */
+export const EVENT_LOG_MAX = 200;
 
 export type Config = {
   /** The Configured host, a normalized authority such as `gitlab.com`. */
@@ -28,6 +45,10 @@ export type Config = {
   tokens: Record<string, string>;
   /** One Watched Ref per normalized `host/project` key. */
   watches: Record<string, Watch>;
+  /** The bounded Terminal event log, oldest first. */
+  events: Event[];
+  /** How many events have ever been recorded; the cursor `eventsAfter` reads past. */
+  eventSeq: number;
 };
 
 /**
@@ -43,7 +64,7 @@ export type ConfigFs = {
 };
 
 export function defaultConfig(): Config {
-  return { host: DEFAULT_HOST, project: '', tokens: {}, watches: {} };
+  return { host: DEFAULT_HOST, project: '', tokens: {}, watches: {}, events: [], eventSeq: 0 };
 }
 
 /**
@@ -117,16 +138,21 @@ function watchKey(
   return { ok: true, key: `${normalized}/${trimmed}` };
 }
 
-/** Whether a stored value is a well-formed watch: a Ref and an added-at. */
-function isWatch(value: unknown): value is Watch {
-  if (typeof value !== 'object' || value === null) return false;
+/** A stored watch, or null when it is not a Ref and an added-at. A malformed error is dropped. */
+function normalizeWatch(value: unknown): Watch | null {
+  if (typeof value !== 'object' || value === null) return null;
   const record = value as Record<string, unknown>;
-  return (
-    typeof record.ref === 'string' &&
-    record.ref !== '' &&
-    typeof record.addedAt === 'string' &&
-    record.addedAt !== ''
-  );
+  if (
+    typeof record.ref !== 'string' ||
+    record.ref === '' ||
+    typeof record.addedAt !== 'string' ||
+    record.addedAt === ''
+  ) {
+    return null;
+  }
+  const watch: Watch = { ref: record.ref, addedAt: record.addedAt };
+  if (typeof record.error === 'string' && record.error !== '') watch.error = record.error;
+  return watch;
 }
 
 /**
@@ -143,11 +169,64 @@ function normalizeWatches(raw: unknown): { watches: Record<string, Watch>; dropp
       const host = slash === -1 ? '' : key.slice(0, slash);
       const project = slash === -1 ? '' : key.slice(slash + 1);
       const parsedKey = watchKey(host, project);
-      if (parsedKey.ok && isWatch(value)) watches[parsedKey.key] = value;
+      const watch = parsedKey.ok ? normalizeWatch(value) : null;
+      if (parsedKey.ok && watch) watches[parsedKey.key] = watch;
       else dropped += 1;
     }
   }
   return { watches, dropped };
+}
+
+/** The identity of a Terminal event: the same outcome recorded twice is one event. */
+export function eventIdentity(event: Event): string {
+  const host = normalizeHost(event.host) ?? event.host;
+  return JSON.stringify([host, event.project, event.ref, event.pipelineId, event.status]);
+}
+
+/** Whether a stored value is a well-formed Terminal event. */
+function isEvent(value: unknown): value is Event {
+  if (typeof value !== 'object' || value === null) return false;
+  const record = value as Record<string, unknown>;
+  return (
+    typeof record.host === 'string' &&
+    normalizeHost(record.host) !== null &&
+    typeof record.project === 'string' &&
+    record.project.trim() !== '' &&
+    typeof record.ref === 'string' &&
+    record.ref.trim() !== '' &&
+    typeof record.pipelineId === 'number' &&
+    Number.isFinite(record.pipelineId) &&
+    typeof record.status === 'string' &&
+    record.status !== '' &&
+    typeof record.at === 'string' &&
+    record.at !== ''
+  );
+}
+
+/**
+ * The valid Terminal events of a stored log, oldest first, at most
+ * `EVENT_LOG_MAX` of them. A malformed entry, or one keyed by a host that no
+ * longer normalizes, counts as dropped, so a reader ignores it while a writer
+ * refuses it.
+ */
+function normalizeEvents(raw: unknown): { events: Event[]; dropped: number } {
+  const events: Event[] = [];
+  let dropped = 0;
+  if (Array.isArray(raw)) {
+    for (const value of raw) {
+      if (!isEvent(value)) {
+        dropped += 1;
+        continue;
+      }
+      events.push({ ...value, host: normalizeHost(value.host) ?? value.host });
+    }
+  }
+  return { events: events.slice(Math.max(0, events.length - EVENT_LOG_MAX)), dropped };
+}
+
+/** A stored cursor, floored at the number of retained events so it is never behind them. */
+function normalizeEventSeq(raw: unknown, retained: number): number {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= retained ? raw : retained;
 }
 
 /**
@@ -175,12 +254,15 @@ export async function readConfig(fs: ConfigFs, path: string): Promise<Config> {
   const record = parsed as Record<string, unknown>;
   const host = typeof record.host === 'string' ? normalizeHost(record.host) : null;
   const project = typeof record.project === 'string' ? record.project : '';
+  const events = normalizeEvents(record.events).events;
 
   return {
     host: host ?? DEFAULT_HOST,
     project,
     tokens: normalizeTokens(record.tokens).tokens,
     watches: normalizeWatches(record.watches).watches,
+    events,
+    eventSeq: normalizeEventSeq(record.eventSeq, events.length),
   };
 }
 
@@ -251,9 +333,77 @@ export function resolveWatch(config: Config, host: string, project: string): Wat
 }
 
 /**
+ * Record a poll error against a project's watch, so a moved project is visible
+ * without being followed. A project with no watch is left alone.
+ */
+export function setWatchError(config: Config, host: string, project: string, error: string): Config {
+  const resolved = watchKey(host, project);
+  if (!resolved.ok) return config;
+  const watch = config.watches[resolved.key];
+  if (!watch) return config;
+  return {
+    ...config,
+    watches: { ...config.watches, [resolved.key]: { ref: watch.ref, addedAt: watch.addedAt, error } },
+  };
+}
+
+/** Clear a project's watch error, leaving its Ref and added-at. A missing watch is left alone. */
+export function clearWatchError(config: Config, host: string, project: string): Config {
+  const resolved = watchKey(host, project);
+  if (!resolved.ok) return config;
+  const watch = config.watches[resolved.key];
+  if (!watch?.error) return config;
+  return {
+    ...config,
+    watches: { ...config.watches, [resolved.key]: { ref: watch.ref, addedAt: watch.addedAt } },
+  };
+}
+
+/**
+ * Append a Terminal event to the bounded log, dropping the oldest past the cap.
+ * An event whose identity is already recorded is ignored, so re-polling the same
+ * settled Pipeline records nothing new. Returns the same `config` when nothing
+ * changed, so a caller can detect a no-op by reference.
+ */
+export function appendEvent(config: Config, event: Event): Config {
+  const normalized: Event = { ...event, host: normalizeHost(event.host) ?? event.host };
+  const identity = eventIdentity(normalized);
+  if (config.events.some((existing) => eventIdentity(existing) === identity)) return config;
+  const events = [...config.events, normalized];
+  const overflow = Math.max(0, events.length - EVENT_LOG_MAX);
+  return {
+    ...config,
+    events: overflow > 0 ? events.slice(overflow) : events,
+    eventSeq: config.eventSeq + 1,
+  };
+}
+
+/** The cursor a surface has reached: how many events have ever been recorded. */
+export function eventCursor(config: Config): number {
+  return config.eventSeq;
+}
+
+/**
+ * The retained events a surface has not read yet: those recorded after its
+ * cursor. The log keeps only the newest events, so a cursor older than the
+ * retained window yields everything retained rather than a partial page.
+ */
+export function eventsAfter(config: Config, after: number): Event[] {
+  const retained = config.events.length;
+  if (retained === 0) return [];
+  // The sequence number of `events[0]` given everything ever recorded is
+  // `eventSeq`; the retained events are the newest `retained` of them.
+  const firstSeq = config.eventSeq - retained + 1;
+  const start = after - firstSeq + 1;
+  if (start <= 0) return config.events.slice();
+  if (start >= retained) return [];
+  return config.events.slice(start);
+}
+
+/**
  * Persist the configuration as a `0600` file, creating its directory. A host
- * that no longer normalizes, a token keyed by one, or a watch keyed by one is
- * refused and nothing is written.
+ * that no longer normalizes, a token keyed by one, a watch keyed by one, or an
+ * event keyed by one is refused and nothing is written.
  */
 export async function saveConfig(fs: ConfigFs, path: string, config: Config): Promise<ConfigChange> {
   const host = normalizeHost(config.host);
@@ -267,11 +417,18 @@ export async function saveConfig(fs: ConfigFs, path: string, config: Config): Pr
     return { ok: false, error: 'A watch is keyed by an invalid GitLab host or project.' };
   }
 
+  const normalizedEvents = normalizeEvents(config.events);
+  if (normalizedEvents.dropped > 0) {
+    return { ok: false, error: 'An event is malformed.' };
+  }
+
   const next: Config = {
     host,
     project: config.project,
     tokens,
     watches: normalizedWatches.watches,
+    events: normalizedEvents.events,
+    eventSeq: normalizeEventSeq(config.eventSeq, normalizedEvents.events.length),
   };
   await fs.mkdir(dirname(path));
   await fs.writeFile(path, `${JSON.stringify(next, null, 2)}\n`, 0o600);

@@ -1,10 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { join, win32 } from 'node:path';
 import {
+  appendEvent,
   clearToken,
   clearWatch,
+  clearWatchError,
   configPath,
   defaultConfig,
+  EVENT_LOG_MAX,
+  eventCursor,
+  eventsAfter,
   normalizeHost,
   readConfig,
   resolveToken,
@@ -12,8 +17,10 @@ import {
   saveConfig,
   setToken,
   setWatch,
+  setWatchError,
   type Config,
   type ConfigFs,
+  type Event,
 } from '../service/config';
 
 type Entry = { content: string; mode: number };
@@ -121,6 +128,8 @@ describe('readConfig', () => {
       project: 'group/project',
       tokens: { 'self.example.com': 'secret-a' },
       watches: {},
+      events: [],
+      eventSeq: 0,
     });
   });
 
@@ -287,5 +296,145 @@ describe('watches', () => {
     expect((await readConfig(fs, PATH)).watches).toEqual({
       'gitlab.com/group/project': { ref: 'main', addedAt },
     });
+  });
+});
+
+describe('watch errors', () => {
+  const addedAt = '2026-01-02T03:04:05.000Z';
+  const key = 'gitlab.com/group/project';
+
+  test('records a watch error and clears it again', () => {
+    const watched = config({ watches: { [key]: { ref: 'main', addedAt } } });
+    const errored = setWatchError(watched, 'gitlab.com', 'group/project', 'moved');
+    expect(resolveWatch(errored, 'gitlab.com', 'group/project')?.error).toBe('moved');
+    expect(resolveWatch(errored, 'gitlab.com', 'group/project')?.ref).toBe('main');
+    const cleared = clearWatchError(errored, 'gitlab.com', 'group/project');
+    expect(resolveWatch(cleared, 'gitlab.com', 'group/project')).toEqual({ ref: 'main', addedAt });
+  });
+
+  test('leaves a project with no watch alone', () => {
+    const errored = setWatchError(config(), 'gitlab.com', 'group/project', 'moved');
+    expect(errored.watches).toEqual({});
+  });
+
+  test('a watch error round-trips through the config file', async () => {
+    const fs = fakeFs();
+    const watched = config({ watches: { [key]: { ref: 'main', addedAt } } });
+    const errored = setWatchError(watched, 'gitlab.com', 'group/project', 'moved');
+    const saved = await saveConfig(fs, PATH, errored);
+    expect(saved.ok).toBe(true);
+    expect(resolveWatch(await readConfig(fs, PATH), 'gitlab.com', 'group/project')?.error).toBe('moved');
+  });
+
+  test('drops a malformed stored error but keeps the watch', async () => {
+    const stored = JSON.stringify({
+      host: 'gitlab.com',
+      project: '',
+      tokens: {},
+      watches: { [key]: { ref: 'main', addedAt, error: 42 } },
+    });
+    const fs = fakeFs({ [PATH]: { content: stored, mode: 0o600 } });
+    expect(resolveWatch(await readConfig(fs, PATH), 'gitlab.com', 'group/project')).toEqual({
+      ref: 'main',
+      addedAt,
+    });
+  });
+});
+
+describe('the event log', () => {
+  const at = '2026-01-02T03:04:05.000Z';
+  const event = (overrides: Partial<Event> = {}): Event => ({
+    host: 'gitlab.com',
+    project: 'group/project',
+    ref: 'main',
+    pipelineId: 1,
+    status: 'success',
+    at,
+    ...overrides,
+  });
+
+  test('round-trips events and the cursor through the config file, so they survive a restart', async () => {
+    const fs = fakeFs();
+    const stored = config({
+      events: [event(), event({ pipelineId: 2, status: 'failed' })],
+      eventSeq: 2,
+    });
+    const saved = await saveConfig(fs, PATH, stored);
+    expect(saved.ok).toBe(true);
+    expect(await readConfig(fs, PATH)).toEqual(stored);
+  });
+
+  test('reads an older config that has no event fields', async () => {
+    const stored = JSON.stringify({ host: 'gitlab.com', project: '', tokens: {} });
+    const fs = fakeFs({ [PATH]: { content: stored, mode: 0o600 } });
+    const config = await readConfig(fs, PATH);
+    expect(config.events).toEqual([]);
+    expect(config.eventSeq).toBe(0);
+  });
+
+  test('appends an event and advances the cursor', () => {
+    const next = appendEvent(config(), event());
+    expect(next.events).toEqual([event()]);
+    expect(next.eventSeq).toBe(1);
+    expect(eventCursor(next)).toBe(1);
+  });
+
+  test('does not record a second event with an identity already present', () => {
+    const once = appendEvent(config(), event());
+    const twice = appendEvent(once, event());
+    expect(twice.events).toHaveLength(1);
+    expect(twice.eventSeq).toBe(1);
+  });
+
+  test('keeps a distinct identity part of the event apart', () => {
+    const once = appendEvent(config(), event());
+    const next = appendEvent(once, event({ status: 'failed' }));
+    expect(next.events).toHaveLength(2);
+  });
+
+  test('bounds the log, dropping the oldest', () => {
+    let stored = config();
+    for (let i = 1; i <= EVENT_LOG_MAX + 5; i += 1) stored = appendEvent(stored, event({ pipelineId: i }));
+    expect(stored.events).toHaveLength(EVENT_LOG_MAX);
+    expect(stored.events[0]?.pipelineId).toBe(6);
+    expect(stored.events.at(-1)?.pipelineId).toBe(EVENT_LOG_MAX + 5);
+    expect(stored.eventSeq).toBe(EVENT_LOG_MAX + 5);
+  });
+
+  test('reads only the events after a cursor', () => {
+    let stored = config();
+    for (let i = 1; i <= 3; i += 1) stored = appendEvent(stored, event({ pipelineId: i }));
+    expect(eventsAfter(stored, 0).map((e) => e.pipelineId)).toEqual([1, 2, 3]);
+    expect(eventsAfter(stored, 1).map((e) => e.pipelineId)).toEqual([2, 3]);
+    expect(eventsAfter(stored, 3)).toEqual([]);
+  });
+
+  test('reads every retained event when the cursor predates the dropped window', () => {
+    let stored = config();
+    for (let i = 1; i <= EVENT_LOG_MAX + 5; i += 1) stored = appendEvent(stored, event({ pipelineId: i }));
+    expect(eventsAfter(stored, 0)).toHaveLength(EVENT_LOG_MAX);
+  });
+
+  test('drops a malformed stored event but keeps a good one', async () => {
+    const stored = JSON.stringify({
+      host: 'gitlab.com',
+      project: '',
+      tokens: {},
+      events: [
+        event(),
+        { host: 'gitlab.com', project: '', ref: 'main', pipelineId: 1, status: 'success', at },
+        { bad: true },
+      ],
+      eventSeq: 3,
+    });
+    const fs = fakeFs({ [PATH]: { content: stored, mode: 0o600 } });
+    expect((await readConfig(fs, PATH)).events).toEqual([event()]);
+  });
+
+  test('rejects a stored event keyed by a malformed host, writing nothing', async () => {
+    const fs = fakeFs();
+    const result = await saveConfig(fs, PATH, config({ events: [event({ host: 'http://nope' })] }));
+    expect(result.ok).toBe(false);
+    expect(fs.entries[PATH]).toBeUndefined();
   });
 });

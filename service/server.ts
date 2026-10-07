@@ -10,6 +10,7 @@
 
 import type { ConfigFs } from './config';
 import { resolveGitConfig, type GitConfigFs } from './git-config';
+import type { Poller } from './poller';
 import type { ProxyFetch } from './proxy';
 import {
   proxyWithConfig,
@@ -65,6 +66,8 @@ export type ServiceDeps = {
   configPath: string;
   gitConfigFs: GitConfigFs;
   fetchImpl: ProxyFetch;
+  /** The service's background poller, started and stopped by `main.ts`. */
+  poller?: Poller;
 };
 
 export type ServiceResponse = { status: number; body: string };

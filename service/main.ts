@@ -14,6 +14,7 @@ import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
 import { configPath, type ConfigFs } from './config';
 import type { GitConfigFs } from './git-config';
+import { createPoller } from './poller';
 import { handleRequest, parsePort, type ServiceDeps } from './server';
 
 const CONFIG_PATH = configPath(process.env);
@@ -59,6 +60,10 @@ const deps: ServiceDeps = {
   fetchImpl: fetch,
 };
 
+/** The unattended poller runs with the same filesystem and `fetch` as the routes. */
+const poller = createPoller({ fs: configFs, path: CONFIG_PATH, fetchImpl: fetch });
+deps.poller = poller;
+
 const server = createServer((request, response) => {
   // `handleRequest` never rejects: it answers every failure itself.
   void handleRequest(request, deps).then((result) => {
@@ -70,4 +75,13 @@ const server = createServer((request, response) => {
 server.listen(PORT, '127.0.0.1', () => {
   // Only the loopback address and the host-issued port are ever bound.
   process.stdout.write(`proxy listening on 127.0.0.1:${PORT}\n`);
+  poller.start();
 });
+
+/** Stop polling on shutdown, so the process does not wait on the poll timer. */
+function shutdown(): void {
+  poller.stop();
+  server.close(() => process.exit(0));
+}
+process.on('SIGINT', shutdown);
+process.on('SIGTERM', shutdown);
