@@ -294,6 +294,17 @@ html { font-size: 16px !important; }
   cursor: pointer;
 }
 .gp-notice-close:hover { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); color: var(--oc-fg, CanvasText); }
+.gp-notice-action {
+  flex: 0 0 auto;
+  padding: 3px 8px;
+  border: 1px solid var(--oc-border, rgba(127, 127, 127, 0.35));
+  border-radius: var(--oc-radius, 9px);
+  background: transparent;
+  color: var(--oc-fg, CanvasText);
+  font-size: 0.75rem;
+  cursor: pointer;
+}
+.gp-notice-action:hover { background: var(--oc-hover, rgba(127, 127, 127, 0.15)); }
 
 .gp-state { display: flex; flex-direction: column; align-items: center; gap: 8px; padding: 28px 14px; text-align: center; }
 .gp-state-title { margin: 0; font-size: 0.875rem; font-weight: 600; }

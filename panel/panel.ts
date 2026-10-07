@@ -356,6 +356,10 @@ class PipelinesPanel implements PanelHandle {
   private tokenScopesHost: string | null = null;
   /** The one-time notice that the token is read-only; dismissed by hand. */
   private scopeNoticeDismissed = false;
+  /** Refs whose all-refs fallback is suppressed for this session. */
+  private readonly fallbackRefs = new Set<string>();
+  /** The all-refs fallback notice, naming the Ref, until dismissed or reversed. */
+  private fallbackNotice: { ref: string } | null = null;
   /** Whether a write is in flight, so a second click cannot fire one. */
   private actionBusy = false;
   /** The last action's outcome notice, and its auto-dismiss timer. */
@@ -517,6 +521,8 @@ class PipelinesPanel implements PanelHandle {
 
   setScope(scope: Scope): void {
     if (scope === this.scope) return;
+    // A manual scope change suppresses the all-refs fallback for this Ref.
+    if (this.resolved?.ref) this.fallbackRefs.add(this.resolved.ref);
     this.scope = scope;
     this.expandedId = null;
     this.downstreamPath = [];
@@ -690,6 +696,7 @@ class PipelinesPanel implements PanelHandle {
     this.redirectHops = 0;
     this.pendingHealNotice = null;
     this.healNotice = null;
+    this.fallbackNotice = null;
     this.username = null;
     this.usernameHost = null;
     this.invalidateCapability();
@@ -856,8 +863,25 @@ class PipelinesPanel implements PanelHandle {
         void this.loadJobs(gen, resolution.project, this.expandedId, true);
       }
     }
+    if (seedBridges && this.fallBackToAllRefs(resolution)) return;
     this.render();
     this.schedulePoll();
+  }
+
+  /**
+   * On a fresh load in Branch scope with no Pipelines for a known Ref, switch to
+   * All refs once, remembering the Ref for the session. A manual scope change or
+   * the notice's Back to branch action adds the Ref first, so neither re-triggers.
+   * Returns whether it switched, so the caller stops instead of painting twice.
+   */
+  private fallBackToAllRefs(resolution: Extract<ProjectResolution, { ok: true }>): boolean {
+    const ref = resolution.ref;
+    if (this.scope !== 'branch' || ref == null) return false;
+    if (this.pipelines.length > 0 || this.fallbackRefs.has(ref)) return false;
+    this.fallbackRefs.add(ref);
+    this.fallbackNotice = { ref };
+    this.setScope('all');
+    return true;
   }
 
   /**
@@ -1890,6 +1914,8 @@ class PipelinesPanel implements PanelHandle {
     if (handoffNotice) this.root.append(handoffNotice);
     const healNotice = this.renderHealNotice();
     if (healNotice) this.root.append(healNotice);
+    const fallbackNotice = this.renderFallbackNotice();
+    if (fallbackNotice) this.root.append(fallbackNotice);
     const scopeNotice = this.renderScopeNotice();
     if (scopeNotice) this.root.append(scopeNotice);
     const actionNotice = this.renderActionNotice();
@@ -2615,15 +2641,27 @@ class PipelinesPanel implements PanelHandle {
     return button;
   }
 
-  /** The shared shape of every panel notice: text and one Dismiss control. */
+  /** The shared shape of every panel notice: text, an optional action, and Dismiss. */
   private notice(
     text: string,
-    options: { role: 'status' | 'alert'; tone?: string; onDismiss: () => void },
+    options: {
+      role: 'status' | 'alert';
+      tone?: string;
+      action?: { label: string; onClick: () => void };
+      onDismiss: () => void;
+    },
   ): HTMLElement {
     const notice = el('div', 'gp-notice');
     if (options.tone) notice.dataset.tone = options.tone;
     notice.setAttribute('role', options.role);
     notice.append(el('span', 'gp-notice-text', text));
+    if (options.action) {
+      const action = el('button', 'gp-notice-action');
+      action.type = 'button';
+      action.textContent = options.action.label;
+      action.addEventListener('click', options.action.onClick);
+      notice.append(action);
+    }
     const dismiss = el('button', 'gp-notice-close');
     dismiss.type = 'button';
     dismiss.textContent = 'Dismiss';
@@ -2651,6 +2689,27 @@ class PipelinesPanel implements PanelHandle {
     return this.notice(this.handoffError, {
       role: 'alert',
       onDismiss: () => this.finishHandoff(null),
+    });
+  }
+
+  /** The one-time all-refs fallback, naming the Ref and offering a way back. */
+  private renderFallbackNotice(): HTMLElement | null {
+    if (!this.fallbackNotice) return null;
+    const { ref } = this.fallbackNotice;
+    return this.notice(`No pipelines for ${ref}. Showing all refs instead.`, {
+      role: 'status',
+      tone: 'info',
+      action: {
+        label: 'Back to branch',
+        onClick: () => {
+          this.fallbackNotice = null;
+          this.setScope('branch');
+        },
+      },
+      onDismiss: () => {
+        this.fallbackNotice = null;
+        this.render();
+      },
     });
   }
 
