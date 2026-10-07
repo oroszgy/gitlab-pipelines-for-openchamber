@@ -48,9 +48,11 @@ records the transitions it observes, and the service dedupes by identity, so not
 
 ### Watches are service-owned, one per project
 
-The service's configuration gains a watch record keyed by normalized host+project holding one Ref, its
-`addedAt`, and a per-watch watermark. New routes: `GET`/`PUT /watch` (read and set/clear the watch for a
-host+project) and `GET /events` (terminal events after a cursor). Watches are **one per project**:
+The service's configuration gains a watch record keyed by normalized host+project holding one Ref and
+its `addedAt`; the service also keeps one event-log watermark (below). New routes: `GET`/`PUT /watch`
+(read and set/clear the watch for a host+project), `GET /events` (terminal events after a cursor),
+`POST /events` (record a transition a surface observed itself) and `PUT /events/seen` (advance the
+watermark). Watches are **one per project**:
 setting a watch for a project replaces its Ref. Watch and event state persist across a service restart
 (ADR-0011).
 
@@ -60,8 +62,11 @@ setting a watch for a project replaces its Ref. Watch and event state persist ac
 adaptively widening on activity age, and honours `429`/`Retry-After` exactly as
 [`caching-and-transport.md`](caching-and-transport.md) defines. It calls the Pipeline list for
 `ref=<watched ref>` and records a Terminal event for each newly settled Pipeline (identity:
-watch + Pipeline id + Status). It never runs with no watches. It reuses the same caps and redirect
-handling as a proxied call; a moved project is recorded as a watch error rather than followed.
+watch + Pipeline id + Status). It records only Pipelines that settle **after** the watch's `addedAt`,
+so opting into a watch does not replay recent history; a Pipeline already running when the watch is set
+still records when it later settles. It never runs with no watches. It reuses the same caps and redirect
+handling as a proxied call; a moved project is recorded as a watch error rather than followed. A `429`
+pauses the pass: the remaining watched Refs wait for the next one.
 
 ### The event log and watermarks
 
@@ -73,9 +78,12 @@ dedupes by identity so the poller does not record it again.
 
 ### Surfaces
 
-- **Rail panel.** On mount, reads unseen events, recomputes the badge via `setBadge`, advances the seen
-  marker, toasts failed/canceled, and offers a watch toggle for the current project+Ref. Opening the
-  visible rail panel clears the badge (host behaviour) and advances the seen marker.
+- **Rail panel.** While mounted it keeps reading unseen events — on mount, on each Poll, and on its own
+  notification timer, so the badge reflects outcomes that arrive while the Panel is hidden and the
+  Pipeline list has settled — recomputes the badge via `setBadge` from the persisted Unseen count, and
+  toasts failed/canceled. It does not advance the watermark while hidden; opening the visible rail panel
+  clears the badge (host behaviour) and advances the seen marker. It offers a watch toggle for the
+  current project+Ref.
 - **Status section.** A new `contributes.statusSection` entry (its own `status/main.js` +
   `status/index.html`, built alongside the panel and service bundles). It shows the watched Ref, the
   latest Status, the unseen count, and a watch toggle; clicking opens the rail panel. It runs only while
