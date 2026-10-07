@@ -110,8 +110,33 @@ export const defaultTimers: Timers = {
   now: () => Date.now(),
 };
 
+/**
+ * Whether the Panel's frame is actually shown to the user, and a way to hear
+ * when that changes.
+ *
+ * The OpenChamber rail keeps every open tab's panel iframe mounted and hides
+ * the inactive ones with CSS (`display:none`), so a mount is not a visible
+ * open. The Page Visibility API cannot see that switch either: it reports the
+ * top-level document's state, and CSS-hiding an iframe does not fire
+ * `visibilitychange` or change `visibilityState` inside it (MDN, Page
+ * Visibility API). What does track the rendered frame is `IntersectionObserver`:
+ * a `display:none` target intersects nothing, and a nested frame's intersection
+ * is clipped by every ancestor frame. So the default adapter observes the
+ * frame's root element. It is injected so tests drive the signal directly and
+ * a DOM without the observer still degrades to "assumed visible". See ADR-0011.
+ */
+export type SurfaceVisibility = {
+  /** Whether the Panel's frame is on screen right now. */
+  isVisible(): boolean;
+  /** Call `listener` on every change; returns the unsubscribe. */
+  subscribe(listener: (visible: boolean) => void): () => void;
+  dispose(): void;
+};
+
 export type PanelOptions = {
   timers?: Timers;
+  /** The visible-frame signal; defaults to the `IntersectionObserver` adapter. */
+  visibility?: SurfaceVisibility;
 };
 
 export type PanelHandle = {
@@ -279,6 +304,8 @@ class PipelinesPanel implements PanelHandle {
   private readonly root: HTMLElement;
   private readonly port: HostPort;
   private readonly timers: Timers;
+  /** The visible-frame signal, injected so tests drive it. */
+  private readonly visibility: SurfaceVisibility;
 
   private directory: string | null = null;
   private started = false;
@@ -378,7 +405,11 @@ class PipelinesPanel implements PanelHandle {
   /** GitLab's last reported `RateLimit-Remaining`, for pre-emptive widening. */
   private lastRateRemaining: number | null = null;
 
-  /** The Panel's read position in the service's Terminal event log. */
+  /**
+   * The Panel's read position in the service's Terminal event log. It advances
+   * only when the visible Panel marks events seen, so while hidden the same
+   * events are re-read on purpose and their badge survives a reload.
+   */
   private eventCursor = 0;
   /** Identities already toasted, so a re-read of a log the service did not consume never repeats one. */
   private readonly toastedEvents = new Set<string>();
@@ -442,15 +473,66 @@ class PipelinesPanel implements PanelHandle {
 
   private readonly handles: Array<{ dispose(): void }> = [];
   private unsubReady: (() => void) | null = null;
+  private unsubVisibility: (() => void) | null = null;
 
   constructor(root: HTMLElement, port: HostPort, options: PanelOptions) {
     this.root = root;
     this.port = port;
     this.timers = options.timers ?? defaultTimers;
+    this.visibility = options.visibility ?? PipelinesPanel.surfaceVisibility();
+  }
+
+  /**
+   * The real `SurfaceVisibility`, over `IntersectionObserver` on the frame's own
+   * root element. See the type above for why the observer, not
+   * `visibilitychange`, is the seam. Where the observer is missing (an old
+   * engine, or a test DOM) there is no way to tell a hidden tab from a shown
+   * one, so the Panel is assumed visible and keeps the pre-#69 behaviour of
+   * marking events seen.
+   */
+  private static surfaceVisibility(doc: Document = document): SurfaceVisibility {
+    const listeners = new Set<(visible: boolean) => void>();
+    const view = doc.defaultView as
+      | (Window & { IntersectionObserver?: typeof IntersectionObserver })
+      | null;
+    const Observer = view?.IntersectionObserver;
+    let visible = !Observer;
+    let observer: IntersectionObserver | null = null;
+    const emit = (next: boolean): void => {
+      if (next === visible) return;
+      visible = next;
+      for (const listener of [...listeners]) listener(next);
+    };
+    const root = doc.documentElement;
+    if (Observer && root) {
+      observer = new Observer(
+        (entries) => {
+          const entry = entries[entries.length - 1];
+          if (entry) emit(entry.isIntersecting);
+        },
+        { root: null, threshold: 0 },
+      );
+      observer.observe(root);
+    }
+    return {
+      isVisible: () => visible,
+      subscribe: (listener) => {
+        listeners.add(listener);
+        return () => {
+          listeners.delete(listener);
+        };
+      },
+      dispose: () => {
+        observer?.disconnect();
+        observer = null;
+        listeners.clear();
+      },
+    };
   }
 
   start(): PanelHandle {
     this.unsubReady = this.port.onReady((ctx) => this.handleReady(ctx));
+    this.unsubVisibility = this.visibility.subscribe((visible) => this.handleVisibility(visible));
     this.render();
     return this;
   }
@@ -576,6 +658,8 @@ class PipelinesPanel implements PanelHandle {
     if (this.traceFindTimer != null) this.timers.clearTimeout(this.traceFindTimer);
     this.disposeTraceIndexer();
     this.unsubReady?.();
+    this.unsubVisibility?.();
+    this.visibility.dispose();
     this.disposeHandles();
     clearNode(this.root);
     this.port.dispose();
@@ -2080,12 +2164,21 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /**
-   * Read the Terminal events after the Panel's cursor, badge the Unseen count,
-   * toast each failed/canceled event once, and advance the service's watermark
-   * to the cursor consumed. Success is badge-only. Consuming advances the
-   * watermark, so a later read does not repeat an event. When the service has no
-   * watermark route (an older service) the cursor stays put and the local set of
-   * toasted identities still keeps toasts from repeating.
+   * Read the Terminal events after the Panel's cursor and toast each
+   * failed/canceled event once. What it does with the watermark depends on
+   * whether the Panel is on screen:
+   *
+   * - Not visibly open: set the badge from the service's persisted Unseen count
+   *   and leave the watermark where it is, so a reload (or the next Poll)
+   *   re-reads the same events and rebuilds the same badge. Advancing here
+   *   would erase the Unseen events for every other surface — the #67 bug.
+   * - Visibly open: the user is looking at the Panel, so the events are seen:
+   *   clear the badge and advance the service watermark to the cursor read.
+   *
+   * Success is badge-only. The local set of toasted identities never repeats
+   * one, so a re-read while hidden still toasts each failure just once. When
+   * the service has no watermark route (an older service) the cursor stays put
+   * and the local set still keeps toasts from repeating.
    */
   private async consumeEvents(
     gen: number,
@@ -2103,14 +2196,46 @@ class PipelinesPanel implements PanelHandle {
       this.toastedEvents.add(identity);
       void this.notifyFailure(event);
     }
-    void this.port.setBadge(view.unseen).catch(() => {
+    if (this.visibility.isVisible()) {
+      this.setBadge(0);
+      await this.markSeen(view.cursor, gen);
+    } else {
+      this.setBadge(view.unseen);
+    }
+  }
+
+  /**
+   * Advance the service watermark to a cursor the visible Panel has read, so
+   * every surface agrees those events are seen. A failed write leaves the
+   * cursor put, so the next read retries it.
+   */
+  private async markSeen(cursor: number, gen: number): Promise<void> {
+    if (cursor <= this.eventCursor) return;
+    const seen = await putSeen(this.sender(), cursor);
+    if (this.disposed || gen !== this.generation) return;
+    if (seen) this.eventCursor = cursor;
+  }
+
+  /** Set the rail badge, best-effort: a host that refuses one is not a Panel failure. */
+  private setBadge(count: number): void {
+    void this.port.setBadge(count).catch(() => {
       // A host that refuses a badge is not a Panel failure.
     });
-    if (view.cursor > this.eventCursor) {
-      const seen = await putSeen(this.sender(), view.cursor);
-      if (this.disposed || gen !== this.generation) return;
-      if (seen) this.eventCursor = view.cursor;
-    }
+  }
+
+  /**
+   * The frame became visible (or hid). On becoming visible, read and mark the
+   * events seen at once: a settled view may have stopped polling, and the host
+   * clears its badge when the panel is mounted, not on each tab switch. Hiding
+   * needs no action. Ignored until the view is resolved; the mount read covers
+   * a frame already visible when the Panel started.
+   */
+  private handleVisibility(visible: boolean): void {
+    if (!visible || this.disposed || !this.started) return;
+    const host = this.config?.host;
+    const resolution = this.resolved;
+    if (!host || !resolution) return;
+    void this.consumeEvents(this.generation, host, resolution);
   }
 
   /** Whether an event belongs to the resolved host+project, and the Ref when one is known. */

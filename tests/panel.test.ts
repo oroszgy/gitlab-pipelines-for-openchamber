@@ -1,7 +1,12 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { HOST_BODY_CAP, LOG_MAX_LINES, POLL_INTERVAL_MS } from '../panel/config';
 import type { HostRequest, HostResponse } from '../panel/host-port';
-import { isAtBottom, mountPanel, type PanelHandle } from '../panel/panel';
+import {
+  isAtBottom,
+  mountPanel,
+  type PanelHandle,
+  type SurfaceVisibility,
+} from '../panel/panel';
 import type { Bridge, Job, Pipeline } from '../panel/types';
 import {
   FakeHost,
@@ -72,14 +77,40 @@ function sliceTrace(full: string, request: HostRequest): string {
   return full.slice(offset, offset + limit);
 }
 
+/**
+ * A visibility fake. The Panel starts hidden; a test calls `set(true)` to
+ * simulate the user opening the visible rail panel.
+ */
+function visibility(
+  visible = false,
+): SurfaceVisibility & { set(visible: boolean): void } {
+  let current = visible;
+  const listeners = new Set<(visible: boolean) => void>();
+  return {
+    isVisible: () => current,
+    subscribe: (listener) => {
+      listeners.add(listener);
+      return () => listeners.delete(listener);
+    },
+    dispose: () => listeners.clear(),
+    set(next) {
+      if (next === current) return;
+      current = next;
+      for (const listener of [...listeners]) listener(next);
+    },
+  };
+}
+
 async function mount(
   host: FakeHost,
   timers: FakeTimers,
   ready = readyContext(),
+  surface: SurfaceVisibility = visibility(),
 ): Promise<{ root: HTMLElement; panel: PanelHandle }> {
   const root = document.createElement('div');
   document.body.append(root);
-  const panel = mountPanel(root, host, { timers });  host.emitReady(ready);
+  const panel = mountPanel(root, host, { timers, visibility: surface });
+  host.emitReady(ready);
   await flush();
   return { root, panel };
 }
@@ -3293,12 +3324,32 @@ describe('notifications through the service', () => {
     return host.serviceRequests.filter((request) => request.path === '/watch' && request.method === 'PUT');
   }
 
-  test('unseen events set the badge to the service unseen count', async () => {
+  function seenWrites(host: FakeHost): HostRequest[] {
+    return host.serviceRequests.filter((request) => request.path === '/events/seen');
+  }
+
+  test('persisted unseen events rebuild the badge without advancing the watermark', async () => {
     const host = notifiedHost();
     host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
     host.recordEvent(terminalEvent({ pipelineId: 2, status: 'success' }));
     await mount(host, new FakeTimers());
     expect(host.badges).toContain(2);
+    expect(seenWrites(host)).toHaveLength(0);
+    expect(host.seen).toBe(0);
+  });
+
+  test('a reload rebuilds the badge from the persisted events', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
+    const first = await mount(host, new FakeTimers());
+    expect(host.badges).toContain(1);
+    first.panel.dispose();
+
+    host.badges.length = 0;
+    await mount(host, new FakeTimers());
+    expect(host.badges).toContain(1);
+    expect(seenWrites(host)).toHaveLength(0);
+    expect(host.seen).toBe(0);
   });
 
   test('toasts failed and canceled events but never success', async () => {
@@ -3319,13 +3370,40 @@ describe('notifications through the service', () => {
     expect(host.toasts).toHaveLength(0);
   });
 
-  test('consuming events advances the watermark once', async () => {
+  test('the visible rail panel clears the badge and marks events seen', async () => {
     const host = notifiedHost();
     host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
-    await mount(host, new FakeTimers());
-    const seen = host.serviceRequests.filter((request) => request.path === '/events/seen');
+    const surface = visibility();
+    await mount(host, new FakeTimers(), readyContext(), surface);
+    expect(host.badges.at(-1)).toBe(1);
+    expect(seenWrites(host)).toHaveLength(0);
+
+    // The user opens the visible rail panel: its frame becomes visible.
+    surface.set(true);
+    await flush();
+
+    const seen = seenWrites(host);
     expect(seen).toHaveLength(1);
     expect(JSON.parse(seen[0]?.body ?? '{}')).toEqual({ cursor: 1 });
+    expect(host.seen).toBe(1);
+    expect(host.badges.at(-1)).toBe(0);
+  });
+
+  test('a hidden mount and poll leave the watermark and the badge alone', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
+    const surface = visibility();
+    const timers = new FakeTimers();
+    await mount(host, timers, readyContext(), surface);
+    expect(host.badges.at(-1)).toBe(1);
+    expect(seenWrites(host)).toHaveLength(0);
+
+    timers.advance(POLL_INTERVAL_MS);
+    await flush();
+
+    expect(seenWrites(host)).toHaveLength(0);
+    expect(host.seen).toBe(0);
+    expect(host.badges.at(-1)).toBe(1);
   });
 
   test('a poll re-reads events without a duplicate toast', async () => {
@@ -3344,7 +3422,7 @@ describe('notifications through the service', () => {
     host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
     // A service with no watermark route: the event stays past the cursor.
     host.seenUnsupported = true;
-    const { panel } = await mount(host, new FakeTimers());
+    const { panel } = await mount(host, new FakeTimers(), readyContext(), visibility(true));
     expect(host.toasts).toHaveLength(1);
     panel.refresh();
     await flush();
