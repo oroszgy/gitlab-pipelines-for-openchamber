@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { PANEL_ID } from './config';
 import { mountStatusSection } from './status-section';
-import { FakeHost, flush, olderService, readyContext, terminalEvent } from '../tests/fakes';
+import { FakeHost, flush, olderService, readyContext, terminalEvent, themeTokens } from '../tests/fakes';
 
 afterEach(() => {
   document.body.replaceChildren();
+  document.documentElement.removeAttribute('style');
 });
 
 /**
@@ -45,6 +46,16 @@ describe('status section', () => {
     expect(text(root)).toContain('main');
     expect(text(root)).toContain('Failed');
     expect(text(root)).toContain('1 unseen');
+  });
+
+  test('adopts the host theme, so it renders in the app font and colours', async () => {
+    const host = statusHost();
+    await mount(host);
+
+    // Its own document never inherits the host's font; the theme must be painted.
+    expect(document.documentElement.style.getPropertyValue('--oc-font')).toBe(themeTokens().font);
+    expect(document.documentElement.style.fontFamily).toContain('system-ui');
+    expect(document.documentElement.style.getPropertyValue('--oc-success')).toBe(themeTokens().success);
   });
 
   test('the toggle clears the watch through PUT /watch, without opening the panel', async () => {

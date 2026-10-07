@@ -2550,7 +2550,10 @@ class PipelinesPanel implements PanelHandle {
       const trigger = watchRoot.querySelector('button');
       trigger?.setAttribute('aria-pressed', watching ? 'true' : 'false');
       if (older) {
-        trigger?.setAttribute('title', 'This Proxy service is older and cannot watch Pipelines.');
+        trigger?.setAttribute(
+          'title',
+          'The Proxy service is older and cannot watch Pipelines. Restart OpenChamber to update it.',
+        );
       } else if (watchError) {
         trigger?.setAttribute('title', watchError);
       }
@@ -3330,7 +3333,7 @@ class PipelinesPanel implements PanelHandle {
   private renderOlderServiceNotice(): HTMLElement | null {
     if (!this.olderService || this.olderServiceNoticeDismissed) return null;
     return this.notice(
-      'The Proxy service is older and cannot watch Pipelines. Update the service to enable watching.',
+      'The Proxy service is older and cannot watch Pipelines. Restart OpenChamber, or disable and re-enable this extension, to update the service.',
       {
         role: 'status',
         tone: 'info',

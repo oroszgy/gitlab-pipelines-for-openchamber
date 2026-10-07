@@ -11,6 +11,7 @@
  */
 
 import type { HostReadyContext } from '@openchamber/sdk';
+import { applyHostReady } from '@openchamber/sdk/ui';
 import { PANEL_ID, SERVICE_CONFIG_PATH } from './config';
 import type { HostPort, HostResponse } from './host-port';
 import {
@@ -30,6 +31,7 @@ import { resolveProject, samePath, type ResolveInput } from './project-resolver'
 
 /** The Status frame's own styling; the section ships as its own bundle. */
 export const STATUS_SECTION_CSS = `
+html, body { margin: 0; }
 .gps { display: flex; flex-direction: column; gap: 6px; padding: 8px 10px; font: inherit; cursor: pointer; }
 .gps-row { display: flex; align-items: center; gap: 8px; min-width: 0; }
 .gps-ref { font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
@@ -131,7 +133,10 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
     button.setAttribute('aria-pressed', watching ? 'true' : 'false');
     button.disabled = busy || context.ref == null || unsupported;
     if (unsupported) {
-      button.setAttribute('title', 'This Proxy service is older and cannot watch Pipelines.');
+      button.setAttribute(
+        'title',
+        'The Proxy service is older and cannot watch Pipelines. Restart OpenChamber to update it.',
+      );
     }
     button.addEventListener('click', (event) => {
       // The whole section opens the panel; the toggle is not that click.
@@ -142,7 +147,9 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
 
     root.append(row);
     if (unsupported) {
-      root.append(span('gps-hint', 'The Proxy service is older and cannot watch Pipelines.'));
+      root.append(
+        span('gps-hint', 'The Proxy service is older and cannot watch Pipelines. Restart OpenChamber to update it.'),
+      );
     }
   }
 
@@ -203,6 +210,9 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
 
   async function load(ctx: HostReadyContext): Promise<void> {
     if (ctx.surface !== 'status') return;
+    // The section is its own document, so it does not inherit the host's font
+    // or colours: paint the host theme onto the root, as the rail panel does.
+    applyHostReady(ctx, document.documentElement);
     directory = ctx.directory;
     let response: HostResponse;
     try {

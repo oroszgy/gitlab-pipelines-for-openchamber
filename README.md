@@ -130,6 +130,11 @@ from the repository. A source change must regenerate and commit them; the pre-co
 stages them for you. To iterate, point **Settings → Extensions** at this folder once, then rebuild and
 reload the panel after each change.
 
+The Proxy service is a **long-lived process**, so reloading the panel does not reload it. After a
+change under `service/`, rebuild and then restart it — disable and re-enable the extension in
+**Settings → Extensions**, or restart OpenChamber — otherwise the panel keeps talking to the old
+service (the watch routes, for example, read as a service "older" than the panel).
+
 ## License
 
 [MIT](LICENSE) © 2026 György Orosz.

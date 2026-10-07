@@ -7,6 +7,15 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.12.1] - 2026-10-07
+
+### Fixed
+
+- The Work Status **Status section** now follows the host theme, so it renders in OpenChamber's font
+  and colours instead of the iframe's browser default.
+- When the Proxy service predates the watch routes, the explanation now says how to update it —
+  restart OpenChamber, or disable and re-enable the extension — instead of "update the service".
+
 ## [0.12.0] - 2026-10-07
 
 ### Added
