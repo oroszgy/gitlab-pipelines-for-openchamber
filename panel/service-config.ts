@@ -264,73 +264,97 @@ function serviceOk(response: HostResponse): boolean {
 }
 
 /**
- * Read the Watched Ref for a host+project. Null on any transport failure or a
- * service too old to know the route (a 404), so the Panel degrades quietly
- * rather than breaking (degradation is refined in notifications/07).
+ * Why a notifications call returned no payload. A service built before the
+ * notifications routes existed answers `404`, which is `older-service`; every
+ * other failure — a transport error, a non-2xx, an unparseable body — is
+ * `unavailable`. Callers degrade on the former and stay quiet on the latter.
  */
-export async function getWatch(
+export type NotificationsFailure = 'older-service' | 'unavailable';
+
+/** The outcome of a notifications call: its payload, or the reason there is none. */
+export type NotificationsResult<T> =
+  | { ok: true; value: T }
+  | { ok: false; failure: NotificationsFailure };
+
+/** Whether a notifications result failed because the service predates the routes. */
+export function isOlderService<T>(result: NotificationsResult<T>): boolean {
+  return !result.ok && result.failure === 'older-service';
+}
+
+/**
+ * The one place a notifications call is made: send it, then map a `404` to an
+ * older service and any other failure to an ordinary one. The parser stays pure
+ * and only runs on a success.
+ */
+async function notificationsCall<T>(
+  send: ServiceSender,
+  request: HostRequest,
+  parse: (body: string) => T | null,
+): Promise<NotificationsResult<T>> {
+  let response: HostResponse;
+  try {
+    response = await send(request);
+  } catch {
+    return { ok: false, failure: 'unavailable' };
+  }
+  if (response.status === 404) return { ok: false, failure: 'older-service' };
+  if (!serviceOk(response)) return { ok: false, failure: 'unavailable' };
+  const value = parse(response.body);
+  if (value === null) return { ok: false, failure: 'unavailable' };
+  return { ok: true, value };
+}
+
+/**
+ * Read the Watched Ref for a host+project. An older service answers `404` (its
+ * `older-service` result), so the Panel can explain rather than fail; any other
+ * failure leaves the notification state as it was.
+ */
+export function getWatch(
   send: ServiceSender,
   host: string,
   project: string,
-): Promise<{ watch: WatchedRef | null } | null> {
-  try {
-    const response = await send({ method: 'GET', path: SERVICE_WATCH_PATH, query: { host, project } });
-    if (!serviceOk(response)) return null;
-    return parseWatchEnvelope(response.body);
-  } catch {
-    return null;
-  }
+): Promise<NotificationsResult<{ watch: WatchedRef | null }>> {
+  return notificationsCall(
+    send,
+    { method: 'GET', path: SERVICE_WATCH_PATH, query: { host, project } },
+    parseWatchEnvelope,
+  );
 }
 
-/** Set (`ref`) or clear (`null`) the Watched Ref for a host+project; null when the write did not land. */
-export async function putWatch(
+/** Set (`ref`) or clear (`null`) the Watched Ref for a host+project. */
+export function putWatch(
   send: ServiceSender,
   host: string,
   project: string,
   ref: string | null,
-): Promise<{ watch: WatchedRef | null } | null> {
-  try {
-    const response = await send({
-      method: 'PUT',
-      path: SERVICE_WATCH_PATH,
-      body: JSON.stringify({ host, project, ref }),
-    });
-    if (!serviceOk(response)) return null;
-    return parseWatchEnvelope(response.body);
-  } catch {
-    return null;
-  }
+): Promise<NotificationsResult<{ watch: WatchedRef | null }>> {
+  return notificationsCall(
+    send,
+    { method: 'PUT', path: SERVICE_WATCH_PATH, body: JSON.stringify({ host, project, ref }) },
+    parseWatchEnvelope,
+  );
 }
 
-/** Read the Terminal events after a cursor; null on any transport failure or an unknown route. */
-export async function getEvents(
+/** Read the Terminal events after a cursor; an `older-service` result means the route is absent. */
+export function getEvents(
   send: ServiceSender,
   after: number,
-): Promise<TerminalEventView | null> {
-  try {
-    const response = await send({
-      method: 'GET',
-      path: SERVICE_EVENTS_PATH,
-      query: { after: String(after) },
-    });
-    if (!serviceOk(response)) return null;
-    return parseEventsEnvelope(response.body);
-  } catch {
-    return null;
-  }
+): Promise<NotificationsResult<TerminalEventView>> {
+  return notificationsCall(
+    send,
+    { method: 'GET', path: SERVICE_EVENTS_PATH, query: { after: String(after) } },
+    parseEventsEnvelope,
+  );
 }
 
-/** Advance the seen watermark to a cursor; null when the write did not land. */
-export async function putSeen(send: ServiceSender, cursor: number): Promise<SeenMarker | null> {
-  try {
-    const response = await send({
-      method: 'PUT',
-      path: SERVICE_EVENTS_SEEN_PATH,
-      body: JSON.stringify({ cursor }),
-    });
-    if (!serviceOk(response)) return null;
-    return parseSeenEnvelope(response.body);
-  } catch {
-    return null;
-  }
+/** Advance the seen watermark to a cursor. */
+export function putSeen(
+  send: ServiceSender,
+  cursor: number,
+): Promise<NotificationsResult<SeenMarker>> {
+  return notificationsCall(
+    send,
+    { method: 'PUT', path: SERVICE_EVENTS_SEEN_PATH, body: JSON.stringify({ cursor }) },
+    parseSeenEnvelope,
+  );
 }

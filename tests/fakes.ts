@@ -290,6 +290,28 @@ export class FakeHost implements HostPort {
   }
 }
 
+/**
+ * Make a host answer as a service that predates the notifications routes: a
+ * `404` on `/watch` and every `/events*` route, with every other route left as
+ * the modelled service answers it. An older service is what a Panel from a
+ * newer version talks to; see the notifications spec, "Degradation".
+ */
+export function olderService(host: FakeHost): void {
+  const fallthrough = host.serviceRequest.bind(host);
+  const handler: RequestHandler = (request) => {
+    if (request.path.startsWith('/watch') || request.path.startsWith('/events')) {
+      return { status: 404, body: JSON.stringify({ error: 'not found' }) };
+    }
+    // The fake reads `serviceHandler` before awaiting, so clearing it for the
+    // duration of the call lets the modelled service answer, with no recursion.
+    host.serviceHandler = null;
+    const answer = fallthrough(request);
+    host.serviceHandler = handler;
+    return answer;
+  };
+  host.serviceHandler = handler;
+}
+
 type Timer = { id: number; fn: () => void; at: number; every: number | null };
 
 /** Deterministic clock + timer queue. The panel is driven by this in tests. */

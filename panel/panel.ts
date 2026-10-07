@@ -63,6 +63,7 @@ import {
   getWatch,
   hasToken,
   isFailureEvent,
+  isOlderService,
   normalizeHostInput,
   parseConfigEnvelope,
   parseProxyEnvelope,
@@ -419,6 +420,10 @@ class PipelinesPanel implements PanelHandle {
   private watchKey: string | null = null;
   /** Whether a watch write is in flight, so a second click cannot double it. */
   private watchBusy = false;
+  /** Whether the service predates the notifications routes (a 404), so watching cannot work. */
+  private olderService = false;
+  /** Whether the older-service notice was dismissed by hand for this mount. */
+  private olderServiceNoticeDismissed = false;
 
   private generation = 0;
   private pollTimer: number | null = null;
@@ -2156,7 +2161,8 @@ class PipelinesPanel implements PanelHandle {
       this.watch = null;
       const result = await getWatch(this.sender(), host, resolution.project);
       if (this.disposed || gen !== this.generation) return;
-      this.watch = result?.watch ?? null;
+      if (result.ok) this.watch = result.value.watch;
+      else if (isOlderService(result)) this.olderService = true;
     }
     await this.consumeEvents(gen, host, resolution);
     if (this.disposed || gen !== this.generation) return;
@@ -2185,9 +2191,13 @@ class PipelinesPanel implements PanelHandle {
     host: string,
     resolution: { project: string; ref: string | null },
   ): Promise<void> {
-    const view = await getEvents(this.sender(), this.eventCursor);
+    const result = await getEvents(this.sender(), this.eventCursor);
     if (this.disposed || gen !== this.generation) return;
-    if (!view) return;
+    if (!result.ok) {
+      if (isOlderService(result)) this.olderService = true;
+      return;
+    }
+    const view = result.value;
     for (const event of view.events) {
       if (!this.isCurrentEvent(event, host, resolution)) continue;
       if (!isFailureEvent(event)) continue;
@@ -2213,7 +2223,8 @@ class PipelinesPanel implements PanelHandle {
     if (cursor <= this.eventCursor) return;
     const seen = await putSeen(this.sender(), cursor);
     if (this.disposed || gen !== this.generation) return;
-    if (seen) this.eventCursor = cursor;
+    if (seen.ok) this.eventCursor = cursor;
+    else if (isOlderService(seen)) this.olderService = true;
   }
 
   /** Set the rail badge, best-effort: a host that refuses one is not a Panel failure. */
@@ -2268,7 +2279,7 @@ class PipelinesPanel implements PanelHandle {
     const host = this.config?.host;
     const resolution = this.resolved;
     const ref = resolution?.ref ?? null;
-    if (this.watchBusy || !host || !resolution || !ref) return;
+    if (this.watchBusy || this.olderService || !host || !resolution || !ref) return;
     const watching = this.watch?.ref === ref;
     this.watchBusy = true;
     this.render();
@@ -2278,7 +2289,9 @@ class PipelinesPanel implements PanelHandle {
   private async writeWatch(host: string, project: string, ref: string | null): Promise<void> {
     try {
       const result = await putWatch(this.sender(), host, project, ref);
-      if (!this.disposed && result) this.watch = result.watch;
+      if (this.disposed) return;
+      if (result.ok) this.watch = result.value.watch;
+      else if (isOlderService(result)) this.olderService = true;
     } finally {
       this.watchBusy = false;
       if (!this.disposed) this.render();
@@ -2340,6 +2353,8 @@ class PipelinesPanel implements PanelHandle {
     if (actionNotice) this.root.append(actionNotice);
     const rateNotice = this.renderRateLimitNotice();
     if (rateNotice) this.root.append(rateNotice);
+    const olderNotice = this.renderOlderServiceNotice();
+    if (olderNotice) this.root.append(olderNotice);
 
     this.scrollEl = el('div', 'gp-scroll');
     const pad = el('div', 'gp-pad');
@@ -2426,16 +2441,22 @@ class PipelinesPanel implements PanelHandle {
     if (this.resolved && ref) {
       const watching = this.watch != null && this.watch.ref === ref;
       const watchRoot = el('div', 'gp-watch');
+      const older = this.olderService;
       this.handles.push(
         mountButton(watchRoot, {
           label: watching ? 'Watching' : 'Watch',
           variant: watching ? 'default' : 'outline',
           size: 'sm',
-          disabled: this.watchBusy,
+          disabled: this.watchBusy || older,
           onClick: () => this.toggleWatch(),
         }),
       );
       watchRoot.querySelector('button')?.setAttribute('aria-pressed', watching ? 'true' : 'false');
+      if (older) {
+        watchRoot
+          .querySelector('button')
+          ?.setAttribute('title', 'This Proxy service is older and cannot watch Pipelines.');
+      }
       row.append(watchRoot);
     }
 
@@ -3191,6 +3212,26 @@ class PipelinesPanel implements PanelHandle {
         tone: 'info',
         onDismiss: () => {
           this.rateLimitNoticeDismissed = true;
+          this.render();
+        },
+      },
+    );
+  }
+
+  /**
+   * A service older than the notifications routes answers `404`, so the Panel
+   * cannot offer a watch. Say so, and leave everything else working; the notice
+   * is dismissible but the toggle stays disabled for the mount.
+   */
+  private renderOlderServiceNotice(): HTMLElement | null {
+    if (!this.olderService || this.olderServiceNoticeDismissed) return null;
+    return this.notice(
+      'The Proxy service is older and cannot watch Pipelines. Update the service to enable watching.',
+      {
+        role: 'status',
+        tone: 'info',
+        onDismiss: () => {
+          this.olderServiceNoticeDismissed = true;
           this.render();
         },
       },

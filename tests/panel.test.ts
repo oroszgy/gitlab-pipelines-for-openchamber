@@ -16,6 +16,7 @@ import {
   downstreamPipeline,
   flush,
   job,
+  olderService,
   pipeline,
   readyContext,
   terminalEvent,
@@ -3458,6 +3459,31 @@ describe('notifications through the service', () => {
       ref: null,
     });
     expect(watchToggle(root).textContent?.trim()).toBe('Watch');
+  });
+
+  test('an older service disables the watch toggle and says it is out of date', async () => {
+    const host = notifiedHost();
+    olderService(host);
+    const { root, panel } = await mount(host, new FakeTimers());
+
+    // The watch UI is disabled, with the reason on screen, not a crash.
+    expect(watchToggle(root).disabled).toBe(true);
+    expect(text(root)).toContain('older');
+
+    // The rest of the Panel is untouched: pipelines render and Poll keeps running.
+    expect(root.querySelectorAll('.gp-row').length).toBeGreaterThan(0);
+    expect(panel.isPolling()).toBe(true);
+  });
+
+  test('a disabled watch toggle on an older service writes nothing', async () => {
+    const host = notifiedHost();
+    olderService(host);
+    const { root } = await mount(host, new FakeTimers());
+
+    watchToggle(root).click();
+    await flush();
+
+    expect(watchWrites(host)).toHaveLength(0);
   });
 });
 

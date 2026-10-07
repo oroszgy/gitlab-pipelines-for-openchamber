@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, test } from 'bun:test';
 import { PANEL_ID } from './config';
 import { mountStatusSection } from './status-section';
-import { FakeHost, flush, readyContext, terminalEvent } from '../tests/fakes';
+import { FakeHost, flush, olderService, readyContext, terminalEvent } from '../tests/fakes';
 
 afterEach(() => {
   document.body.replaceChildren();
@@ -89,5 +89,15 @@ describe('status section', () => {
     expect(host.badges).toEqual([]);
     expect(host.seen).toBe(0);
     expect(host.serviceRequests.some((request) => request.path === '/events/seen')).toBe(false);
+  });
+
+  test('an older service disables the toggle and says it is out of date', async () => {
+    const host = statusHost();
+    olderService(host);
+    const { root } = await mount(host);
+
+    const button = root.querySelector('button') as HTMLButtonElement;
+    expect(button.disabled).toBe(true);
+    expect(text(root)).toContain('older');
   });
 });

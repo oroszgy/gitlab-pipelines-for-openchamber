@@ -17,6 +17,7 @@ import {
   parseConfigEnvelope,
   getEvents,
   getWatch,
+  isOlderService,
   putWatch,
   type ServiceConfig,
   type ServiceSender,
@@ -62,6 +63,8 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
   let view: TerminalEventView | null = null;
   let busy = false;
   let problem: string | null = null;
+  /** Whether the service predates the notifications routes, so watching cannot work. */
+  let unsupported = false;
 
   const sender: ServiceSender = (input) => port.serviceRequest(input);
 
@@ -126,7 +129,10 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
     button.className = 'gps-toggle';
     button.textContent = watching ? 'Watching' : 'Watch';
     button.setAttribute('aria-pressed', watching ? 'true' : 'false');
-    button.disabled = busy || context.ref == null;
+    button.disabled = busy || context.ref == null || unsupported;
+    if (unsupported) {
+      button.setAttribute('title', 'This Proxy service is older and cannot watch Pipelines.');
+    }
     button.addEventListener('click', (event) => {
       // The whole section opens the panel; the toggle is not that click.
       event.stopPropagation();
@@ -135,11 +141,14 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
     row.append(button);
 
     root.append(row);
+    if (unsupported) {
+      root.append(span('gps-hint', 'The Proxy service is older and cannot watch Pipelines.'));
+    }
   }
 
   /** Set or clear the watch: on clears it, off sets it to the current Ref. */
   async function toggle(): Promise<void> {
-    if (busy || !config || !context) return;
+    if (busy || unsupported || !config || !context) return;
     const ref = context.ref;
     if (!ref) return;
     const watching = watch != null && watch.ref === ref;
@@ -147,7 +156,9 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
     render();
     try {
       const result = await putWatch(sender, config.host, context.project, watching ? null : ref);
-      if (!disposed && result) watch = result.watch;
+      if (disposed) return;
+      if (result.ok) watch = result.value.watch;
+      else if (isOlderService(result)) unsupported = true;
     } finally {
       busy = false;
       if (!disposed) render();
@@ -220,9 +231,12 @@ export function mountStatusSection(root: HTMLElement, port: HostPort): StatusSec
     context = derived;
     const watchResult = await getWatch(sender, parsed.host, derived.project);
     if (disposed) return;
-    watch = watchResult?.watch ?? null;
-    view = await getEvents(sender, 0);
+    if (watchResult.ok) watch = watchResult.value.watch;
+    else if (isOlderService(watchResult)) unsupported = true;
+    const eventsResult = await getEvents(sender, 0);
     if (disposed) return;
+    if (eventsResult.ok) view = eventsResult.value;
+    else if (isOlderService(eventsResult)) unsupported = true;
     render();
   }
 
