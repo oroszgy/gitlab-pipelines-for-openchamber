@@ -58,12 +58,21 @@ import {
   type ResolveInput,
 } from './project-resolver';
 import {
+  eventIdentity,
+  getEvents,
+  getWatch,
   hasToken,
+  isFailureEvent,
   normalizeHostInput,
   parseConfigEnvelope,
   parseProxyEnvelope,
+  putSeen,
+  putWatch,
   serviceErrorMessage,
   type ServiceConfig,
+  type ServiceSender,
+  type TerminalEvent,
+  type WatchedRef,
 } from './service-config';
 import { groupJobsByStage, type StageGroup } from './stage-groups';
 import { isActiveStatus, jobStatusInfo, statusInfo, type StatusInfo } from './status';
@@ -369,6 +378,17 @@ class PipelinesPanel implements PanelHandle {
   /** GitLab's last reported `RateLimit-Remaining`, for pre-emptive widening. */
   private lastRateRemaining: number | null = null;
 
+  /** The Panel's read position in the service's Terminal event log. */
+  private eventCursor = 0;
+  /** Identities already toasted, so a re-read of a log the service did not consume never repeats one. */
+  private readonly toastedEvents = new Set<string>();
+  /** The Watched Ref for the current host+project, once read; null when none is set. */
+  private watch: WatchedRef | null = null;
+  /** The host+project the current `watch` belongs to, so a view change re-reads it. */
+  private watchKey: string | null = null;
+  /** Whether a watch write is in flight, so a second click cannot double it. */
+  private watchBusy = false;
+
   private generation = 0;
   private pollTimer: number | null = null;
   private tickTimer: number | null = null;
@@ -611,6 +631,7 @@ class PipelinesPanel implements PanelHandle {
     await this.loadTokenScopes(gen, host);
     if (this.disposed || gen !== this.generation) return;
     this.ensureCapability(gen, this.resolved.project);
+    void this.loadNotifications(gen, this.resolved);
     await this.loadPipelines(gen, this.resolved, true);
   }
 
@@ -712,6 +733,9 @@ class PipelinesPanel implements PanelHandle {
     this.fallbackRefs.clear();
     this.username = null;
     this.usernameHost = null;
+    // The watch belongs to the previous host+project; re-read it for the new one.
+    this.watch = null;
+    this.watchKey = null;
     this.invalidateCapability();
   }
 
@@ -1780,6 +1804,7 @@ class PipelinesPanel implements PanelHandle {
     this.redirectHops = 0;
     await this.loadPipelines(gen, this.resolved);
     if (gen !== this.generation) return;
+    void this.loadNotifications(gen, this.resolved);
     this.refreshOpenTrace(gen);
     await this.refetchVisible(gen);
     // `loadPipelines` armed the next poll from the *pre-refetch* statuses. Now
@@ -2022,6 +2047,119 @@ class PipelinesPanel implements PanelHandle {
     this.rateLimitNoticeDismissed = false;
   }
 
+  // -- notifications --------------------------------------------------------
+
+  /** The service sender the notifications wrappers go through. */
+  private sender(): ServiceSender {
+    return (input) => this.port.serviceRequest(input);
+  }
+
+  /**
+   * Read the Watched Ref (once per host+project) and consume the Unseen Terminal
+   * events for the resolved view. Runs on mount and on every Poll while mounted.
+   * Best-effort: a failure or an older service leaves the notification state as
+   * it was, never the Panel's list. See ADR-0011.
+   */
+  private async loadNotifications(
+    gen: number,
+    resolution: { project: string; ref: string | null },
+  ): Promise<void> {
+    const host = this.config?.host;
+    if (!host) return;
+    const watchKey = `${host}\u0000${resolution.project}`;
+    if (watchKey !== this.watchKey) {
+      this.watchKey = watchKey;
+      this.watch = null;
+      const result = await getWatch(this.sender(), host, resolution.project);
+      if (this.disposed || gen !== this.generation) return;
+      this.watch = result?.watch ?? null;
+    }
+    await this.consumeEvents(gen, host, resolution);
+    if (this.disposed || gen !== this.generation) return;
+    this.render();
+  }
+
+  /**
+   * Read the Terminal events after the Panel's cursor, badge the Unseen count,
+   * toast each failed/canceled event once, and advance the service's watermark
+   * to the cursor consumed. Success is badge-only. Consuming advances the
+   * watermark, so a later read does not repeat an event. When the service has no
+   * watermark route (an older service) the cursor stays put and the local set of
+   * toasted identities still keeps toasts from repeating.
+   */
+  private async consumeEvents(
+    gen: number,
+    host: string,
+    resolution: { project: string; ref: string | null },
+  ): Promise<void> {
+    const view = await getEvents(this.sender(), this.eventCursor);
+    if (this.disposed || gen !== this.generation) return;
+    if (!view) return;
+    for (const event of view.events) {
+      if (!this.isCurrentEvent(event, host, resolution)) continue;
+      if (!isFailureEvent(event)) continue;
+      const identity = eventIdentity(event);
+      if (this.toastedEvents.has(identity)) continue;
+      this.toastedEvents.add(identity);
+      void this.notifyFailure(event);
+    }
+    void this.port.setBadge(view.unseen).catch(() => {
+      // A host that refuses a badge is not a Panel failure.
+    });
+    if (view.cursor > this.eventCursor) {
+      const seen = await putSeen(this.sender(), view.cursor);
+      if (this.disposed || gen !== this.generation) return;
+      if (seen) this.eventCursor = view.cursor;
+    }
+  }
+
+  /** Whether an event belongs to the resolved host+project, and the Ref when one is known. */
+  private isCurrentEvent(
+    event: TerminalEvent,
+    host: string,
+    resolution: { project: string; ref: string | null },
+  ): boolean {
+    if (event.host !== host || event.project !== resolution.project) return false;
+    return resolution.ref == null || event.ref === resolution.ref;
+  }
+
+  /** Toast a failed/canceled event; best-effort, so a refused toast never breaks the read. */
+  private async notifyFailure(event: TerminalEvent): Promise<void> {
+    try {
+      await this.port.toast({
+        kind: 'error',
+        message: `Pipeline #${event.pipelineId} ${event.status} on ${event.ref}`,
+      });
+    } catch {
+      // A host that refuses a toast is not a Panel failure.
+    }
+  }
+
+  /**
+   * Set or clear the watch for the current project+Ref: off sets it to the Ref,
+   * on clears it. The label reflects the state read from the service.
+   */
+  private toggleWatch(): void {
+    const host = this.config?.host;
+    const resolution = this.resolved;
+    const ref = resolution?.ref ?? null;
+    if (this.watchBusy || !host || !resolution || !ref) return;
+    const watching = this.watch?.ref === ref;
+    this.watchBusy = true;
+    this.render();
+    void this.writeWatch(host, resolution.project, watching ? null : ref);
+  }
+
+  private async writeWatch(host: string, project: string, ref: string | null): Promise<void> {
+    try {
+      const result = await putWatch(this.sender(), host, project, ref);
+      if (!this.disposed && result) this.watch = result.watch;
+    } finally {
+      this.watchBusy = false;
+      if (!this.disposed) this.render();
+    }
+  }
+
   /**
    * The one call every GitLab fetch makes: the Proxy service resolves the
    * Access token for the request's host and attaches it, so the Panel never
@@ -2158,6 +2296,22 @@ class PipelinesPanel implements PanelHandle {
         }),
       );
       row.append(runRoot);
+    }
+
+    if (this.resolved && ref) {
+      const watching = this.watch != null && this.watch.ref === ref;
+      const watchRoot = el('div', 'gp-watch');
+      this.handles.push(
+        mountButton(watchRoot, {
+          label: watching ? 'Watching' : 'Watch',
+          variant: watching ? 'default' : 'outline',
+          size: 'sm',
+          disabled: this.watchBusy,
+          onClick: () => this.toggleWatch(),
+        }),
+      );
+      watchRoot.querySelector('button')?.setAttribute('aria-pressed', watching ? 'true' : 'false');
+      row.append(watchRoot);
     }
 
     const config = el('button', 'gp-iconbtn gp-config-open');

@@ -268,6 +268,7 @@ html { font-size: 16px !important; }
 
 .gp-actions { display: inline-flex; align-items: center; flex: 0 0 auto; }
 .gp-run { display: inline-flex; flex: 0 0 auto; }
+.gp-watch { display: inline-flex; flex: 0 0 auto; }
 
 .gp-notice {
   flex: 0 0 auto;

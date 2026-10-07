@@ -8,8 +8,10 @@ import type {
   JsonValue,
   StartSessionRequest,
   StartSessionResult,
+  ToastRequest,
 } from '@openchamber/sdk';
 import type { HostPort, HostRequest, HostResponse } from '../panel/host-port';
+import { eventIdentity, type TerminalEvent } from '../panel/service-config';
 import type { Bridge, DownstreamPipeline, Job, Pipeline } from '../panel/types';
 
 export type RequestHandler = (
@@ -41,6 +43,10 @@ export class FakeHost implements HostPort {
   openUrls: string[] = [];
   /** Text written through `writeClipboard`, in order. */
   clipboard: string[] = [];
+  /** Every `setBadge` call, in order; `null` clears. */
+  badges: (number | null)[] = [];
+  /** Every host toast, in order. */
+  toasts: ToastRequest[] = [];
   startSessions: StartSessionRequest[] = [];
   startSessionResult: StartSessionResult = { sessionId: 'ses_1', sent: 'sent', directory: '/repo' };
   startSessionError: unknown = null;
@@ -79,6 +85,16 @@ export class FakeHost implements HostPort {
   config: { host: string; project: string } = { host: 'gitlab.com', project: '' };
   /** Access tokens keyed by host, as the service holds them. */
   tokens: Record<string, string> = {};
+  /** The Watched Ref per `host\0project`, as the service holds it. */
+  readonly watches = new Map<string, { ref: string; addedAt: string }>();
+  /** The retained Terminal event log (oldest first), as the service holds it. */
+  events: TerminalEvent[] = [];
+  /** How many events have ever been recorded; the cursor `/events` reads past. */
+  eventSeq = 0;
+  /** How many recorded events the service had marked seen. */
+  seen = 0;
+  /** When set, `/events/seen` answers 404, as a service with no watermark route would. */
+  seenUnsupported = false;
   /** The authenticated username `/api/v4/user` answers with. */
   username = 'me';
   /** The repository config `/git-config` answers with, or null for 404. */
@@ -131,6 +147,44 @@ export class FakeHost implements HostPort {
     if (input.path === '/git-config') {
       if (this.gitConfig == null) return { status: 404, body: JSON.stringify({ error: 'nope' }) };
       return envelope({ config: this.gitConfig });
+    }
+    if (input.path === '/watch') {
+      const method = input.method ?? 'GET';
+      const body =
+        method === 'PUT'
+          ? (JSON.parse(input.body ?? '{}') as { host?: unknown; project?: unknown; ref?: unknown })
+          : {};
+      const host = typeof body.host === 'string' ? body.host : (input.query?.host ?? this.config.host);
+      const project =
+        typeof body.project === 'string' ? body.project : (input.query?.project ?? this.config.project);
+      const key = `${host}\u0000${project}`;
+      if (method === 'GET') return envelope({ watch: this.watches.get(key) ?? null });
+      const ref = typeof body.ref === 'string' ? body.ref.trim() : '';
+      if (ref) this.watches.set(key, { ref, addedAt: '2026-09-30T12:00:00Z' });
+      else this.watches.delete(key);
+      return envelope({ watch: this.watches.get(key) ?? null });
+    }
+    if (input.path === '/events') {
+      const after = Number(input.query?.after ?? '0');
+      const retained = this.events.length;
+      const firstSeq = this.eventSeq - retained + 1;
+      const start = retained === 0 ? 0 : after - firstSeq + 1;
+      return envelope({
+        events: retained === 0 ? [] : this.events.slice(Math.max(0, start)),
+        cursor: this.eventSeq,
+        unseen: Math.max(0, this.eventSeq - this.seen),
+      });
+    }
+    if (input.path === '/events/seen') {
+      if (this.seenUnsupported) return { status: 404, body: JSON.stringify({ error: 'not found' }) };
+      const body = JSON.parse(input.body ?? '{}') as { cursor?: unknown };
+      const cursor = body.cursor;
+      if (typeof cursor !== 'number' || !Number.isInteger(cursor) || cursor < 0) {
+        return envelope({ error: 'A non-negative cursor is required.' }, 400);
+      }
+      const target = Math.min(cursor, this.eventSeq);
+      if (target > this.seen) this.seen = target;
+      return envelope({ seen: this.seen, unseen: Math.max(0, this.eventSeq - this.seen) });
     }
     if (input.path === '/proxy') {
       const body = JSON.parse(input.body ?? '{}') as {
@@ -196,6 +250,27 @@ export class FakeHost implements HostPort {
 
   async writeClipboard(text: string): Promise<void> {
     this.clipboard.push(text);
+  }
+
+  async setBadge(count: number | null): Promise<void> {
+    this.badges.push(count);
+  }
+
+  async toast(request: ToastRequest): Promise<void> {
+    this.toasts.push(request);
+  }
+
+  /** Record a Terminal event as the service's poller would; deduped by identity. */
+  recordEvent(event: TerminalEvent): void {
+    const identity = eventIdentity(event);
+    if (this.events.some((existing) => eventIdentity(existing) === identity)) return;
+    this.events.push(event);
+    this.eventSeq += 1;
+  }
+
+  /** Set the Watched Ref for a host+project, as `PUT /watch` would. */
+  watch(host: string, project: string, ref: string): void {
+    this.watches.set(`${host}\u0000${project}`, { ref, addedAt: '2026-09-30T12:00:00Z' });
   }
 
   async startSession(request: StartSessionRequest): Promise<StartSessionResult> {
@@ -396,6 +471,19 @@ export function bridge(overrides: Partial<Bridge> = {}): Bridge {
     status: 'success',
     web_url: 'https://gitlab.com/group/project/-/jobs/50',
     downstream_pipeline: null,
+    ...overrides,
+  };
+}
+
+/** A Terminal event's shape, with only the fields a test cares about overridden. */
+export function terminalEvent(overrides: Partial<TerminalEvent> = {}): TerminalEvent {
+  return {
+    host: 'gitlab.com',
+    project: 'group/project',
+    ref: 'main',
+    pipelineId: 1,
+    status: 'failed',
+    at: '2026-09-30T11:59:00Z',
     ...overrides,
   };
 }

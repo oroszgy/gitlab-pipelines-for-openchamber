@@ -29,6 +29,15 @@ export const SERVICE_TOKEN_PATH = "/token";
 /** The proxy service's route that returns a repository's git config. */
 export const SERVICE_GIT_CONFIG_PATH = "/git-config";
 
+/** The proxy service's route that reads, sets and clears the Watched Ref. */
+export const SERVICE_WATCH_PATH = "/watch";
+
+/** The proxy service's route that reads Terminal events and records observed ones. */
+export const SERVICE_EVENTS_PATH = "/events";
+
+/** The proxy service's route that advances the seen watermark. */
+export const SERVICE_EVENTS_SEEN_PATH = "/events/seen";
+
 /** Safety cap on lines rendered in the log drawer; the service also caps a response at 256 000 chars. */
 export const LOG_MAX_LINES = 20_000;
 

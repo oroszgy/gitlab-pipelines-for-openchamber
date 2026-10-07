@@ -1,13 +1,20 @@
 /**
- * The Panel's view of the service-owned configuration.
+ * The Panel's view of the service-owned state: the configuration and the
+ * notifications transport.
  *
  * The Proxy service holds the Configured host, the Project override and one
  * Access token per host; the Panel receives only the host, the override and
  * whether a token exists. The token itself never leaves the service, so nothing
- * here ever carries one. Pure, so it is tested through the host seam.
+ * here ever carries one. The parsers are pure; the small request wrappers send
+ * through an injected `ServiceSender`, so both are tested through the host seam.
  */
 
-import type { HostResponse } from './host-port';
+import {
+  SERVICE_EVENTS_PATH,
+  SERVICE_EVENTS_SEEN_PATH,
+  SERVICE_WATCH_PATH,
+} from './config';
+import type { HostRequest, HostResponse } from './host-port';
 
 /** The configuration as the service returns it: never a token, only presence per host. */
 export type ServiceConfig = {
@@ -120,4 +127,210 @@ export function serviceErrorMessage(error: unknown): string {
     return 'The Proxy service is not available. Open Settings → Extensions and allow this extension’s service, then try again.';
   }
   return 'The configuration could not be saved.';
+}
+
+// ---------------------------------------------------------------------------
+// Notifications: the Watched Ref, the Terminal event log and the watermark
+// ---------------------------------------------------------------------------
+
+/** The Watched Ref for a host+project, as the service returns it; an `error` is a watch that broke. */
+export type WatchedRef = { ref: string; addedAt: string; error?: string };
+
+/**
+ * A Terminal event: a Pipeline on a Watched Ref reaching a settled Status. The
+ * identity is host + project + ref + pipelineId + status, exactly as the service
+ * dedupes them, so a re-read never counts twice. See ADR-0011.
+ */
+export type TerminalEvent = {
+  host: string;
+  project: string;
+  ref: string;
+  pipelineId: number;
+  status: string;
+  at: string;
+};
+
+/** The Terminal events after a cursor, with the cursor to advance to and the Unseen count. */
+export type TerminalEventView = { events: TerminalEvent[]; cursor: number; unseen: number };
+
+/** The service's seen marker after a watermark write. */
+export type SeenMarker = { seen: number; unseen: number };
+
+/** The one sender every notifications call goes through: the port's `serviceRequest`. */
+export type ServiceSender = (input: HostRequest) => Promise<HostResponse>;
+
+/** A Terminal event's identity: what makes two reads of the same outcome one event. */
+export function eventIdentity(event: TerminalEvent): string {
+  return [event.host, event.project, event.ref, event.pipelineId, event.status].join('\u0000');
+}
+
+/**
+ * Whether a Terminal event raises a toast. Only failed/canceled do; success is
+ * badge-only, so it never interrupts the developer (spec, "Badge and toasts").
+ */
+export function isFailureEvent(event: TerminalEvent): boolean {
+  return event.status === 'failed' || event.status === 'canceled';
+}
+
+function parseEvent(value: unknown): TerminalEvent | null {
+  if (typeof value !== 'object' || value === null) return null;
+  const record = value as Record<string, unknown>;
+  if (
+    typeof record.host !== 'string' ||
+    typeof record.project !== 'string' ||
+    typeof record.ref !== 'string' ||
+    typeof record.status !== 'string' ||
+    typeof record.at !== 'string' ||
+    typeof record.pipelineId !== 'number' ||
+    !Number.isFinite(record.pipelineId)
+  ) {
+    return null;
+  }
+  return {
+    host: record.host,
+    project: record.project,
+    ref: record.ref,
+    pipelineId: record.pipelineId,
+    status: record.status,
+    at: record.at,
+  };
+}
+
+/**
+ * The watch out of a `/watch` response body: `{ watch }`, where a null watch
+ * means none is set. Returns null when the body is not the service's envelope.
+ */
+export function parseWatchEnvelope(body: string): { watch: WatchedRef | null } | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const watch = (parsed as { watch?: unknown }).watch;
+  if (watch === null) return { watch: null };
+  if (typeof watch !== 'object' || watch === null) return null;
+  const record = watch as Record<string, unknown>;
+  if (typeof record.ref !== 'string' || record.ref === '' || typeof record.addedAt !== 'string') {
+    return null;
+  }
+  return {
+    watch: {
+      ref: record.ref,
+      addedAt: record.addedAt,
+      ...(typeof record.error === 'string' ? { error: record.error } : {}),
+    },
+  };
+}
+
+/** The Terminal events out of a `/events` body, or null when it is not the envelope. */
+export function parseEventsEnvelope(body: string): TerminalEventView | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  if (!Array.isArray(record.events)) return null;
+  if (typeof record.cursor !== 'number' || typeof record.unseen !== 'number') return null;
+  const events: TerminalEvent[] = [];
+  for (const value of record.events) {
+    const event = parseEvent(value);
+    if (event) events.push(event);
+  }
+  return { events, cursor: record.cursor, unseen: record.unseen };
+}
+
+/** The seen marker out of a `/events/seen` body, or null when it is not the envelope. */
+export function parseSeenEnvelope(body: string): SeenMarker | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  if (typeof record.seen !== 'number' || typeof record.unseen !== 'number') return null;
+  return { seen: record.seen, unseen: record.unseen };
+}
+
+/** Whether a service response is an ordinary success. */
+function serviceOk(response: HostResponse): boolean {
+  return response.status >= 200 && response.status < 300;
+}
+
+/**
+ * Read the Watched Ref for a host+project. Null on any transport failure or a
+ * service too old to know the route (a 404), so the Panel degrades quietly
+ * rather than breaking (degradation is refined in notifications/07).
+ */
+export async function getWatch(
+  send: ServiceSender,
+  host: string,
+  project: string,
+): Promise<{ watch: WatchedRef | null } | null> {
+  try {
+    const response = await send({ method: 'GET', path: SERVICE_WATCH_PATH, query: { host, project } });
+    if (!serviceOk(response)) return null;
+    return parseWatchEnvelope(response.body);
+  } catch {
+    return null;
+  }
+}
+
+/** Set (`ref`) or clear (`null`) the Watched Ref for a host+project; null when the write did not land. */
+export async function putWatch(
+  send: ServiceSender,
+  host: string,
+  project: string,
+  ref: string | null,
+): Promise<{ watch: WatchedRef | null } | null> {
+  try {
+    const response = await send({
+      method: 'PUT',
+      path: SERVICE_WATCH_PATH,
+      body: JSON.stringify({ host, project, ref }),
+    });
+    if (!serviceOk(response)) return null;
+    return parseWatchEnvelope(response.body);
+  } catch {
+    return null;
+  }
+}
+
+/** Read the Terminal events after a cursor; null on any transport failure or an unknown route. */
+export async function getEvents(
+  send: ServiceSender,
+  after: number,
+): Promise<TerminalEventView | null> {
+  try {
+    const response = await send({
+      method: 'GET',
+      path: SERVICE_EVENTS_PATH,
+      query: { after: String(after) },
+    });
+    if (!serviceOk(response)) return null;
+    return parseEventsEnvelope(response.body);
+  } catch {
+    return null;
+  }
+}
+
+/** Advance the seen watermark to a cursor; null when the write did not land. */
+export async function putSeen(send: ServiceSender, cursor: number): Promise<SeenMarker | null> {
+  try {
+    const response = await send({
+      method: 'PUT',
+      path: SERVICE_EVENTS_SEEN_PATH,
+      body: JSON.stringify({ cursor }),
+    });
+    if (!serviceOk(response)) return null;
+    return parseSeenEnvelope(response.body);
+  } catch {
+    return null;
+  }
 }

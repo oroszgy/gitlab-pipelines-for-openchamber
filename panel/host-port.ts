@@ -6,6 +6,7 @@ import type {
   JsonValue,
   StartSessionRequest,
   StartSessionResult,
+  ToastRequest,
 } from '@openchamber/sdk';
 
 /**
@@ -60,6 +61,13 @@ export type HostPort = {
   /** Put text on the user's clipboard, for Copy the Trace. Ungated on the host. */
   writeClipboard(text: string): Promise<void>;
   /**
+   * The number on this guest's rail icon; `null` clears it. The host also clears
+   * it when the visible rail panel opens. In-memory, and ungated. See ADR-0011.
+   */
+  setBadge(count: number | null): Promise<void>;
+  /** Raise a host toast. Ungated, and best-effort: a failure must never break the Panel. */
+  toast(request: ToastRequest): Promise<void>;
+  /**
    * The extension's own persistent JSON store. It is global across projects,
    * so `prefs.ts` namespaces every key by host+project+ref. Ungated on the host,
    * and every call is best-effort.
@@ -91,6 +99,8 @@ export function createHostPort(): HostPort {
     startSession: (request) => host.startSession(request),
     openUrl: (url) => host.openUrl(url),
     writeClipboard: (text) => host.writeClipboard(text),
+    setBadge: (count) => host.setBadge(count),
+    toast: (request) => host.toast(request),
     storage: {
       get: (key) => host.storage.get(key),
       set: (key, value) => host.storage.set(key, value),

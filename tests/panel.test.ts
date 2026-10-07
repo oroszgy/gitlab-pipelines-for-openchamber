@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { HOST_BODY_CAP, LOG_MAX_LINES } from '../panel/config';
+import { HOST_BODY_CAP, LOG_MAX_LINES, POLL_INTERVAL_MS } from '../panel/config';
 import type { HostRequest, HostResponse } from '../panel/host-port';
 import { isAtBottom, mountPanel, type PanelHandle } from '../panel/panel';
 import type { Bridge, Job, Pipeline } from '../panel/types';
@@ -13,6 +13,7 @@ import {
   job,
   pipeline,
   readyContext,
+  terminalEvent,
 } from './fakes';
 
 const HOST = 'https://gitlab.com';
@@ -3275,4 +3276,111 @@ describe('conditional pipeline fetches', () => {
     expect(requests[requests.length - 1]?.headers?.['if-none-match']).toBeUndefined();
   });
 });
+
+describe('notifications through the service', () => {
+  /** A host whose project resolves and whose list keeps the Poll alive. */
+  function notifiedHost(): FakeHost {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ status: 'running' })] });
+    return host;
+  }
+
+  function watchToggle(root: HTMLElement): HTMLButtonElement {
+    return root.querySelector('.gp-watch button') as HTMLButtonElement;
+  }
+
+  function watchWrites(host: FakeHost): HostRequest[] {
+    return host.serviceRequests.filter((request) => request.path === '/watch' && request.method === 'PUT');
+  }
+
+  test('unseen events set the badge to the service unseen count', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
+    host.recordEvent(terminalEvent({ pipelineId: 2, status: 'success' }));
+    await mount(host, new FakeTimers());
+    expect(host.badges).toContain(2);
+  });
+
+  test('toasts failed and canceled events but never success', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
+    host.recordEvent(terminalEvent({ pipelineId: 2, status: 'canceled' }));
+    host.recordEvent(terminalEvent({ pipelineId: 3, status: 'success' }));
+    await mount(host, new FakeTimers());
+    expect(host.toasts).toHaveLength(2);
+    expect(host.toasts.every((toast) => toast.kind === 'error')).toBe(true);
+    expect(host.toasts.some((toast) => toast.message.includes('success'))).toBe(false);
+  });
+
+  test('an event for another project never toasts', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ project: 'other/project', pipelineId: 9, status: 'failed' }));
+    await mount(host, new FakeTimers());
+    expect(host.toasts).toHaveLength(0);
+  });
+
+  test('consuming events advances the watermark once', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
+    await mount(host, new FakeTimers());
+    const seen = host.serviceRequests.filter((request) => request.path === '/events/seen');
+    expect(seen).toHaveLength(1);
+    expect(JSON.parse(seen[0]?.body ?? '{}')).toEqual({ cursor: 1 });
+  });
+
+  test('a poll re-reads events without a duplicate toast', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
+    const timers = new FakeTimers();
+    await mount(host, timers);
+    expect(host.toasts).toHaveLength(1);
+    timers.advance(POLL_INTERVAL_MS);
+    await flush();
+    expect(host.toasts).toHaveLength(1);
+  });
+
+  test('a re-read of an event a service refused to mark seen does not toast it twice', async () => {
+    const host = notifiedHost();
+    host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
+    // A service with no watermark route: the event stays past the cursor.
+    host.seenUnsupported = true;
+    const { panel } = await mount(host, new FakeTimers());
+    expect(host.toasts).toHaveLength(1);
+    panel.refresh();
+    await flush();
+    expect(host.toasts).toHaveLength(1);
+  });
+
+  test('the toggle reflects the watch read on mount', async () => {
+    const host = notifiedHost();
+    host.watch('gitlab.com', 'group/project', 'main');
+    const { root } = await mount(host, new FakeTimers());
+    expect(watchToggle(root).textContent?.trim()).toBe('Watching');
+  });
+
+  test('the toggle sets and clears the watch through PUT /watch', async () => {
+    const host = notifiedHost();
+    const { root } = await mount(host, new FakeTimers());
+    expect(watchToggle(root).textContent?.trim()).toBe('Watch');
+
+    watchToggle(root).click();
+    await flush();
+    expect(JSON.parse(watchWrites(host).at(-1)?.body ?? '{}')).toEqual({
+      host: 'gitlab.com',
+      project: 'group/project',
+      ref: 'main',
+    });
+    expect(watchToggle(root).textContent?.trim()).toBe('Watching');
+
+    watchToggle(root).click();
+    await flush();
+    expect(JSON.parse(watchWrites(host).at(-1)?.body ?? '{}')).toEqual({
+      host: 'gitlab.com',
+      project: 'group/project',
+      ref: null,
+    });
+    expect(watchToggle(root).textContent?.trim()).toBe('Watch');
+  });
+});
+
 
