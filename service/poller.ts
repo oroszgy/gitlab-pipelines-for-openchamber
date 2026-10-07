@@ -84,8 +84,17 @@ export function rateLimitedDelay(baseMs: number, retryAfterMs: number | null): n
   return retryAfterMs != null ? Math.max(baseMs, retryAfterMs) : baseMs * 2;
 }
 
-/** A Pipeline as the poller needs it: an id, a Status and when it was created. */
-type PipelineSummary = { id: number; status: string; createdAt: string | null };
+/**
+ * A Pipeline as the poller needs it: an id, a Status, when it was created, and
+ * when it last settled. `settledAt` is `updated_at`, falling back to
+ * `created_at` when GitLab omits it.
+ */
+type PipelineSummary = {
+  id: number;
+  status: string;
+  createdAt: string | null;
+  settledAt: string | null;
+};
 
 /** Parse the Pipeline-list body, ignoring anything that is not `{id, status}`. */
 function parsePipelines(body: string): PipelineSummary[] {
@@ -101,13 +110,36 @@ function parsePipelines(body: string): PipelineSummary[] {
     if (typeof item !== 'object' || item === null) continue;
     const record = item as Record<string, unknown>;
     if (typeof record.id !== 'number' || typeof record.status !== 'string') continue;
+    const created = typeof record.created_at === 'string' ? record.created_at : null;
+    const updated = typeof record.updated_at === 'string' ? record.updated_at : null;
     pipelines.push({
       id: record.id,
       status: record.status,
-      createdAt: typeof record.created_at === 'string' ? record.created_at : null,
+      createdAt: created,
+      settledAt: updated ?? created,
     });
   }
   return pipelines;
+}
+
+/**
+ * Whether a Pipeline settled within the watch's lifetime, so a pre-watch outcome
+ * is not toasted when a watch is first set. Timestamps are compared as epoch
+ * milliseconds, so equivalent ISO spellings (`Z` vs an offset) order correctly.
+ *
+ * A missing or unparseable settle time cannot be shown to be after the watch was
+ * set, so it is skipped: the conservative choice for a feature whose whole point
+ * is to avoid notifying about outcomes the user never opted into. A watch whose
+ * own `addedAt` is unparseable is the one case where recording is preferred, so a
+ * corrupt timestamp does not silently swallow every event.
+ */
+function settledAfterWatch(settleTime: string | null, addedAt: string): boolean {
+  const addedAtMs = Date.parse(addedAt);
+  if (Number.isNaN(addedAtMs)) return true;
+  if (settleTime == null) return false;
+  const settleMs = Date.parse(settleTime);
+  if (Number.isNaN(settleMs)) return false;
+  return settleMs >= addedAtMs;
 }
 
 /** The age of the oldest still-moving Pipeline, or 0 when everything has settled. */
@@ -232,6 +264,9 @@ export async function pollOnce(context: PollContext): Promise<PollOutcome> {
     const at = startedAt.toISOString();
     for (const pipeline of pipelines) {
       if (!isTerminalStatus(pipeline.status)) continue;
+      // Suppress a Pipeline that settled before the user asked to watch it: a
+      // running Pipeline carries a late `updated_at` and is still recorded.
+      if (!settledAfterWatch(pipeline.settledAt, watch.addedAt)) continue;
       events.push({
         host: parsed.host,
         project: parsed.project,

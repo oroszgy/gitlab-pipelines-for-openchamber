@@ -74,6 +74,10 @@ const pipeline = (overrides: Record<string, unknown> = {}) => ({
   id: 7,
   status: 'success',
   ref: 'main',
+  created_at: new Date(NOW.getTime() - 60_000).toISOString(),
+  // A Pipeline settled at the watch's own added-at is recorded: suppression only
+  // drops outcomes that settled strictly before the watch existed.
+  updated_at: NOW.toISOString(),
   ...overrides,
 });
 
@@ -82,6 +86,8 @@ async function setup(options: {
   reply?: Reply;
   watch?: string | null;
   token?: string | null;
+  /** When the watch was set; defaults to NOW, the clock the poller reads. */
+  addedAt?: Date;
 } = {}): Promise<{
   fs: ConfigFs & { entries: Record<string, Entry> };
   fetchImpl: ReturnType<typeof fakeFetch>;
@@ -91,7 +97,12 @@ async function setup(options: {
   const token = options.token === undefined ? 'pat' : options.token;
   if (token) await writeTokenRoute(fs, PATH, { host: HOST, token });
   if (options.watch !== null) {
-    await writeWatchRoute(fs, PATH, { host: HOST, project: PROJECT, ref: options.watch ?? 'main' }, () => NOW);
+    await writeWatchRoute(
+      fs,
+      PATH,
+      { host: HOST, project: PROJECT, ref: options.watch ?? 'main' },
+      () => options.addedAt ?? NOW,
+    );
   }
   const fetchImpl = fakeFetch(options.reply);
   const context: PollContext = { fs, path: PATH, fetchImpl, now: () => NOW };
@@ -168,6 +179,82 @@ describe('service poller: recording Terminal events', () => {
   test('records nothing while the Pipeline is still running', async () => {
     const { fs, context } = await setup({
       reply: { body: JSON.stringify([pipeline({ status: 'running', created_at: NOW.toISOString() })]) },
+    });
+
+    await pollOnce(context);
+
+    expect((await readConfig(fs, PATH)).events).toEqual([]);
+  });
+});
+
+describe('service poller: suppressing pre-watch outcomes', () => {
+  test('records nothing for a Pipeline that settled before the watch was set', async () => {
+    const settled = new Date(NOW.getTime() - 60_000).toISOString();
+    const { fs, context } = await setup({
+      addedAt: NOW,
+      reply: { body: JSON.stringify([pipeline({ updated_at: settled })]) },
+    });
+
+    await pollOnce(context);
+
+    expect((await readConfig(fs, PATH)).events).toEqual([]);
+  });
+
+  test('records exactly one event for a Pipeline that settled after the watch was set', async () => {
+    const addedAt = new Date(NOW.getTime() - 10 * 60_000);
+    const { fs, context } = await setup({
+      addedAt,
+      reply: { body: JSON.stringify([pipeline({ updated_at: NOW.toISOString() })]) },
+    });
+
+    await pollOnce(context);
+
+    expect((await readConfig(fs, PATH)).events).toHaveLength(1);
+  });
+
+  test('records a Pipeline created before the watch but settling after it', async () => {
+    const addedAt = new Date(NOW.getTime() - 5 * 60_000);
+    const created = new Date(NOW.getTime() - 20 * 60_000).toISOString();
+    const { fs, context } = await setup({
+      addedAt,
+      reply: { body: JSON.stringify([pipeline({ created_at: created, updated_at: NOW.toISOString() })]) },
+    });
+
+    await pollOnce(context);
+
+    expect((await readConfig(fs, PATH)).events).toHaveLength(1);
+  });
+
+  test('falls back to created_at when updated_at is absent', async () => {
+    const addedAt = new Date(NOW.getTime() - 5 * 60_000);
+    const { fs, context } = await setup({
+      addedAt,
+      reply: { body: JSON.stringify([pipeline({ updated_at: null, created_at: NOW.toISOString() })]) },
+    });
+
+    await pollOnce(context);
+
+    expect((await readConfig(fs, PATH)).events).toHaveLength(1);
+  });
+
+  test('records nothing when the settle time is absent, conservatively', async () => {
+    const { fs, context } = await setup({
+      addedAt: NOW,
+      reply: { body: JSON.stringify([pipeline({ updated_at: null, created_at: null })]) },
+    });
+
+    await pollOnce(context);
+
+    expect((await readConfig(fs, PATH)).events).toEqual([]);
+  });
+
+  test('compares equivalent ISO spellings by epoch, not by string', async () => {
+    // The same instant one second before the watch, spelled with an offset so a
+    // string compare would place it later. On epoch it settled first, so it is
+    // suppressed.
+    const { fs, context } = await setup({
+      addedAt: NOW,
+      reply: { body: JSON.stringify([pipeline({ updated_at: '2026-01-02T04:04:04.000+01:00' })]) },
     });
 
     await pollOnce(context);
