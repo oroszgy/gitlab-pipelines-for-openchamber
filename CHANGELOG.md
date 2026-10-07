@@ -7,7 +7,24 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
-## [0.11.0] - 2026-10-07
+## [0.12.0] - 2026-10-07
+
+### Added
+
+- The service can **watch one Ref per project** and polls it in the background, so
+  a Pipeline that finishes while you are away is noticed even when the Panel is
+  not open.
+- A **rail badge** counts Unseen events, and a **host toast** announces each
+  watched Pipeline that failed or was canceled; a success changes the badge only.
+- A **Status section** in Work Status shows the watched Ref, its latest Status and
+  the unseen count, and toggles the watch; clicking it opens the rail panel.
+- A **watch toggle** in the Panel header sets and clears the watch for the current
+  project and Ref.
+
+### Changed
+
+- The Extension talks to a service that predates the watch and event routes: the
+  watch UI is disabled with an explanation instead of failing.
 
 ### Added
 

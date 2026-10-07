@@ -1,6 +1,6 @@
 # Spec: Notifications
 
-Status: specified — tickets `notifications/01`–`07` are mapped in [`README.md`](README.md).
+Status: implemented — tickets `notifications/01`–`07` are mapped in [`README.md`](README.md).
 Feature: `notifications`
 Follows: [`docs/specs/pipelines-panel.md`](pipelines-panel.md) (its Poll is the surface-lived part) and
 [`docs/specs/pipeline-actions.md`](pipeline-actions.md), and records ADR-0011.
