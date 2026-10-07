@@ -18,8 +18,9 @@ and commit them instead.
   adapter wraps `connectHost()`; tests substitute `FakeHost`. A new host operation is a method on the
   seam, never a direct `connectHost()` call elsewhere.
 - **Pure logic behind the seam.** Resolution, request building, status mapping, grouping, polling,
-  formatting and the handoff prompt are pure modules (`panel/*.ts` minus `panel.ts`). `panel/panel.ts`
-  is the only module that touches the DOM.
+  formatting and the handoff prompt are pure modules (`panel/*.ts` minus the surface modules). Only the
+  surface modules touch the DOM: `panel/panel.ts` (the rail panel) and `panel/status-section.ts` (the
+  Work Status section), plus the bundle entries `panel/main.ts` and `status/main.ts` that mount them.
 - **GitLab writes are capability-gated and few.** GitLab access is read-only unless the Access token
   carries the `api` scope and the user has the role for the project. The only writes are the Pipeline
   actions (`panel/actions.ts` → `panel/gitlab-client.ts`), sent as `POST` under `/api/v4/`; the
