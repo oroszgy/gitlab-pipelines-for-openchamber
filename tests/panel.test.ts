@@ -287,7 +287,10 @@ describe('pipeline list', () => {
     const host = configuredHost();
     host.gitlabHandler = handlerFor({ pipelines: [] });
     const { root } = await mount(host, new FakeTimers());
-    expect(text(root)).toContain('No pipelines for this ref');
+    // An empty branch falls back to All refs; with nothing there either, it is
+    // still the empty state, never an error.
+    expect(root.querySelector('.oc-sdk-empty-title')?.textContent).toBe('No pipelines yet');
+    expect(root.querySelector('.gp-state')).toBeNull();
   });
 
   test('a host with no Access token is its own state', async () => {
@@ -831,6 +834,86 @@ describe('branch / all refs scope', () => {
     const { root } = await mount(host, new FakeTimers());
     expect(root.querySelector('.gp-scope')?.hasAttribute('hidden')).toBe(true);
     expect(root.querySelector('[role="tablist"]')).toBeNull();
+  });
+});
+
+/** An empty branch, but another Ref has a Pipeline, for the fallback tests. */
+function emptyBranchHandler(): (request: HostRequest) => HostResponse {
+  return (request) => {
+    if (!request.path.endsWith('/pipelines')) return { status: 200, body: '[]' };
+    return request.query?.ref
+      ? { status: 200, body: '[]' }
+      : { status: 200, body: JSON.stringify([pipeline({ id: 7, ref: 'other' })]) };
+  };
+}
+
+/** The notice's action button, matched the way a user reads it. */
+function backToBranch(root: HTMLElement): HTMLButtonElement | undefined {
+  return Array.from(root.querySelectorAll('button')).find(
+    (button) => button.textContent === 'Back to branch',
+  ) as HTMLButtonElement | undefined;
+}
+
+describe('automatic all-refs fallback', () => {
+  test('an empty branch falls back to all refs with a notice naming the ref', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = emptyBranchHandler();
+    const { root } = await mount(host, new FakeTimers());
+
+    const requests = pipelineRequests(host);
+    expect(requests).toHaveLength(2);
+    expect(requests[0]?.query?.ref).toBe('main');
+    expect(requests[1]?.query?.ref).toBeUndefined();
+    const active = root.querySelector('[role="tab"][aria-selected="true"]');
+    expect(active?.textContent).toContain('All refs');
+    expect(text(root)).toContain('main');
+    expect(backToBranch(root)).toBeDefined();
+  });
+
+  test('Back to branch returns and suppresses the fallback for the ref', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = emptyBranchHandler();
+    const { root } = await mount(host, new FakeTimers());
+
+    backToBranch(root)?.click();
+    await flush();
+
+    const requests = pipelineRequests(host);
+    expect(requests[requests.length - 1]?.query?.ref).toBe('main');
+    const active = root.querySelector('[role="tab"][aria-selected="true"]');
+    expect(active?.textContent).toContain('Branch');
+    expect(backToBranch(root)).toBeUndefined();
+    expect(text(root)).toContain('No pipelines for this ref');
+  });
+
+  test('a manual scope change suppresses the fallback for the ref', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ ref: 'main' })] });
+    const { root, panel } = await mount(host, new FakeTimers());
+
+    // The branch had Pipelines, so nothing fell back; the user switches scope.
+    panel.setScope('all');
+    await flush();
+    host.gitlabHandler = emptyBranchHandler();
+    panel.setScope('branch');
+    await flush();
+
+    const active = root.querySelector('[role="tab"][aria-selected="true"]');
+    expect(active?.textContent).toContain('Branch');
+    expect(backToBranch(root)).toBeUndefined();
+  });
+
+  test('the fallback does not fire when the ref cannot be determined', async () => {
+    const host = configuredHost();
+    host.worktrees = [];
+    host.files.set('.git/HEAD', 'abcdef1234567890\n');
+    host.gitlabHandler = emptyBranchHandler();
+    const { root } = await mount(host, new FakeTimers());
+
+    const requests = pipelineRequests(host);
+    expect(requests).toHaveLength(1);
+    expect(requests[0]?.query?.ref).toBeUndefined();
+    expect(backToBranch(root)).toBeUndefined();
   });
 });
 
