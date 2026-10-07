@@ -16,3 +16,6 @@ jobs:
           bun-version: 1.3.x
       - run: bun install --frozen-lockfile
       - run: bun run check
+      # `check` rebuilds the bundles but never compares them with the committed
+      # ones, so a stale bundle would pass every other test. Fail on drift.
+      - run: bun run check:bundles

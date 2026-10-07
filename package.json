@@ -30,6 +30,7 @@
     "build:status": "openchamber-guest-bundle status/main.ts status/main.js",
     "typecheck": "tsc --noEmit",
     "check": "bun run typecheck && bun run build && bun test",
+    "check:bundles": "bun run build && git diff --exit-code -- panel/main.js service/main.js status/main.js",
     "test": "bun run build && bun test",
     "prepare": "husky"
   },
