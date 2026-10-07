@@ -2,7 +2,7 @@ import type { HostReadyContext, StartSessionSent } from '@openchamber/sdk';
 import { applyHostReady, mountButton, mountEmpty, mountMenu, mountTabs } from '@openchamber/sdk/ui';
 
 import { accessLevelOf, canRunPipeline, cancelRoleOf, menuState, type ActionId, type Capability } from './actions';
-import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, POLL_INTERVAL_MS, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
+import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, NOTIFICATIONS_INTERVAL_MS, PANEL_ID, POLL_INTERVAL_MS, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
 import { defaultExpansion, restoredChain, type DownstreamNode, type PipelineKey } from './defaults';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
@@ -67,6 +67,7 @@ import {
   normalizeHostInput,
   parseConfigEnvelope,
   parseProxyEnvelope,
+  postEvent,
   putSeen,
   putWatch,
   serviceErrorMessage,
@@ -76,7 +77,7 @@ import {
   type WatchedRef,
 } from './service-config';
 import { groupJobsByStage, type StageGroup } from './stage-groups';
-import { isActiveStatus, jobStatusInfo, statusInfo, type StatusInfo } from './status';
+import { isActiveStatus, isTerminalStatus, jobStatusInfo, statusInfo, type StatusInfo } from './status';
 import { TraceIndexer, lineAtOffset, stripAnsi, type IdleScheduler } from './trace-index';
 import type { Bridge, Job, Pipeline, Scope } from './types';
 
@@ -424,6 +425,12 @@ class PipelinesPanel implements PanelHandle {
   private olderService = false;
   /** Whether the older-service notice was dismissed by hand for this mount. */
   private olderServiceNoticeDismissed = false;
+  /** The mounted Panel's own timer that reads Terminal events for its badge. */
+  private notificationTimer: number | null = null;
+  /** The last Status seen per Pipeline id, so the Panel records the transitions it observes. */
+  private readonly observedStatuses = new Map<number, string>();
+  /** The view the observed statuses belong to, so a scope/host/project/ref change resets them. */
+  private observedKey: string | null = null;
 
   private generation = 0;
   private pollTimer: number | null = null;
@@ -720,6 +727,7 @@ class PipelinesPanel implements PanelHandle {
     await this.loadTokenScopes(gen, host);
     if (this.disposed || gen !== this.generation) return;
     this.ensureCapability(gen, this.resolved.project);
+    this.startNotificationTimer();
     void this.loadNotifications(gen, this.resolved);
     await this.loadPipelines(gen, this.resolved, true);
   }
@@ -825,6 +833,9 @@ class PipelinesPanel implements PanelHandle {
     // The watch belongs to the previous host+project; re-read it for the new one.
     this.watch = null;
     this.watchKey = null;
+    // Observed Pipeline statuses belong to the previous host+project too.
+    this.observedStatuses.clear();
+    this.observedKey = null;
     this.invalidateCapability();
   }
 
@@ -1003,6 +1014,7 @@ class PipelinesPanel implements PanelHandle {
     }
     // A manual refresh resets to page 1; a poll merges so loaded pages survive.
     this.applyPipelines(result.data, seedBridges ? 'replace' : 'merge');
+    this.recordObservedTransitions(resolution, result.data.pipelines);
     this.updatedAt = this.timers.now();
     this.phase = 'ready';
     this.error = null;
@@ -1982,8 +1994,41 @@ class PipelinesPanel implements PanelHandle {
     }
   }
 
+  /**
+   * Start the mounted Panel's notification refresh. It is independent of the
+   * Pipeline Poll: a settled visible list stops the Poll, but this timer keeps
+   * reading, so an outcome that finished while the user was away still badges.
+   */
+  private startNotificationTimer(): void {
+    if (this.notificationTimer != null) return;
+    this.notificationTimer = this.timers.setInterval(() => {
+      void this.refreshNotifications();
+    }, NOTIFICATIONS_INTERVAL_MS);
+  }
+
+  private stopNotificationTimer(): void {
+    if (this.notificationTimer != null) {
+      this.timers.clearInterval(this.notificationTimer);
+      this.notificationTimer = null;
+    }
+  }
+
+  /**
+   * Read Terminal events on the notification interval, so the badge and toasts
+   * keep up whether or not the Pipeline list is active. It never advances the
+   * watermark while hidden — `consumeEvents` owns that rule.
+   */
+  private async refreshNotifications(): Promise<void> {
+    if (this.disposed || !this.started) return;
+    const host = this.config?.host;
+    const resolution = this.resolved;
+    if (!host || !resolution) return;
+    await this.loadNotifications(this.generation, resolution);
+  }
+
   private stopAllTimers(): void {
     this.stopPollTimer();
+    this.stopNotificationTimer();
     this.stopTicker();
     this.pollStartedAt = null;
   }
@@ -2162,11 +2207,58 @@ class PipelinesPanel implements PanelHandle {
       const result = await getWatch(this.sender(), host, resolution.project);
       if (this.disposed || gen !== this.generation) return;
       if (result.ok) this.watch = result.value.watch;
-      else if (isOlderService(result)) this.olderService = true;
+      else if (isOlderService(result)) {
+        this.olderService = true;
+        this.stopNotificationTimer();
+      }
     }
     await this.consumeEvents(gen, host, resolution);
     if (this.disposed || gen !== this.generation) return;
     this.render();
+  }
+
+  /**
+   * Record a Pipeline on the Watched Ref settling, so the mounted Panel toasts
+   * instantly; the service dedupes by identity, so nothing toasts twice (spec,
+   * "Solution"). Only a transition out of a non-terminal Status is posted, and
+   * the previous statuses are reset when the view (host/project/ref/scope)
+   * changes, so a Pipeline already terminal when first seen is never reported.
+   */
+  private recordObservedTransitions(
+    resolution: { project: string; ref: string | null },
+    pipelines: Pipeline[],
+  ): void {
+    const host = this.config?.host;
+    const watchedRef = this.watch?.ref ?? resolution.ref;
+    if (!host || !watchedRef) {
+      this.observedStatuses.clear();
+      this.observedKey = null;
+      return;
+    }
+    const key = `${host}\u0000${resolution.project}\u0000${watchedRef}\u0000${this.scope}`;
+    if (key !== this.observedKey) {
+      this.observedKey = key;
+      this.observedStatuses.clear();
+    }
+    const at = new Date(this.timers.now()).toISOString();
+    for (const pipeline of pipelines) {
+      if (pipeline.ref !== watchedRef) continue;
+      const previous = this.observedStatuses.get(pipeline.id);
+      this.observedStatuses.set(pipeline.id, pipeline.status);
+      if (previous == null || isTerminalStatus(previous)) continue;
+      if (!isTerminalStatus(pipeline.status)) continue;
+      // The viewed Ref may differ from the service's Watched Ref: only the
+      // Watched Ref is the Panel's to report.
+      if (this.watch?.ref !== watchedRef) continue;
+      void postEvent(this.sender(), {
+        host,
+        project: resolution.project,
+        ref: watchedRef,
+        pipelineId: pipeline.id,
+        status: pipeline.status,
+        at,
+      });
+    }
   }
 
   /**
@@ -2194,7 +2286,10 @@ class PipelinesPanel implements PanelHandle {
     const result = await getEvents(this.sender(), this.eventCursor);
     if (this.disposed || gen !== this.generation) return;
     if (!result.ok) {
-      if (isOlderService(result)) this.olderService = true;
+      if (isOlderService(result)) {
+        this.olderService = true;
+        this.stopNotificationTimer();
+      }
       return;
     }
     const view = result.value;
@@ -2440,6 +2535,7 @@ class PipelinesPanel implements PanelHandle {
 
     if (this.resolved && ref) {
       const watching = this.watch != null && this.watch.ref === ref;
+      const watchError = watching ? this.watch?.error : undefined;
       const watchRoot = el('div', 'gp-watch');
       const older = this.olderService;
       this.handles.push(
@@ -2451,11 +2547,19 @@ class PipelinesPanel implements PanelHandle {
           onClick: () => this.toggleWatch(),
         }),
       );
-      watchRoot.querySelector('button')?.setAttribute('aria-pressed', watching ? 'true' : 'false');
+      const trigger = watchRoot.querySelector('button');
+      trigger?.setAttribute('aria-pressed', watching ? 'true' : 'false');
       if (older) {
-        watchRoot
-          .querySelector('button')
-          ?.setAttribute('title', 'This Proxy service is older and cannot watch Pipelines.');
+        trigger?.setAttribute('title', 'This Proxy service is older and cannot watch Pipelines.');
+      } else if (watchError) {
+        trigger?.setAttribute('title', watchError);
+      }
+      if (watchError) {
+        // A watch that broke is explained here rather than left silent.
+        const notice = el('span', 'gp-watch-error', watchError);
+        notice.setAttribute('role', 'status');
+        notice.title = watchError;
+        watchRoot.append(notice);
       }
       row.append(watchRoot);
     }

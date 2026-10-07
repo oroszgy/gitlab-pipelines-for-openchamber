@@ -51,5 +51,12 @@ export const HOST_BODY_CAP = 256_000;
 /** How often the panel re-reads statuses while something is active. */
 export const POLL_INTERVAL_MS = 5_000;
 
+/**
+ * How often the mounted Panel re-reads Terminal events for its badge, independent
+ * of Pipeline activity. A settled visible list stops the Poll; this timer keeps
+ * reading, so an outcome that finished while the user was away still badges.
+ */
+export const NOTIFICATIONS_INTERVAL_MS = 30_000;
+
 /** How often live "elapsed" / "updated" text is repainted. */
 export const LIVE_TICK_MS = 1_000;

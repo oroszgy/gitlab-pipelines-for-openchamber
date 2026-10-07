@@ -358,3 +358,37 @@ export function putSeen(
     parseSeenEnvelope,
   );
 }
+
+/** The service's answer to a posted event: the stored event and whether it was new. */
+export type RecordedEvent = { event: TerminalEvent; recorded: boolean };
+
+function parseRecordedEventEnvelope(body: string): RecordedEvent | null {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(body);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== 'object' || parsed === null) return null;
+  const record = parsed as Record<string, unknown>;
+  const event = parseEvent(record.event);
+  if (!event || typeof record.recorded !== 'boolean') return null;
+  return { event, recorded: record.recorded };
+}
+
+/**
+ * Record a Terminal event the mounted Panel observed itself, so a running Panel
+ * toasts instantly. The service dedupes by identity, so posting one the poller
+ * already recorded changes nothing. Best-effort: a `404` (an older service) or
+ * any failure leaves the Panel untouched.
+ */
+export function postEvent(
+  send: ServiceSender,
+  event: TerminalEvent,
+): Promise<NotificationsResult<RecordedEvent>> {
+  return notificationsCall(
+    send,
+    { method: 'POST', path: SERVICE_EVENTS_PATH, body: JSON.stringify(event) },
+    parseRecordedEventEnvelope,
+  );
+}

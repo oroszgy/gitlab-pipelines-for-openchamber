@@ -313,6 +313,28 @@ describe('service poller: rate limits', () => {
     expect(outcome.paused).toBe(true);
     expect(outcome.delayMs).toBe(SERVICE_POLL_INTERVAL_MS * 2);
   });
+
+  test('a 429 pauses the pass so the remaining watches are not requested', async () => {
+    const fs = fakeFs();
+    await writeTokenRoute(fs, PATH, { host: HOST, token: 'pat' });
+    await writeWatchRoute(fs, PATH, { host: HOST, project: PROJECT, ref: 'main' }, () => NOW);
+    await writeWatchRoute(fs, PATH, { host: HOST, project: 'group/other', ref: 'main' }, () => NOW);
+
+    const requested: string[] = [];
+    const fetchImpl = (async (url: string) => {
+      requested.push(url);
+      if (requested.length === 1) {
+        return new Response('', { status: 429, headers: { 'Retry-After': '120' } });
+      }
+      return new Response('[]', { status: 200 });
+    }) as unknown as ProxyFetch;
+
+    const outcome = await pollOnce({ fs, path: PATH, fetchImpl, now: () => NOW });
+
+    expect(outcome.paused).toBe(true);
+    // The pass stopped at the first 429: the second watch was never polled.
+    expect(requested).toHaveLength(1);
+  });
 });
 
 describe('service poller: watches it will not follow', () => {

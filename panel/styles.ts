@@ -268,7 +268,15 @@ html { font-size: 16px !important; }
 
 .gp-actions { display: inline-flex; align-items: center; flex: 0 0 auto; }
 .gp-run { display: inline-flex; flex: 0 0 auto; }
-.gp-watch { display: inline-flex; flex: 0 0 auto; }
+.gp-watch { display: inline-flex; align-items: center; gap: 6px; flex: 0 0 auto; }
+.gp-watch-error {
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--oc-error-text, #c04040);
+  font-size: 0.75rem;
+}
 
 .gp-notice {
   flex: 0 0 auto;

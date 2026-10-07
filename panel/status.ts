@@ -64,3 +64,13 @@ const ACTIVE = new Set(ACTIVE_STATUSES);
 export function isActiveStatus(status: string | null | undefined): boolean {
   return status != null && ACTIVE.has(status);
 }
+
+/** The settled Statuses a Terminal event records. */
+export const TERMINAL_STATUSES: readonly string[] = ['success', 'failed', 'canceled'];
+
+const TERMINAL = new Set(TERMINAL_STATUSES);
+
+/** Whether a Pipeline Status has settled for good. */
+export function isTerminalStatus(status: string | null | undefined): boolean {
+  return status != null && TERMINAL.has(status);
+}

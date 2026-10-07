@@ -88,7 +88,7 @@ export class FakeHost implements HostPort {
   /** Access tokens keyed by host, as the service holds them. */
   tokens: Record<string, string> = {};
   /** The Watched Ref per `host\0project`, as the service holds it. */
-  readonly watches = new Map<string, { ref: string; addedAt: string }>();
+  readonly watches = new Map<string, { ref: string; addedAt: string; error?: string }>();
   /** The retained Terminal event log (oldest first), as the service holds it. */
   events: TerminalEvent[] = [];
   /** How many events have ever been recorded; the cursor `/events` reads past. */
@@ -167,6 +167,24 @@ export class FakeHost implements HostPort {
       return envelope({ watch: this.watches.get(key) ?? null });
     }
     if (input.path === '/events') {
+      if ((input.method ?? 'GET') === 'POST') {
+        const body = JSON.parse(input.body ?? '{}') as Partial<TerminalEvent>;
+        const candidate: TerminalEvent = {
+          host: typeof body.host === 'string' ? body.host : '',
+          project: typeof body.project === 'string' ? body.project : '',
+          ref: typeof body.ref === 'string' ? body.ref : '',
+          pipelineId: typeof body.pipelineId === 'number' ? body.pipelineId : Number.NaN,
+          status: typeof body.status === 'string' ? body.status : '',
+          at: typeof body.at === 'string' ? body.at : '2026-09-30T12:00:00Z',
+        };
+        const identity = eventIdentity(candidate);
+        const already = this.events.some((existing) => eventIdentity(existing) === identity);
+        if (!already) {
+          this.events.push(candidate);
+          this.eventSeq += 1;
+        }
+        return envelope({ event: candidate, recorded: !already });
+      }
       const after = Number(input.query?.after ?? '0');
       const retained = this.events.length;
       const firstSeq = this.eventSeq - retained + 1;
@@ -275,8 +293,12 @@ export class FakeHost implements HostPort {
   }
 
   /** Set the Watched Ref for a host+project, as `PUT /watch` would. */
-  watch(host: string, project: string, ref: string): void {
-    this.watches.set(`${host}\u0000${project}`, { ref, addedAt: '2026-09-30T12:00:00Z' });
+  watch(host: string, project: string, ref: string, error?: string): void {
+    this.watches.set(`${host}\u0000${project}`, {
+      ref,
+      addedAt: '2026-09-30T12:00:00Z',
+      ...(error ? { error } : {}),
+    });
   }
 
   async startSession(request: StartSessionRequest): Promise<StartSessionResult> {

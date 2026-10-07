@@ -101,7 +101,7 @@ async function persist(fs: ConfigFs, path: string, config: Config): Promise<Conf
 }
 
 /** A non-blank string from a request field, or null so the Configured value stands. */
-function named(value: unknown): string | null {
+function nonBlankString(value: unknown): string | null {
   return typeof value === 'string' && value.trim() ? value : null;
 }
 
@@ -117,8 +117,8 @@ export async function readWatchRoute(
   input: { host?: unknown; project?: unknown },
 ): Promise<WatchView> {
   const config = await readConfig(fs, path);
-  const host = named(input.host) ?? config.host;
-  const project = named(input.project) ?? config.project;
+  const host = nonBlankString(input.host) ?? config.host;
+  const project = nonBlankString(input.project) ?? config.project;
   return resolveWatch(config, host, project);
 }
 
@@ -135,8 +135,8 @@ export async function writeWatchRoute(
   now: () => Date = () => new Date(),
 ): Promise<WatchRouteResult> {
   const current = await readConfig(fs, path);
-  const host = named(input.host) ?? current.host;
-  const project = named(input.project) ?? current.project;
+  const host = nonBlankString(input.host) ?? current.host;
+  const project = nonBlankString(input.project) ?? current.project;
   const ref = typeof input.ref === 'string' ? input.ref.trim() : '';
   const change = ref
     ? setWatch(current, host, project, ref, now().toISOString())

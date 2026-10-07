@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from 'bun:test';
-import { HOST_BODY_CAP, LOG_MAX_LINES, POLL_INTERVAL_MS } from '../panel/config';
+import { HOST_BODY_CAP, LOG_MAX_LINES, NOTIFICATIONS_INTERVAL_MS, POLL_INTERVAL_MS } from '../panel/config';
 import type { HostRequest, HostResponse } from '../panel/host-port';
 import {
   isAtBottom,
@@ -3329,6 +3329,12 @@ describe('notifications through the service', () => {
     return host.serviceRequests.filter((request) => request.path === '/events/seen');
   }
 
+  function postedEvents(host: FakeHost): HostRequest[] {
+    return host.serviceRequests.filter(
+      (request) => request.path === '/events' && request.method === 'POST',
+    );
+  }
+
   test('persisted unseen events rebuild the badge without advancing the watermark', async () => {
     const host = notifiedHost();
     host.recordEvent(terminalEvent({ pipelineId: 1, status: 'failed' }));
@@ -3405,6 +3411,86 @@ describe('notifications through the service', () => {
     expect(seenWrites(host)).toHaveLength(0);
     expect(host.seen).toBe(0);
     expect(host.badges.at(-1)).toBe(1);
+  });
+
+  test('a hidden settled panel reads events and sets the badge on its own timer', async () => {
+    const host = notifiedHost();
+    // A settled list: the Pipeline poll stops, so only the notification timer runs.
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ status: 'success' })] });
+    const surface = visibility();
+    const timers = new FakeTimers();
+    const { panel } = await mount(host, timers, readyContext(), surface);
+    await flush();
+    expect(panel.isPolling()).toBe(false);
+
+    host.recordEvent(terminalEvent({ pipelineId: 5, status: 'failed' }));
+    timers.advance(NOTIFICATIONS_INTERVAL_MS);
+    await flush();
+
+    expect(host.badges.at(-1)).toBe(1);
+    expect(host.toasts).toHaveLength(1);
+    // While hidden the watermark is left put, so the badge survives a reload.
+    expect(host.seen).toBe(0);
+  });
+
+  test('a running Pipeline that fails on the watched Ref is recorded through POST /events', async () => {
+    const host = notifiedHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 10, status: 'running' })] });
+    host.watch('gitlab.com', 'group/project', 'main');
+    const timers = new FakeTimers();
+    const { panel } = await mount(host, timers);
+
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 10, status: 'failed', ref: 'main' })],
+    });
+    timers.advance(POLL_INTERVAL_MS);
+    await flush();
+
+    const posted = postedEvents(host);
+    expect(posted).toHaveLength(1);
+    expect(JSON.parse(posted[0]?.body ?? '{}')).toMatchObject({
+      host: 'gitlab.com',
+      project: 'group/project',
+      ref: 'main',
+      pipelineId: 10,
+      status: 'failed',
+    });
+    expect(panel.isPolling()).toBe(false);
+  });
+
+  test('a Pipeline already terminal when first seen is never recorded', async () => {
+    const host = notifiedHost();
+    host.watch('gitlab.com', 'group/project', 'main');
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 11, status: 'failed' })] });
+    const { panel } = await mount(host, new FakeTimers());
+
+    panel.refresh();
+    await flush();
+
+    expect(postedEvents(host)).toHaveLength(0);
+  });
+
+  test('a Pipeline settling on another Ref is not recorded for the watch', async () => {
+    const host = notifiedHost();
+    host.watch('gitlab.com', 'group/project', 'main');
+    const timers = new FakeTimers();
+    await mount(host, timers);
+
+    host.gitlabHandler = handlerFor({
+      pipelines: [pipeline({ id: 12, status: 'failed', ref: 'other' })],
+    });
+    timers.advance(POLL_INTERVAL_MS);
+    await flush();
+
+    expect(postedEvents(host)).toHaveLength(0);
+  });
+
+  test('a moved project watch error is explained in the watch area', async () => {
+    const host = notifiedHost();
+    host.watch('gitlab.com', 'group/project', 'main', 'The GitLab project has moved.');
+    const { root } = await mount(host, new FakeTimers());
+
+    expect(root.querySelector('.gp-watch-error')?.textContent).toContain('moved');
   });
 
   test('a poll re-reads events without a duplicate toast', async () => {

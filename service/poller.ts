@@ -240,7 +240,9 @@ export async function pollOnce(context: PollContext): Promise<PollOutcome> {
       paused = true;
       const retry = parseRetryAfterMs(result.headers['retry-after'], nowMs);
       if (retry != null && (retryAfterMs == null || retry > retryAfterMs)) retryAfterMs = retry;
-      continue;
+      // A 429 pauses the whole pass: polling the remaining Refs now would only
+      // spend more of a budget GitLab has already refused (ticket #65).
+      break;
     }
 
     // A moved project's redirect is not followed; it is recorded as a watch
