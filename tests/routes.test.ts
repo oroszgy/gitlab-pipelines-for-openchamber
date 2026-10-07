@@ -1,12 +1,15 @@
 import { describe, expect, test } from 'bun:test';
 import { HOST_ERROR, PROXY_BODY_MAX, type ProxyFetch } from '../service/proxy';
-import type { ConfigFs } from '../service/config';
+import { EVENT_LOG_MAX, type ConfigFs } from '../service/config';
 import {
+  advanceSeenRoute,
   NO_TOKEN_ERROR,
   proxyWithConfig,
   readConfigRoute,
+  readEventsRoute,
   readWatchRoute,
   writeConfigRoute,
+  writeEventRoute,
   writeTokenRoute,
   writeWatchRoute,
   type ProxyRouteRequest,
@@ -414,5 +417,108 @@ describe('the proxy carries the header allowlist', () => {
     expect(fetchImpl.calls[0]?.init.headers['if-none-match']).toBe('W/"abc"');
     expect(fetchImpl.calls[0]?.init.headers.Cookie).toBeUndefined();
     expect(fetchImpl.calls[0]?.init.headers.cookie).toBeUndefined();
+  });
+});
+
+describe('the events route', () => {
+  const at = '2026-01-02T03:04:05.000Z';
+  const event = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
+    host: 'gitlab.com',
+    project: 'group/project',
+    ref: 'main',
+    pipelineId: 1,
+    status: 'success',
+    at,
+    ...overrides,
+  });
+
+  test('GET returns only the events after the cursor', async () => {
+    const fs = fakeFs();
+    for (const pipelineId of [1, 2, 3]) await writeEventRoute(fs, PATH, event({ pipelineId }));
+    const view = await readEventsRoute(fs, PATH, { after: 1 });
+    expect(view.events.map((e) => e.pipelineId)).toEqual([2, 3]);
+    expect(view.cursor).toBe(3);
+  });
+
+  test('GET without a cursor returns every retained event', async () => {
+    const fs = fakeFs();
+    for (const pipelineId of [1, 2]) await writeEventRoute(fs, PATH, event({ pipelineId }));
+    expect((await readEventsRoute(fs, PATH, {})).events).toHaveLength(2);
+  });
+
+  test('advancing the watermark makes the unseen count zero', async () => {
+    const fs = fakeFs();
+    for (const pipelineId of [1, 2]) await writeEventRoute(fs, PATH, event({ pipelineId }));
+    const view = await readEventsRoute(fs, PATH, { after: 0 });
+    expect(view.unseen).toBe(2);
+    expect(await advanceSeenRoute(fs, PATH, { cursor: view.cursor })).toEqual({
+      ok: true,
+      seen: 2,
+      unseen: 0,
+    });
+    expect((await readEventsRoute(fs, PATH, { after: 0 })).unseen).toBe(0);
+  });
+
+  test('POST of an identity already recorded does not duplicate it', async () => {
+    const fs = fakeFs();
+    const first = await writeEventRoute(fs, PATH, event());
+    const second = await writeEventRoute(fs, PATH, event());
+    expect(first).toMatchObject({ ok: true, recorded: true });
+    expect(second).toMatchObject({ ok: true, recorded: false });
+    expect((await readEventsRoute(fs, PATH, { after: 0 })).events).toHaveLength(1);
+  });
+
+  test('POST stamps the time when the event carries none', async () => {
+    const fs = fakeFs();
+    const now = () => new Date('2026-02-03T04:05:06.000Z');
+    const result = await writeEventRoute(
+      fs,
+      PATH,
+      { host: 'gitlab.com', project: 'group/project', ref: 'main', pipelineId: 7, status: 'failed' },
+      now,
+    );
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.event.at).toBe('2026-02-03T04:05:06.000Z');
+  });
+
+  test('POST refuses a malformed event', async () => {
+    const fs = fakeFs();
+    const result = await writeEventRoute(fs, PATH, {
+      host: 'gitlab.com',
+      project: 'group/project',
+      ref: '   ',
+      pipelineId: 'seven',
+      status: 'failed',
+    });
+    expect(result.ok).toBe(false);
+  });
+
+  test('the bounded log drops the oldest, and eventsAfter stays correct across it', async () => {
+    const fs = fakeFs();
+    for (let i = 1; i <= EVENT_LOG_MAX + 5; i += 1) {
+      await writeEventRoute(fs, PATH, event({ pipelineId: i }));
+    }
+    const all = await readEventsRoute(fs, PATH, { after: 0 });
+    expect(all.events).toHaveLength(EVENT_LOG_MAX);
+    expect(all.events[0]?.pipelineId).toBe(6);
+    expect(all.cursor).toBe(EVENT_LOG_MAX + 5);
+    expect(all.unseen).toBe(EVENT_LOG_MAX + 5);
+
+    // A cursor inside the retained window yields exactly the events after it,
+    // even though the oldest events have already been dropped from the log.
+    const later = await readEventsRoute(fs, PATH, { after: 6 });
+    expect(later.events[0]?.pipelineId).toBe(7);
+    expect(later.events).toHaveLength(EVENT_LOG_MAX - 1);
+    expect(later.events.at(-1)?.pipelineId).toBe(EVENT_LOG_MAX + 5);
+
+    // A cursor at the newest event yields nothing.
+    expect((await readEventsRoute(fs, PATH, { after: EVENT_LOG_MAX + 5 })).events).toEqual([]);
+  });
+
+  test('refuses a cursor that is not a non-negative integer', async () => {
+    const fs = fakeFs();
+    expect((await advanceSeenRoute(fs, PATH, { cursor: -1 })).ok).toBe(false);
+    expect((await advanceSeenRoute(fs, PATH, { cursor: 'x' })).ok).toBe(false);
   });
 });

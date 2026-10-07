@@ -244,6 +244,78 @@ describe('the watch route', () => {
   });
 });
 
+describe('the events route', () => {
+  const event = {
+    host: 'gitlab.com',
+    project: 'group/project',
+    ref: 'main',
+    pipelineId: 1,
+    status: 'success',
+    at: '2026-01-02T03:04:05.000Z',
+  };
+  const post = (base: ServiceDeps, body: unknown) =>
+    handleRequest(request({ method: 'POST', path: '/events', body: JSON.stringify(body) }), base);
+
+  test('POST records an event and GET reads it back', async () => {
+    const base = deps();
+    const written = await post(base, event);
+    expect(written.status).toBe(200);
+    expect(JSON.parse(written.body).recorded).toBe(true);
+
+    const read = await handleRequest(request({ path: '/events?after=0' }), base);
+    expect(read.status).toBe(200);
+    const view = JSON.parse(read.body) as { events: unknown[]; cursor: number; unseen: number };
+    expect(view.events).toHaveLength(1);
+    expect(view.cursor).toBe(1);
+    expect(view.unseen).toBe(1);
+  });
+
+  test('GET returns only the events after the cursor', async () => {
+    const base = deps();
+    await post(base, event);
+    await post(base, { ...event, pipelineId: 2 });
+    const read = await handleRequest(request({ path: '/events?after=1' }), base);
+    expect((JSON.parse(read.body) as { events: Array<{ pipelineId: number }> }).events).toEqual([
+      { ...event, pipelineId: 2 },
+    ]);
+  });
+
+  test('POST of an identity already recorded does not duplicate it', async () => {
+    const base = deps();
+    await post(base, event);
+    const second = await post(base, event);
+    expect(JSON.parse(second.body).recorded).toBe(false);
+    const read = await handleRequest(request({ path: '/events' }), base);
+    expect((JSON.parse(read.body) as { events: unknown[] }).events).toHaveLength(1);
+  });
+
+  test('PUT /events/seen advances the watermark and clears unseen', async () => {
+    const base = deps();
+    await post(base, event);
+    const seen = await handleRequest(
+      request({ method: 'PUT', path: '/events/seen', body: JSON.stringify({ cursor: 1 }) }),
+      base,
+    );
+    expect(seen.status).toBe(200);
+    expect(JSON.parse(seen.body)).toEqual({ seen: 1, unseen: 0 });
+    const read = await handleRequest(request({ path: '/events' }), base);
+    expect(JSON.parse(read.body).unseen).toBe(0);
+  });
+
+  test('PUT /events/seen refuses a cursor that is not a non-negative integer', async () => {
+    const result = await handleRequest(
+      request({ method: 'PUT', path: '/events/seen', body: JSON.stringify({ cursor: 'x' }) }),
+      deps(),
+    );
+    expect(result.status).toBe(400);
+  });
+
+  test('an unknown method on the events route is answered 404', async () => {
+    const result = await handleRequest(request({ method: 'DELETE', path: '/events' }), deps());
+    expect(result.status).toBe(404);
+  });
+});
+
 describe('the proxy envelope carries the header allowlist', () => {
   test('forwards a request header and returns the allowlisted response headers', async () => {
     const configFs = fakeFs();

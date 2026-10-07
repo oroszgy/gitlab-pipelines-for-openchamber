@@ -8,16 +8,24 @@
  */
 
 import {
+  advanceSeen,
+  appendEvent,
   clearToken,
   clearWatch,
+  eventCursor,
+  eventsAfter,
+  isEvent,
+  normalizeEvent,
   readConfig,
   resolveToken,
   resolveWatch,
   saveConfig,
   setToken,
   setWatch,
+  unseenCount,
   type Config,
   type ConfigFs,
+  type Event,
   type Watch,
 } from './config';
 import {
@@ -137,6 +145,119 @@ export async function writeWatchRoute(
   const saved = await saveConfig(fs, path, change.config);
   if (!saved.ok) return { ok: false, error: saved.error };
   return { ok: true, watch: resolveWatch(saved.config, host, project) };
+}
+
+/**
+ * The Terminal events a surface reads, with enough to recompute its badge: the
+ * events recorded after its cursor, the newest cursor to advance to, and the
+ * Unseen count.
+ */
+export type EventsView = {
+  events: Event[];
+  /** The newest cursor: advancing the seen marker to it makes `unseen` zero. */
+  cursor: number;
+  /** How many Terminal events are recorded since the seen marker. */
+  unseen: number;
+};
+
+/** A non-negative integer cursor from a query value or body field, or 0 when absent or malformed. */
+function cursorFrom(value: unknown): number {
+  if (typeof value === 'number') return Number.isInteger(value) && value >= 0 ? value : 0;
+  if (typeof value === 'string' && /^\d+$/.test(value.trim())) return Number(value.trim());
+  return 0;
+}
+
+/**
+ * Read the Terminal events after a cursor. Absent or malformed, the cursor is
+ * treated as 0, so a surface that has never read gets the whole retained log.
+ */
+export async function readEventsRoute(
+  fs: ConfigFs,
+  path: string,
+  input: { after?: unknown },
+): Promise<EventsView> {
+  const config = await readConfig(fs, path);
+  return {
+    events: eventsAfter(config, cursorFrom(input.after)),
+    cursor: eventCursor(config),
+    unseen: unseenCount(config),
+  };
+}
+
+/** A Terminal event a mounted surface observed, as the request body carries it. */
+export type EventRouteInput = {
+  host?: unknown;
+  project?: unknown;
+  ref?: unknown;
+  pipelineId?: unknown;
+  status?: unknown;
+  at?: unknown;
+};
+
+export type EventRouteResult =
+  | { ok: true; event: Event; recorded: boolean }
+  | { ok: false; error: string };
+
+/**
+ * Record a Terminal event a mounted surface observed itself. It is deduped by
+ * identity through `appendEvent`, so posting one the poller already recorded
+ * changes nothing and answers `recorded: false`. A missing `at` is stamped with
+ * the current time.
+ */
+export async function writeEventRoute(
+  fs: ConfigFs,
+  path: string,
+  input: EventRouteInput,
+  now: () => Date = () => new Date(),
+): Promise<EventRouteResult> {
+  const at = typeof input.at === 'string' && input.at ? input.at : now().toISOString();
+  const candidate = {
+    host: typeof input.host === 'string' ? input.host : '',
+    project: typeof input.project === 'string' ? input.project.trim() : '',
+    ref: typeof input.ref === 'string' ? input.ref.trim() : '',
+    pipelineId:
+      typeof input.pipelineId === 'number' && Number.isFinite(input.pipelineId)
+        ? input.pipelineId
+        : Number.NaN,
+    status: typeof input.status === 'string' ? input.status : '',
+    at,
+  };
+  if (!isEvent(candidate)) return { ok: false, error: 'A valid Terminal event is required.' };
+
+  const current = await readConfig(fs, path);
+  const next = appendEvent(current, candidate);
+  if (next === current) return { ok: true, event: normalizeEvent(candidate), recorded: false };
+
+  const saved = await saveConfig(fs, path, next);
+  if (!saved.ok) return { ok: false, error: saved.error };
+  return { ok: true, event: normalizeEvent(candidate), recorded: true };
+}
+
+export type SeenRouteResult =
+  | { ok: true; seen: number; unseen: number }
+  | { ok: false; error: string };
+
+/**
+ * Advance the seen marker to a cursor, so a surface that has read and toasted
+ * the events up to it marks them seen to every surface. A cursor that is not a
+ * non-negative integer is refused; one past the recorded events is clamped, so
+ * the count can always be driven to zero. `seen` never moves backwards.
+ */
+export async function advanceSeenRoute(
+  fs: ConfigFs,
+  path: string,
+  input: { cursor?: unknown },
+): Promise<SeenRouteResult> {
+  if (typeof input.cursor !== 'number' || !Number.isInteger(input.cursor) || input.cursor < 0) {
+    return { ok: false, error: 'A non-negative cursor is required.' };
+  }
+  const current = await readConfig(fs, path);
+  const next = advanceSeen(current, input.cursor);
+  if (next === current) return { ok: true, seen: current.seen, unseen: unseenCount(current) };
+
+  const saved = await saveConfig(fs, path, next);
+  if (!saved.ok) return { ok: false, error: saved.error };
+  return { ok: true, seen: saved.config.seen, unseen: unseenCount(saved.config) };
 }
 
 /** A `/proxy` request: the GitLab call only. The token is resolved by the service. */

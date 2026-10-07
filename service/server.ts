@@ -13,10 +13,13 @@ import { resolveGitConfig, type GitConfigFs } from './git-config';
 import type { Poller } from './poller';
 import type { ProxyFetch } from './proxy';
 import {
+  advanceSeenRoute,
   proxyWithConfig,
   readConfigRoute,
+  readEventsRoute,
   readWatchRoute,
   writeConfigRoute,
+  writeEventRoute,
   writeTokenRoute,
   writeWatchRoute,
   type ProxyRouteRequest,
@@ -26,6 +29,8 @@ const HEALTH_ROUTE = '/health';
 const CONFIG_ROUTE = '/config';
 const TOKEN_ROUTE = '/token';
 const WATCH_ROUTE = '/watch';
+const EVENTS_ROUTE = '/events';
+const EVENTS_SEEN_ROUTE = '/events/seen';
 const GIT_CONFIG_ROUTE = '/git-config';
 const PROXY_ROUTE = '/proxy';
 
@@ -148,6 +153,32 @@ async function route(request: ServiceRequest, deps: ServiceDeps): Promise<Servic
     const result = await writeWatchRoute(deps.configFs, deps.configPath, body);
     if (!result.ok) return json(400, { error: result.error });
     return json(200, { watch: result.watch });
+  }
+
+  if (url.pathname === EVENTS_ROUTE) {
+    if (method === 'GET') {
+      return json(
+        200,
+        await readEventsRoute(deps.configFs, deps.configPath, {
+          after: url.searchParams.get('after'),
+        }),
+      );
+    }
+    if (method !== 'POST') return json(404, { error: 'not found' });
+    const body = await readJson(request);
+    if (!body) return json(400, { error: 'invalid request body' });
+    const result = await writeEventRoute(deps.configFs, deps.configPath, body);
+    if (!result.ok) return json(400, { error: result.error });
+    return json(200, { event: result.event, recorded: result.recorded });
+  }
+
+  if (url.pathname === EVENTS_SEEN_ROUTE) {
+    if (method !== 'PUT') return json(404, { error: 'not found' });
+    const body = await readJson(request);
+    if (!body) return json(400, { error: 'invalid request body' });
+    const result = await advanceSeenRoute(deps.configFs, deps.configPath, body);
+    if (!result.ok) return json(400, { error: result.error });
+    return json(200, { seen: result.seen, unseen: result.unseen });
   }
 
   if (url.pathname === GIT_CONFIG_ROUTE) {

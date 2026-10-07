@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test';
 import { join, win32 } from 'node:path';
 import {
+  advanceSeen,
   appendEvent,
   clearToken,
   clearWatch,
@@ -18,6 +19,7 @@ import {
   setToken,
   setWatch,
   setWatchError,
+  unseenCount,
   type Config,
   type ConfigFs,
   type Event,
@@ -130,6 +132,7 @@ describe('readConfig', () => {
       watches: {},
       events: [],
       eventSeq: 0,
+      seen: 0,
     });
   });
 
@@ -436,5 +439,71 @@ describe('the event log', () => {
     const result = await saveConfig(fs, PATH, config({ events: [event({ host: 'http://nope' })] }));
     expect(result.ok).toBe(false);
     expect(fs.entries[PATH]).toBeUndefined();
+  });
+});
+
+describe('the seen marker', () => {
+  const at = '2026-01-02T03:04:05.000Z';
+  const event = (overrides: Partial<Event> = {}): Event => ({
+    host: 'gitlab.com',
+    project: 'group/project',
+    ref: 'main',
+    pipelineId: 1,
+    status: 'success',
+    at,
+    ...overrides,
+  });
+
+  test('advances the marker and clears the unseen count', () => {
+    let stored = config();
+    for (let i = 1; i <= 3; i += 1) stored = appendEvent(stored, event({ pipelineId: i }));
+    expect(unseenCount(stored)).toBe(3);
+    const seen = advanceSeen(stored, 3);
+    expect(seen.seen).toBe(3);
+    expect(unseenCount(seen)).toBe(0);
+  });
+
+  test('never moves the marker backwards', () => {
+    const advanced = config({
+      events: [event(), event({ pipelineId: 2 }), event({ pipelineId: 3 })],
+      eventSeq: 3,
+      seen: 3,
+    });
+    expect(advanceSeen(advanced, 1).seen).toBe(3);
+  });
+
+  test('clamps a cursor beyond the recorded events', () => {
+    const stored = appendEvent(appendEvent(config(), event()), event({ pipelineId: 2 }));
+    const advanced = advanceSeen(stored, 99);
+    expect(advanced.seen).toBe(2);
+    expect(unseenCount(advanced)).toBe(0);
+  });
+
+  test('round-trips the marker through the config file', async () => {
+    const fs = fakeFs();
+    const stored = config({ events: [event()], eventSeq: 1, seen: 1 });
+    const saved = await saveConfig(fs, PATH, stored);
+    expect(saved.ok).toBe(true);
+    expect(await readConfig(fs, PATH)).toEqual(stored);
+  });
+
+  test('reads an older config with no marker as nothing seen yet', async () => {
+    const stored = JSON.stringify({
+      host: 'gitlab.com',
+      project: '',
+      tokens: {},
+      events: [event()],
+      eventSeq: 1,
+    });
+    const fs = fakeFs({ [PATH]: { content: stored, mode: 0o600 } });
+    const config = await readConfig(fs, PATH);
+    expect(config.seen).toBe(0);
+    expect(unseenCount(config)).toBe(1);
+  });
+
+  test('reads an older config with no event fields as zero unseen', async () => {
+    const stored = JSON.stringify({ host: 'gitlab.com', project: '', tokens: {} });
+    const fs = fakeFs({ [PATH]: { content: stored, mode: 0o600 } });
+    expect(unseenCount(await readConfig(fs, PATH))).toBe(0);
   });
 });

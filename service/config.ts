@@ -49,6 +49,8 @@ export type Config = {
   events: Event[];
   /** How many events have ever been recorded; the cursor `eventsAfter` reads past. */
   eventSeq: number;
+  /** How many recorded events a surface has marked seen; the watermark it advances. */
+  seen: number;
 };
 
 /**
@@ -64,7 +66,7 @@ export type ConfigFs = {
 };
 
 export function defaultConfig(): Config {
-  return { host: DEFAULT_HOST, project: '', tokens: {}, watches: {}, events: [], eventSeq: 0 };
+  return { host: DEFAULT_HOST, project: '', tokens: {}, watches: {}, events: [], eventSeq: 0, seen: 0 };
 }
 
 /**
@@ -184,7 +186,7 @@ export function eventIdentity(event: Event): string {
 }
 
 /** Whether a stored value is a well-formed Terminal event. */
-function isEvent(value: unknown): value is Event {
+export function isEvent(value: unknown): value is Event {
   if (typeof value !== 'object' || value === null) return false;
   const record = value as Record<string, unknown>;
   return (
@@ -230,6 +232,14 @@ function normalizeEventSeq(raw: unknown, retained: number): number {
 }
 
 /**
+ * A stored seen marker, floored at zero and never past the recorded events. An
+ * older config with no marker reads as zero, so nothing is seen yet.
+ */
+function normalizeSeen(raw: unknown, eventSeq: number): number {
+  return typeof raw === 'number' && Number.isInteger(raw) && raw >= 0 ? Math.min(raw, eventSeq) : 0;
+}
+
+/**
  * Read the configuration, yielding the default when the file is absent or
  * unreadable, or when its contents are not valid JSON — a corrupt file starts
  * the user fresh rather than making the Extension unusable. A stored host,
@@ -255,6 +265,7 @@ export async function readConfig(fs: ConfigFs, path: string): Promise<Config> {
   const host = typeof record.host === 'string' ? normalizeHost(record.host) : null;
   const project = typeof record.project === 'string' ? record.project : '';
   const events = normalizeEvents(record.events).events;
+  const eventSeq = normalizeEventSeq(record.eventSeq, events.length);
 
   return {
     host: host ?? DEFAULT_HOST,
@@ -262,7 +273,8 @@ export async function readConfig(fs: ConfigFs, path: string): Promise<Config> {
     tokens: normalizeTokens(record.tokens).tokens,
     watches: normalizeWatches(record.watches).watches,
     events,
-    eventSeq: normalizeEventSeq(record.eventSeq, events.length),
+    eventSeq,
+    seen: normalizeSeen(record.seen, eventSeq),
   };
 }
 
@@ -359,6 +371,11 @@ export function clearWatchError(config: Config, host: string, project: string): 
   };
 }
 
+/** A copy of an event with its host normalized, so its identity and storage agree. */
+export function normalizeEvent(event: Event): Event {
+  return { ...event, host: normalizeHost(event.host) ?? event.host };
+}
+
 /**
  * Append a Terminal event to the bounded log, dropping the oldest past the cap.
  * An event whose identity is already recorded is ignored, so re-polling the same
@@ -366,7 +383,7 @@ export function clearWatchError(config: Config, host: string, project: string): 
  * changed, so a caller can detect a no-op by reference.
  */
 export function appendEvent(config: Config, event: Event): Config {
-  const normalized: Event = { ...event, host: normalizeHost(event.host) ?? event.host };
+  const normalized = normalizeEvent(event);
   const identity = eventIdentity(normalized);
   if (config.events.some((existing) => eventIdentity(existing) === identity)) return config;
   const events = [...config.events, normalized];
@@ -381,6 +398,26 @@ export function appendEvent(config: Config, event: Event): Config {
 /** The cursor a surface has reached: how many events have ever been recorded. */
 export function eventCursor(config: Config): number {
   return config.eventSeq;
+}
+
+/**
+ * The Terminal events recorded since the seen marker: what a surface has not
+ * looked at yet, and what the rail badge counts.
+ */
+export function unseenCount(config: Config): number {
+  return Math.max(0, config.eventSeq - config.seen);
+}
+
+/**
+ * Advance the seen marker to a cursor, never moving it backwards and never past
+ * what has been recorded, so a stale surface cannot unsee an event. Returns the
+ * same `config` when nothing changed, so a caller can skip a write.
+ */
+export function advanceSeen(config: Config, cursor: number): Config {
+  if (!Number.isInteger(cursor) || cursor <= 0) return config;
+  const target = Math.min(cursor, config.eventSeq);
+  if (target <= config.seen) return config;
+  return { ...config, seen: target };
 }
 
 /**
@@ -422,13 +459,15 @@ export async function saveConfig(fs: ConfigFs, path: string, config: Config): Pr
     return { ok: false, error: 'An event is malformed.' };
   }
 
+  const eventSeq = normalizeEventSeq(config.eventSeq, normalizedEvents.events.length);
   const next: Config = {
     host,
     project: config.project,
     tokens,
     watches: normalizedWatches.watches,
     events: normalizedEvents.events,
-    eventSeq: normalizeEventSeq(config.eventSeq, normalizedEvents.events.length),
+    eventSeq,
+    seen: normalizeSeen(config.seen, eventSeq),
   };
   await fs.mkdir(dirname(path));
   await fs.writeFile(path, `${JSON.stringify(next, null, 2)}\n`, 0o600);
