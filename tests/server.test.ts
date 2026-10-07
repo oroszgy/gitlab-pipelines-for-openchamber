@@ -156,6 +156,94 @@ describe('the service shell answers authenticated requests', () => {
   });
 });
 
+describe('the watch route', () => {
+  test('GET returns no watch until one is set', async () => {
+    const result = await handleRequest(
+      request({ path: '/watch?host=gitlab.com&project=group/project' }),
+      deps(),
+    );
+    expect(result.status).toBe(200);
+    expect(JSON.parse(result.body)).toEqual({ watch: null });
+  });
+
+  test('PUT sets a watch and GET returns it', async () => {
+    const base = deps();
+    const put = await handleRequest(
+      request({
+        method: 'PUT',
+        path: '/watch',
+        body: JSON.stringify({ host: 'gitlab.com', project: 'group/project', ref: 'main' }),
+      }),
+      base,
+    );
+    expect(put.status).toBe(200);
+    const written = JSON.parse(put.body) as { watch: { ref: string; addedAt: string } };
+    expect(written.watch.ref).toBe('main');
+    expect(written.watch.addedAt).toBe(new Date(written.watch.addedAt).toISOString());
+
+    const get = await handleRequest(
+      request({ path: '/watch?host=gitlab.com&project=group/project' }),
+      base,
+    );
+    expect(get.status).toBe(200);
+    expect(JSON.parse(get.body)).toEqual({ watch: written.watch });
+  });
+
+  test('PUT null clears the watch', async () => {
+    const base = deps();
+    await handleRequest(
+      request({
+        method: 'PUT',
+        path: '/watch',
+        body: JSON.stringify({ host: 'gitlab.com', project: 'group/project', ref: 'main' }),
+      }),
+      base,
+    );
+    const clear = await handleRequest(
+      request({
+        method: 'PUT',
+        path: '/watch',
+        body: JSON.stringify({ host: 'gitlab.com', project: 'group/project', ref: null }),
+      }),
+      base,
+    );
+    expect(clear.status).toBe(200);
+    expect(JSON.parse(clear.body)).toEqual({ watch: null });
+    const get = await handleRequest(
+      request({ path: '/watch?host=gitlab.com&project=group/project' }),
+      base,
+    );
+    expect(JSON.parse(get.body)).toEqual({ watch: null });
+  });
+
+  test('PUT with no project to key on is answered 400', async () => {
+    const result = await handleRequest(
+      request({ method: 'PUT', path: '/watch', body: JSON.stringify({ ref: 'main' }) }),
+      deps(),
+    );
+    expect(result.status).toBe(400);
+  });
+
+  test('GET and PUT fall back to the Configured host and project', async () => {
+    const base = deps();
+    await handleRequest(
+      request({
+        method: 'POST',
+        path: '/config',
+        body: JSON.stringify({ host: 'gitlab.example.com', project: 'group/project' }),
+      }),
+      base,
+    );
+    await handleRequest(
+      request({ method: 'PUT', path: '/watch', body: JSON.stringify({ ref: 'main' }) }),
+      base,
+    );
+    const get = await handleRequest(request({ path: '/watch' }), base);
+    expect(get.status).toBe(200);
+    expect(JSON.parse(get.body).watch.ref).toBe('main');
+  });
+});
+
 describe('the proxy envelope carries the header allowlist', () => {
   test('forwards a request header and returns the allowlisted response headers', async () => {
     const configFs = fakeFs();

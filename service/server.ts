@@ -14,14 +14,17 @@ import type { ProxyFetch } from './proxy';
 import {
   proxyWithConfig,
   readConfigRoute,
+  readWatchRoute,
   writeConfigRoute,
   writeTokenRoute,
+  writeWatchRoute,
   type ProxyRouteRequest,
 } from './routes';
 
 const HEALTH_ROUTE = '/health';
 const CONFIG_ROUTE = '/config';
 const TOKEN_ROUTE = '/token';
+const WATCH_ROUTE = '/watch';
 const GIT_CONFIG_ROUTE = '/git-config';
 const PROXY_ROUTE = '/proxy';
 
@@ -125,6 +128,23 @@ async function route(request: ServiceRequest, deps: ServiceDeps): Promise<Servic
     const result = await writeTokenRoute(deps.configFs, deps.configPath, body);
     if (!result.ok) return json(400, { error: result.error });
     return json(200, { config: result.view });
+  }
+
+  if (url.pathname === WATCH_ROUTE) {
+    if (method === 'GET') {
+      return json(200, {
+        watch: await readWatchRoute(deps.configFs, deps.configPath, {
+          host: url.searchParams.get('host'),
+          project: url.searchParams.get('project'),
+        }),
+      });
+    }
+    if (method !== 'PUT') return json(404, { error: 'not found' });
+    const body = await readJson(request);
+    if (!body) return json(400, { error: 'invalid request body' });
+    const result = await writeWatchRoute(deps.configFs, deps.configPath, body);
+    if (!result.ok) return json(400, { error: result.error });
+    return json(200, { watch: result.watch });
   }
 
   if (url.pathname === GIT_CONFIG_ROUTE) {

@@ -9,12 +9,16 @@
 
 import {
   clearToken,
+  clearWatch,
   readConfig,
   resolveToken,
+  resolveWatch,
   saveConfig,
   setToken,
+  setWatch,
   type Config,
   type ConfigFs,
+  type Watch,
 } from './config';
 import {
   HOST_ERROR,
@@ -86,6 +90,53 @@ async function persist(fs: ConfigFs, path: string, config: Config): Promise<Conf
   const saved = await saveConfig(fs, path, config);
   if (!saved.ok) return { ok: false, error: saved.error };
   return { ok: true, view: configView(saved.config) };
+}
+
+/** A non-blank string from a request field, or null so the Configured value stands. */
+function named(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() ? value : null;
+}
+
+/** The watch as the Panel sees it: the Ref and when it was set, or null. */
+export type WatchView = Watch | null;
+
+export type WatchRouteResult = { ok: true; watch: WatchView } | { ok: false; error: string };
+
+/** Read the Watched Ref for a host and project, or null when none is set. */
+export async function readWatchRoute(
+  fs: ConfigFs,
+  path: string,
+  input: { host?: unknown; project?: unknown },
+): Promise<WatchView> {
+  const config = await readConfig(fs, path);
+  const host = named(input.host) ?? config.host;
+  const project = named(input.project) ?? config.project;
+  return resolveWatch(config, host, project);
+}
+
+/**
+ * Set or clear the Watched Ref for a host and project. A non-blank Ref sets it,
+ * replacing any previous Ref for that project; a `null`, empty or absent Ref
+ * clears it. An absent host or project uses the Configured one, so the Panel
+ * never has to repeat it.
+ */
+export async function writeWatchRoute(
+  fs: ConfigFs,
+  path: string,
+  input: { host?: unknown; project?: unknown; ref?: unknown },
+  now: () => Date = () => new Date(),
+): Promise<WatchRouteResult> {
+  const current = await readConfig(fs, path);
+  const host = named(input.host) ?? current.host;
+  const project = named(input.project) ?? current.project;
+  const ref = typeof input.ref === 'string' ? input.ref.trim() : '';
+  const change = ref
+    ? setWatch(current, host, project, ref, now().toISOString())
+    : clearWatch(current, host, project);
+  if (!change.ok) return { ok: false, error: change.error };
+  const saved = await saveConfig(fs, path, change.config);
+  if (!saved.ok) return { ok: false, error: saved.error };
+  return { ok: true, watch: resolveWatch(saved.config, host, project) };
 }
 
 /** A `/proxy` request: the GitLab call only. The token is resolved by the service. */

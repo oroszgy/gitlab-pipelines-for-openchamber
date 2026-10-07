@@ -5,8 +5,10 @@ import {
   NO_TOKEN_ERROR,
   proxyWithConfig,
   readConfigRoute,
+  readWatchRoute,
   writeConfigRoute,
   writeTokenRoute,
+  writeWatchRoute,
   type ProxyRouteRequest,
 } from '../service/routes';
 
@@ -174,6 +176,112 @@ describe('setting and clearing an Access token', () => {
     const result = await writeTokenRoute(fs, PATH, { host: 'http://nope', token: 'a' });
     expect(result).toEqual({ ok: false, error: HOST_ERROR });
     expect(await readConfigRoute(fs, PATH)).toEqual(DEFAULT_VIEW);
+  });
+});
+
+describe('reading and writing the watch', () => {
+  const now = () => new Date('2026-01-02T03:04:05.000Z');
+  const addedAt = now().toISOString();
+
+  test('sets a watch and reads it back', async () => {
+    const fs = fakeFs();
+    const written = await writeWatchRoute(
+      fs,
+      PATH,
+      { host: 'gitlab.com', project: 'group/project', ref: 'main' },
+      now,
+    );
+    expect(written).toEqual({ ok: true, watch: { ref: 'main', addedAt } });
+    expect(await readWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project' })).toEqual({
+      ref: 'main',
+      addedAt,
+    });
+  });
+
+  test('replaces the previous Ref for the same project', async () => {
+    const fs = fakeFs();
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: 'main' }, now);
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: 'release' }, now);
+    const watch = await readWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project' });
+    expect(watch?.ref).toBe('release');
+  });
+
+  test('reads a null watch when none is set', async () => {
+    const fs = fakeFs();
+    expect(await readWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project' })).toBeNull();
+  });
+
+  test('uses the Configured host and project when none is named', async () => {
+    const fs = fakeFs();
+    await writeConfigRoute(fs, PATH, { host: 'gitlab.example.com', project: 'group/project' });
+    expect(await writeWatchRoute(fs, PATH, { ref: 'main' }, now)).toEqual({
+      ok: true,
+      watch: { ref: 'main', addedAt },
+    });
+    expect(await readWatchRoute(fs, PATH, {})).toEqual({ ref: 'main', addedAt });
+  });
+
+  test('clears with an explicit null Ref', async () => {
+    const fs = fakeFs();
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: 'main' }, now);
+    expect(
+      await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: null }, now),
+    ).toEqual({ ok: true, watch: null });
+    expect(await readWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project' })).toBeNull();
+  });
+
+  test('clears with an empty Ref', async () => {
+    const fs = fakeFs();
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: 'main' }, now);
+    expect(
+      await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: '   ' }, now),
+    ).toEqual({ ok: true, watch: null });
+  });
+
+  test('clears when the Ref is absent, PUT replacing the whole watch', async () => {
+    const fs = fakeFs();
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: 'main' }, now);
+    expect(
+      await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project' }, now),
+    ).toEqual({ ok: true, watch: null });
+  });
+
+  test('keeps the watches of other projects', async () => {
+    const fs = fakeFs();
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/a', ref: 'main' }, now);
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/b', ref: 'release' }, now);
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/a', ref: null }, now);
+    expect(await readWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/b' })).toEqual({
+      ref: 'release',
+      addedAt,
+    });
+  });
+
+  test('the watch survives a restart, read back from the same file', async () => {
+    const fs = fakeFs();
+    await writeWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project', ref: 'main' }, now);
+    // A read against the persisted file is what a restarted service does.
+    expect(await readWatchRoute(fs, PATH, { host: 'gitlab.com', project: 'group/project' })).toEqual({
+      ref: 'main',
+      addedAt,
+    });
+  });
+
+  test('refuses a watch when no project can be resolved', async () => {
+    const fs = fakeFs();
+    const result = await writeWatchRoute(fs, PATH, { host: 'gitlab.com', ref: 'main' }, now);
+    expect(result.ok).toBe(false);
+  });
+
+  test('refuses a watch for a malformed host', async () => {
+    const fs = fakeFs();
+    const result = await writeWatchRoute(
+      fs,
+      PATH,
+      { host: 'http://nope', project: 'group/project', ref: 'main' },
+      now,
+    );
+    expect(result).toEqual({ ok: false, error: HOST_ERROR });
   });
 });
 

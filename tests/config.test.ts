@@ -2,13 +2,16 @@ import { describe, expect, test } from 'bun:test';
 import { join, win32 } from 'node:path';
 import {
   clearToken,
+  clearWatch,
   configPath,
   defaultConfig,
   normalizeHost,
   readConfig,
   resolveToken,
+  resolveWatch,
   saveConfig,
   setToken,
+  setWatch,
   type Config,
   type ConfigFs,
 } from '../service/config';
@@ -117,6 +120,7 @@ describe('readConfig', () => {
       host: 'gitlab.com',
       project: 'group/project',
       tokens: { 'self.example.com': 'secret-a' },
+      watches: {},
     });
   });
 
@@ -195,5 +199,93 @@ describe('Access tokens', () => {
     expect(setToken(config(), 'http://nope', 'a').ok).toBe(false);
     expect(clearToken(config(), 'not a host').ok).toBe(false);
     expect(resolveToken(config(), 'http://nope')).toBeNull();
+  });
+});
+
+describe('watches', () => {
+  const addedAt = '2026-01-02T03:04:05.000Z';
+
+  test('round-trips a watch through the config file, so it survives a restart', async () => {
+    const fs = fakeFs();
+    const stored = config({ watches: { 'gitlab.com/group/project': { ref: 'main', addedAt } } });
+    const saved = await saveConfig(fs, PATH, stored);
+    expect(saved.ok).toBe(true);
+    expect(await readConfig(fs, PATH)).toEqual(stored);
+  });
+
+  test('reads an older config that has no watch field', async () => {
+    const stored = JSON.stringify({ host: 'gitlab.com', project: '', tokens: {} });
+    const fs = fakeFs({ [PATH]: { content: stored, mode: 0o600 } });
+    expect((await readConfig(fs, PATH)).watches).toEqual({});
+  });
+
+  test('sets one watch for a project, replacing a previous Ref', () => {
+    const first = setWatch(config(), 'gitlab.com', 'group/project', 'main', addedAt);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = setWatch(first.config, 'https://gitlab.com/', 'group/project', 'release', addedAt);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(Object.keys(second.config.watches)).toEqual(['gitlab.com/group/project']);
+    expect(resolveWatch(second.config, 'gitlab.com', 'group/project')).toEqual({ ref: 'release', addedAt });
+  });
+
+  test('keeps watches for different projects apart', () => {
+    const first = setWatch(config(), 'gitlab.com', 'group/a', 'main', addedAt);
+    expect(first.ok).toBe(true);
+    if (!first.ok) return;
+    const second = setWatch(first.config, 'gitlab.com', 'group/b', 'release', addedAt);
+    expect(second.ok).toBe(true);
+    if (!second.ok) return;
+    expect(resolveWatch(second.config, 'gitlab.com', 'group/a')?.ref).toBe('main');
+    expect(resolveWatch(second.config, 'gitlab.com', 'group/b')?.ref).toBe('release');
+  });
+
+  test('clears one project\u2019s watch and leaves the others', () => {
+    const both = config({
+      watches: {
+        'gitlab.com/group/a': { ref: 'main', addedAt },
+        'gitlab.com/group/b': { ref: 'release', addedAt },
+      },
+    });
+    const cleared = clearWatch(both, 'gitlab.com', 'group/a');
+    expect(cleared.ok).toBe(true);
+    if (!cleared.ok) return;
+    expect(cleared.config.watches).toEqual({ 'gitlab.com/group/b': { ref: 'release', addedAt } });
+  });
+
+  test('resolves nothing for a project with no watch', () => {
+    expect(resolveWatch(config(), 'gitlab.com', 'group/project')).toBeNull();
+  });
+
+  test('treats a bare host and its origin as the same key', () => {
+    const stored = config({ watches: { 'gitlab.com/group/project': { ref: 'main', addedAt } } });
+    expect(resolveWatch(stored, 'https://gitlab.com/', 'group/project')?.ref).toBe('main');
+  });
+
+  test('refuses a watch with no Ref', () => {
+    expect(setWatch(config(), 'gitlab.com', 'group/project', '   ', addedAt).ok).toBe(false);
+  });
+
+  test('refuses a watch with no project', () => {
+    expect(setWatch(config(), 'gitlab.com', '', 'main', addedAt).ok).toBe(false);
+    expect(clearWatch(config(), 'gitlab.com', '').ok).toBe(false);
+  });
+
+  test('drops a malformed stored watch but keeps a good one', async () => {
+    const stored = JSON.stringify({
+      host: 'gitlab.com',
+      project: '',
+      tokens: {},
+      watches: {
+        'gitlab.com/group/project': { ref: 'main', addedAt },
+        'gitlab.com/group/broken': { ref: 42 },
+        'not a host/group/x': { ref: 'main', addedAt },
+      },
+    });
+    const fs = fakeFs({ [PATH]: { content: stored, mode: 0o600 } });
+    expect((await readConfig(fs, PATH)).watches).toEqual({
+      'gitlab.com/group/project': { ref: 'main', addedAt },
+    });
   });
 });

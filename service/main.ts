@@ -8,7 +8,7 @@
  * `OPENCHAMBER_SERVICE_PORT`, require `Authorization: Bearer
  * <OPENCHAMBER_SERVICE_TOKEN>` on every request including health, and answer
  * one health route, one git-config route, one configuration route, one token
- * route and one proxy route.
+ * route, one watch route and one proxy route.
  */
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
