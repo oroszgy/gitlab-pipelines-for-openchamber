@@ -5,6 +5,7 @@ import type {
   GuestWorktreesSnapshot,
   HostReadyContext,
   HostTheme,
+  JsonValue,
   StartSessionRequest,
   StartSessionResult,
 } from '@openchamber/sdk';
@@ -44,6 +45,35 @@ export class FakeHost implements HostPort {
   startSessionResult: StartSessionResult = { sessionId: 'ses_1', sent: 'sent', directory: '/repo' };
   startSessionError: unknown = null;
   disposed = false;
+
+  /** The in-memory backing for `storage`, so a test can inspect what was written. */
+  readonly stored = new Map<string, JsonValue>();
+  /** When set, every storage call rejects, modelling an unavailable store. */
+  storageError: unknown = null;
+
+  /** The host's extension storage, as `host.storage`. */
+  storage: HostPort['storage'] = {
+    get: async (key) => {
+      this.storageCheck();
+      return this.stored.get(key);
+    },
+    set: async (key, value) => {
+      this.storageCheck();
+      this.stored.set(key, value);
+    },
+    delete: async (key) => {
+      this.storageCheck();
+      this.stored.delete(key);
+    },
+    keys: async () => {
+      this.storageCheck();
+      return [...this.stored.keys()].sort();
+    },
+  };
+
+  private storageCheck(): void {
+    if (this.storageError) throw this.storageError;
+  }
 
   /** The service's stored configuration (the Configured host and Project override). */
   config: { host: string; project: string } = { host: 'gitlab.com', project: '' };

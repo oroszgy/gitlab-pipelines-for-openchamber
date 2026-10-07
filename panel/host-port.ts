@@ -3,6 +3,7 @@ import type {
   GuestProjectsSnapshot,
   GuestWorktreesSnapshot,
   HostReadyContext,
+  JsonValue,
   StartSessionRequest,
   StartSessionResult,
 } from '@openchamber/sdk';
@@ -58,6 +59,17 @@ export type HostPort = {
   openUrl(url: string): Promise<void>;
   /** Put text on the user's clipboard, for Copy the Trace. Ungated on the host. */
   writeClipboard(text: string): Promise<void>;
+  /**
+   * The extension's own persistent JSON store. It is global across projects,
+   * so `prefs.ts` namespaces every key by host+project+ref. Ungated on the host,
+   * and every call is best-effort.
+   */
+  storage: {
+    get(key: string): Promise<JsonValue | undefined>;
+    set(key: string, value: JsonValue): Promise<void>;
+    delete(key: string): Promise<void>;
+    keys(): Promise<string[]>;
+  };
   onReady(listener: (context: HostReadyContext) => void): () => void;
   dispose(): void;
 };
@@ -79,6 +91,12 @@ export function createHostPort(): HostPort {
     startSession: (request) => host.startSession(request),
     openUrl: (url) => host.openUrl(url),
     writeClipboard: (text) => host.writeClipboard(text),
+    storage: {
+      get: (key) => host.storage.get(key),
+      set: (key, value) => host.storage.set(key, value),
+      delete: (key) => host.storage.delete(key),
+      keys: () => host.storage.keys(),
+    },
     onReady: (listener) => host.onReady(listener),
     dispose: () => host.dispose(),
   };

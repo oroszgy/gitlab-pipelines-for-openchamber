@@ -832,6 +832,66 @@ describe('branch / all refs scope', () => {
     expect(root.querySelector('.gp-scope')?.hasAttribute('hidden')).toBe(true);
     expect(root.querySelector('[role="tablist"]')).toBeNull();
   });
+
+  test('a scope change survives a remount for the same project and ref', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    first.panel.setScope('all');
+    await flush();
+    first.panel.dispose();
+
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('All refs');
+  });
+
+  test('a different ref has its own remembered scope', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    first.panel.setScope('all');
+    await flush();
+    first.panel.dispose();
+
+    // The same repository, a different Ref: its own record, so Branch.
+    host.files.set('.git/HEAD', 'ref: refs/heads/other\n');
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'other', status: 'ready' }];
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('Branch');
+  });
+
+  test('a different host has its own remembered scope', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const timers = new FakeTimers();
+    const first = await mount(host, timers);
+    first.panel.setScope('all');
+    await flush();
+    first.panel.dispose();
+
+    // The same repository, a different Configured host: its own record, so Branch.
+    host.config.host = 'gitlab.example.com';
+    host.tokens['gitlab.example.com'] = 'pat';
+    host.files.set('.git/config', GIT_CONFIG.replace('gitlab.com', 'gitlab.example.com'));
+    const second = await mount(host, timers);
+    expect(second.root.querySelector('[role="tab"][aria-selected="true"]')?.textContent).toContain('Branch');
+  });
+
+  test('an unavailable storage does not break the panel', async () => {
+    const host = configuredHost();
+    host.storageError = new Error('storage unavailable');
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline()] });
+    const { root, panel } = await mount(host, new FakeTimers());
+    expect(text(root)).toContain('main');
+    expect(root.querySelector('[role="tablist"]')).not.toBeNull();
+
+    // A scope change still works and still refetches, even with no store.
+    panel.setScope('all');
+    await flush();
+    expect(pipelineRequests(host)).toHaveLength(2);
+  });
 });
 
 describe('adaptive polling and freshness', () => {

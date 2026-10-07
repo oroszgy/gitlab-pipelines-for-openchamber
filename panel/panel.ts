@@ -46,6 +46,7 @@ import {
   shouldPoll,
   widenForLowRateLimit,
 } from './poll';
+import { prefKey, readPrefs, writePrefs } from './prefs';
 import {
   isLinkedWorktree,
   resolveProject,
@@ -303,6 +304,8 @@ class PipelinesPanel implements PanelHandle {
   private usernameHost: string | null = null;
 
   private scope: Scope = 'branch';
+  /** The storage key the current scope is remembered under, so it restores once per key. */
+  private prefsKey: string | null = null;
   private phase: 'init' | 'loading' | 'ready' | 'problem' = 'init';
   private resolved: Extract<ProjectResolution, { ok: true }> | null = null;
   private problem: Problem | null = null;
@@ -522,6 +525,7 @@ class PipelinesPanel implements PanelHandle {
     this.pipelines = [];
     this.pipelinesNextPage = null;
     this.pipelinesPage = 1;
+    this.persistScope();
     this.refresh();
   }
 
@@ -574,6 +578,8 @@ class PipelinesPanel implements PanelHandle {
     this.derivedProject = resolution.project;
     this.redirectHops = 0;
     this.resolved = this.applyHealedProject(resolution);
+    await this.restoreScope(gen, host, this.resolved);
+    if (this.disposed || gen !== this.generation) return;
     // A host with no Access token is its own state, distinct from a failed
     // request: the service would refuse the call, so do not attempt it. The
     // freshly resolved project stays in the header so the state has context.
@@ -778,6 +784,37 @@ class PipelinesPanel implements PanelHandle {
   /** The scope actually fetched: branch scope needs an open Ref, else all refs. */
   private currentScope(ref: string | null | undefined): Scope {
     return ref ? this.scope : 'all';
+  }
+
+  /**
+   * Restore the remembered scope for this host+project+ref, once per key. A
+   * refresh for the same key keeps the in-memory scope, so a manual change is
+   * not undone by a poll. Best-effort: a failed read leaves the default.
+   */
+  private async restoreScope(
+    gen: number,
+    host: string,
+    resolution: { project: string; ref: string | null },
+  ): Promise<void> {
+    const ref = resolution.ref;
+    if (!ref) return;
+    const key = prefKey(host, resolution.project, ref);
+    if (key === this.prefsKey) return;
+    this.prefsKey = key;
+    const prefs = await readPrefs(this.port.storage, key);
+    if (this.disposed || gen !== this.generation) return;
+    // A different key with no record is a different view: fall back to Branch.
+    this.scope = prefs.scope ?? 'branch';
+  }
+
+  /** Remember the current scope for this host+project+ref. Best-effort. */
+  private persistScope(): void {
+    const host = this.config?.host;
+    const resolution = this.resolved;
+    if (!host || !resolution?.ref) return;
+    const key = prefKey(host, resolution.project, resolution.ref);
+    this.prefsKey = key;
+    void writePrefs(this.port.storage, key, { scope: this.scope }, this.timers.now());
   }
 
   private async loadPipelines(
