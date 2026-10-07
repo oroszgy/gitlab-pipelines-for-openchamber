@@ -3,6 +3,7 @@ import { applyHostReady, mountButton, mountEmpty, mountMenu, mountTabs } from '@
 
 import { accessLevelOf, canRunPipeline, cancelRoleOf, menuState, type ActionId, type Capability } from './actions';
 import { DEFAULT_HOST, HOST_BODY_CAP, LIVE_TICK_MS, LOG_MAX_LINES, PANEL_ID, POLL_INTERVAL_MS, SERVICE_CONFIG_PATH, SERVICE_GIT_CONFIG_PATH, SERVICE_PATH, SERVICE_TOKEN_PATH } from './config';
+import { defaultExpansion } from './defaults';
 import {
   MAX_DOWNSTREAM_GENERATIONS,
   canExpand,
@@ -986,21 +987,31 @@ class PipelinesPanel implements PanelHandle {
   }
 
   /**
-   * Reopen the remembered expansion once the list has loaded. The remembered
-   * Pipeline must still be listed; otherwise the view stays collapsed, so a
-   * deleted Pipeline leaves nothing dangling.
+   * Choose the expansion once the list has loaded. A remembered Pipeline still
+   * listed wins; otherwise the newest active Pipeline expands; an all-settled
+   * list expands nothing. Only a remembered Pipeline restores its Downstream
+   * chain and open Job, so a fallback auto-expansion never opens the drawer. A
+   * poll for the same key keeps the in-memory view, so this runs only when a
+   * record was just read for a new key.
    */
   private applyRememberedExpansion(gen: number): void {
     const prefs = this.pendingRestore;
     this.pendingRestore = null;
-    const pipelineId = prefs?.pipelineId;
-    if (pipelineId == null || !this.pipelines.some((pipeline) => pipeline.id === pipelineId)) {
+    if (prefs == null) return;
+    const pipelineId = defaultExpansion(this.pipelines, prefs);
+    if (pipelineId == null) {
       this.pendingJobId = null;
       return;
     }
     this.expandedId = pipelineId;
-    this.pendingJobId = prefs?.jobId ?? null;
-    this.downstreamPath = (prefs?.downstream ?? []).map((node) => ({
+    // The remembered Pipeline is the only one whose chain and Job to reopen; a
+    // fallback auto-expansion starts collapsed beyond its own row.
+    if (prefs.pipelineId !== pipelineId) {
+      this.pendingJobId = null;
+      return;
+    }
+    this.pendingJobId = prefs.jobId ?? null;
+    this.downstreamPath = (prefs.downstream ?? []).map((node) => ({
       project: node.project,
       pipelineId: node.pipelineId,
       generation: node.generation,

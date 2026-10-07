@@ -568,8 +568,7 @@ describe('live log while a job runs', () => {
     };
     const timers = new FakeTimers();
     const { root } = await mount(host, timers);
-    (root.querySelector('.gp-row') as HTMLElement).click();
-    await flush();
+    // The running Pipeline is already expanded on load.
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
     expect(root.querySelector('.gp-drawer-body')?.textContent).toBe('line 1');
@@ -594,8 +593,7 @@ describe('live log while a job runs', () => {
     };
     const timers = new FakeTimers();
     const { root, panel } = await mount(host, timers);
-    (root.querySelector('.gp-row') as HTMLElement).click();
-    await flush();
+    // The running Pipeline is already expanded on load.
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
     expect(panel.isPolling()).toBe(true);
@@ -621,8 +619,12 @@ describe('isAtBottom', () => {
 describe('the log drawer tools', () => {
   async function openLog(host: FakeHost, timers: FakeTimers): Promise<HTMLElement> {
     const { root } = await mount(host, timers);
-    (root.querySelector('.gp-row') as HTMLElement).click();
-    await flush();
+    const row = root.querySelector('.gp-row') as HTMLElement;
+    // A running Pipeline is already expanded on load; a settled one needs a click.
+    if (row.getAttribute('aria-expanded') !== 'true') {
+      row.click();
+      await flush();
+    }
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
     return root;
@@ -897,6 +899,30 @@ describe('branch / all refs scope', () => {
   });
 });
 
+describe('auto-expanding on load', () => {
+  test('a fresh view expands the newest active Pipeline with its stages visible and no drawer', async () => {
+    const host = configuredHost();
+    host.gitlabHandler = handlerFor({
+      pipelines: [
+        pipeline({ id: 9, status: 'success' }),
+        pipeline({ id: 8, status: 'running', finished_at: null }),
+        pipeline({ id: 7, status: 'failed' }),
+      ],
+      jobs: [job({ id: 1, stage: 'build', name: 'compile', status: 'running' })],
+    });
+    const { root } = await mount(host, new FakeTimers());
+
+    const expanded = [...root.querySelectorAll<HTMLElement>('.gp-row')].filter(
+      (row) => row.getAttribute('aria-expanded') === 'true',
+    );
+    expect(expanded).toHaveLength(1);
+    expect(expanded[0]?.querySelector('.gp-icon')?.getAttribute('aria-label')).toBe('Running');
+    // The expanded Pipeline's stages are already visible.
+    expect(text(root)).toContain('compile');
+    expect(root.querySelector('.gp-drawer')).toBeNull();
+  });
+});
+
 describe('the remembered view', () => {
   test('restores the expanded Pipeline on remount, without opening a drawer', async () => {
     const host = configuredHost();
@@ -938,7 +964,7 @@ describe('the remembered view', () => {
     expect(second.root.querySelector('.gp-drawer-body')?.textContent).toBe('remembered log');
   });
 
-  test('a remembered Pipeline that is gone leaves nothing expanded', async () => {
+  test('a remembered Pipeline that is gone falls back to the newest active', async () => {
     const host = configuredHost();
     host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 7 })] });
     const timers = new FakeTimers();
@@ -947,10 +973,12 @@ describe('the remembered view', () => {
     await flush();
     first.panel.dispose();
 
-    // The Pipeline is deleted between visits: the view must not dangle.
-    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 8 })] });
+    // The Pipeline is deleted between visits: the newest active one expands instead.
+    host.gitlabHandler = handlerFor({ pipelines: [pipeline({ id: 8, status: 'running', finished_at: null })] });
     const second = await mount(host, timers);
-    expect(second.root.querySelector('.gp-item[data-open="true"]')).toBeNull();
+    const expanded = second.root.querySelector('.gp-item[data-open="true"]');
+    expect(expanded).not.toBeNull();
+    expect(expanded?.querySelector('.gp-icon')?.getAttribute('aria-label')).toBe('Running');
     expect(second.root.querySelector('.gp-drawer')).toBeNull();
     expect(text(second.root)).toContain('main');
   });
@@ -2638,8 +2666,12 @@ describe('pipeline actions', () => {
   }
 
   async function expand(root: HTMLElement): Promise<void> {
-    (root.querySelector('.gp-row') as HTMLElement).click();
-    await flush();
+    const row = root.querySelector('.gp-row') as HTMLElement;
+    // A running Pipeline is already expanded on load; a settled one needs a click.
+    if (row.getAttribute('aria-expanded') !== 'true') {
+      row.click();
+      await flush();
+    }
   }
 
   /** Open a scope's `⋯` menu, read its item labels, and close it again. */
@@ -2992,8 +3024,7 @@ describe('incremental traces', () => {
       return { status: 200, body: sliceTrace(full, request) };
     });
     const { root } = await mount(host, new FakeTimers());
-    (root.querySelector('.gp-row') as HTMLElement).click();
-    await flush();
+    // The running Pipeline is already expanded on load.
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
 
@@ -3008,8 +3039,7 @@ describe('incremental traces', () => {
     const huge = Array.from({ length: LOG_MAX_LINES + 1 }, (_, index) => `line ${index + 1}`).join('\n');
     host.gitlabHandler = runningTraceHandler(() => ({ status: 200, body: huge, truncated: true }));
     const { root } = await mount(host, new FakeTimers());
-    (root.querySelector('.gp-row') as HTMLElement).click();
-    await flush();
+    // The running Pipeline is already expanded on load.
     (root.querySelector('.gp-job') as HTMLElement).click();
     await flush();
 
