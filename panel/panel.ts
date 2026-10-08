@@ -439,6 +439,12 @@ class PipelinesPanel implements PanelHandle {
   private scrollTop = 0;
   private scrollEl: HTMLElement | null = null;
   private drawerEl: HTMLElement | null = null;
+  /** The open drawer's container, kept in place across re-renders (ADR-0013). */
+  private drawerRootEl: HTMLElement | null = null;
+  /** The drawer's head, so a re-render refreshes it in place rather than the body. */
+  private drawerHeadEl: HTMLElement | null = null;
+  /** The (project, job) the kept drawer was built for; a different Job rebuilds it. */
+  private drawerJobKey: string | null = null;
   private drawerScrollTop = 0;
   /** Whether the log view should stick to the bottom as it updates. */
   private followTail = true;
@@ -472,6 +478,10 @@ class PipelinesPanel implements PanelHandle {
   private traceScrollSet = -1;
   /** The last rendered window start, so a scroll within the window need not repaint. */
   private traceWindowStart = -1;
+  /** The last rendered window's exclusive end, so a growing window still repaints. */
+  private traceWindowEnd = -1;
+  /** The Trace text the rendered window reflects, so an unchanged poll need not repaint. */
+  private tracePaintedText: string | null = null;
   /** The measured monospace advance width, once computed. */
   private traceCharWidthPx: number | null = null;
   /** The open log's incremental line index. */
@@ -2427,29 +2437,40 @@ class PipelinesPanel implements PanelHandle {
     if (this.disposed) return;
     this.disposeHandles();
     if (this.scrollEl) this.scrollTop = this.scrollEl.scrollTop;
-    clearNode(this.root);
+    // The open drawer is kept in place and never detached, so the scroll, focus
+    // and selection inside it survive the poll that triggered this render. See
+    // ADR-0013.
+    const kept = this.reusableDrawer();
+    if (kept) {
+      for (const child of Array.from(this.root.children)) {
+        if (child !== kept) this.root.removeChild(child);
+      }
+    } else {
+      clearNode(this.root);
+    }
     this.root.className = 'gp';
 
+    const chrome: Node[] = [];
     const progress = el('div', 'gp-progress');
     if (!this.isFirstLoad()) progress.hidden = true;
-    this.root.append(progress);
+    chrome.push(progress);
 
-    this.root.append(this.renderHeader());
-    if (this.configOpen) this.root.append(this.renderConfigForm());
+    chrome.push(this.renderHeader());
+    if (this.configOpen) chrome.push(this.renderConfigForm());
     const handoffNotice = this.renderHandoffNotice();
-    if (handoffNotice) this.root.append(handoffNotice);
+    if (handoffNotice) chrome.push(handoffNotice);
     const healNotice = this.renderHealNotice();
-    if (healNotice) this.root.append(healNotice);
+    if (healNotice) chrome.push(healNotice);
     const fallbackNotice = this.renderFallbackNotice();
-    if (fallbackNotice) this.root.append(fallbackNotice);
+    if (fallbackNotice) chrome.push(fallbackNotice);
     const scopeNotice = this.renderScopeNotice();
-    if (scopeNotice) this.root.append(scopeNotice);
+    if (scopeNotice) chrome.push(scopeNotice);
     const actionNotice = this.renderActionNotice();
-    if (actionNotice) this.root.append(actionNotice);
+    if (actionNotice) chrome.push(actionNotice);
     const rateNotice = this.renderRateLimitNotice();
-    if (rateNotice) this.root.append(rateNotice);
+    if (rateNotice) chrome.push(rateNotice);
     const olderNotice = this.renderOlderServiceNotice();
-    if (olderNotice) this.root.append(olderNotice);
+    if (olderNotice) chrome.push(olderNotice);
 
     this.scrollEl = el('div', 'gp-scroll');
     const pad = el('div', 'gp-pad');
@@ -2458,16 +2479,24 @@ class PipelinesPanel implements PanelHandle {
     this.scrollEl.addEventListener('scroll', () => {
       this.scrollTop = this.scrollEl?.scrollTop ?? 0;
     });
-    this.root.append(this.scrollEl);
+    chrome.push(this.scrollEl);
+    chrome.push(this.renderFooter());
 
-    this.root.append(this.renderFooter());
-    if (this.openJob) this.root.append(this.renderDrawer(this.openJob));
-    // The drawer was painted while detached, where layout is unavailable; repaint
-    // now, and once more after the next layout, so the first view uses the real
-    // viewport and width and measures its rows.
+    if (kept && this.openJob) {
+      // Insert the fresh chrome before the kept drawer, leaving the drawer itself
+      // connected so focus and selection inside it are untouched.
+      for (const node of chrome) this.root.insertBefore(node, kept);
+      this.refreshDrawer(kept, this.openJob);
+    } else {
+      this.root.append(...chrome);
+      if (this.openJob) this.root.append(this.renderDrawer(this.openJob));
+    }
+
+    // Paint the drawer once it is in the document, where its width and viewport
+    // are real. `syncTrace` repaints only when the visible window moved.
     if (this.openJob && this.drawerEl && this.traceLines.length > 0) {
-      this.paintTrace(this.drawerEl, true);
-      this.afterLayout(() => this.repaintTrace(true));
+      this.syncTrace();
+      this.afterLayout(() => this.repaintTrace(this.followTail));
     }
 
     if (this.scrollEl) this.scrollEl.scrollTop = this.scrollTop;
@@ -3347,31 +3376,12 @@ class PipelinesPanel implements PanelHandle {
 
   private renderDrawer(reference: OpenJob): HTMLElement {
     const drawer = el('div', 'gp-drawer');
-    const job = this.jobById(reference.project, reference.pipelineId, reference.jobId);
-
-    const head = el('div', 'gp-drawer-head');
-    const title = el('span', 'gp-drawer-title', job ? `${job.name} · ${jobStatusInfo(job).label}` : `Job #${reference.jobId}`);
-    head.append(title);
-    if (job?.web_url) head.append(this.renderExternalLink('gp-drawer-link', 'View full log in GitLab', job.web_url));
-    // Debug this job only inside the open project, matching the row's own gating.
-    if (job && isHandoffJob(job) && this.canHandoffJob(reference.project)) {
-      head.append(this.renderHandoffAction(reference.project, reference.pipelineId, job));
-    }
-    if (job) {
-      const actions = this.renderJobActions(reference.project, reference.pipelineId, job);
-      if (actions) head.append(actions);
-    }
-    const close = el('button', 'gp-drawer-close');
-    close.type = 'button';
-    close.setAttribute('aria-label', 'Close log');
-    close.title = 'Close';
-    close.innerHTML = CLOSE_ICON;
-    close.addEventListener('click', () => this.closeDrawer());
-    head.append(close);
+    const head = this.buildDrawerHead(reference);
     drawer.append(head);
     this.watchDrawerKeys();
 
-    const entry = this.traces.get(jobKey(reference.project, reference.jobId));
+    const key = jobKey(reference.project, reference.jobId);
+    const entry = this.traces.get(key);
     if (!entry) {
       this.suspendTrace();
       drawer.append(el('div', 'gp-drawer-empty', 'Loading log…'));
@@ -3385,7 +3395,12 @@ class PipelinesPanel implements PanelHandle {
 
     // Ready, or missing (an empty Trace). Find and Copy stay available either way,
     // so an empty log counts zero matches rather than erroring.
-    this.ensureTrace(jobKey(reference.project, reference.jobId), entry.text);
+    this.ensureTrace(key, entry.text);
+    // Adopt the drawer only after `ensureTrace`: a new Trace key resets the view
+    // and would otherwise drop the references we just took.
+    this.drawerRootEl = drawer;
+    this.drawerHeadEl = head;
+    this.drawerJobKey = key;
     drawer.append(this.renderTraceTools());
     if (entry.truncated) drawer.append(truncationNotice(entry.truncated));
     const body = el('div', 'gp-drawer-body');
@@ -3405,12 +3420,77 @@ class PipelinesPanel implements PanelHandle {
     this.drawerEl = body;
     drawer.append(body);
     this.watchTraceResize(body);
+    // The body is empty until `render()` calls `syncTrace` once the drawer is in
+    // the document, where its width and viewport are real.
+    this.traceWindowStart = -1;
+    this.traceWindowEnd = -1;
+    this.tracePaintedText = null;
     if (entry.state === 'missing') {
       body.append(el('div', 'gp-drawer-empty', 'No log output yet — the job has not started.'));
-    } else {
-      this.paintTrace(body, true);
     }
     return drawer;
+  }
+
+  /** The open drawer to keep through this render, or null to build a fresh one. */
+  private reusableDrawer(): HTMLElement | null {
+    const reference = this.openJob;
+    const drawer = this.drawerRootEl;
+    if (!reference || !drawer || !this.drawerEl) return null;
+    // The kept drawer must still be a child of the root; if it is not, this
+    // render must not try to insert around a detached node.
+    if (drawer.parentNode !== this.root) return null;
+    const key = jobKey(reference.project, reference.jobId);
+    if (this.drawerJobKey !== key) return null;
+    // A loading or errored entry has no body worth keeping; rebuild it.
+    return this.traces.get(key)?.state === 'ready' ? drawer : null;
+  }
+
+  /**
+   * Bring a kept drawer up to date without rebuilding its body: refresh the head
+   * in place and re-attach the handlers `disposeHandles` dropped at the top of
+   * `render()`. The body's own scroll listener lives on the element and survives.
+   */
+  private refreshDrawer(drawer: HTMLElement, reference: OpenJob): void {
+    this.watchDrawerKeys();
+    const previousHead = this.drawerHeadEl;
+    const head = this.buildDrawerHead(reference);
+    if (previousHead && previousHead.parentElement === drawer) drawer.replaceChild(head, previousHead);
+    else drawer.insertBefore(head, drawer.firstChild);
+    const key = jobKey(reference.project, reference.jobId);
+    const body = this.drawerEl;
+    if (!body) return;
+    this.watchTraceResize(body);
+    const entry = this.traces.get(key);
+    if (entry && entry.state === 'ready') this.ensureTrace(key, entry.text);
+    // Re-assert the references, in case an `ensureTrace` key change reset them.
+    this.drawerRootEl = drawer;
+    this.drawerHeadEl = head;
+    this.drawerJobKey = key;
+  }
+
+  /** The drawer's head: the Job's title, link, handoff, actions and Close. */
+  private buildDrawerHead(reference: OpenJob): HTMLElement {
+    const job = this.jobById(reference.project, reference.pipelineId, reference.jobId);
+    const head = el('div', 'gp-drawer-head');
+    const title = el('span', 'gp-drawer-title', job ? `${job.name} · ${jobStatusInfo(job).label}` : `Job #${reference.jobId}`);
+    head.append(title);
+    if (job?.web_url) head.append(this.renderExternalLink('gp-drawer-link', 'View full log in GitLab', job.web_url));
+    // Debug this job only inside the open project, matching the row's own gating.
+    if (job && isHandoffJob(job) && this.canHandoffJob(reference.project)) {
+      head.append(this.renderHandoffAction(reference.project, reference.pipelineId, job));
+    }
+    if (job) {
+      const actions = this.renderJobActions(reference.project, reference.pipelineId, job);
+      if (actions) head.append(actions);
+    }
+    const close = el('button', 'gp-drawer-close');
+    close.type = 'button';
+    close.setAttribute('aria-label', 'Close log');
+    close.title = 'Close';
+    close.innerHTML = CLOSE_ICON;
+    close.addEventListener('click', () => this.closeDrawer());
+    head.append(close);
+    return head;
   }
 
   /** Ctrl/Cmd+F focuses find while the drawer is open; Esc closes the drawer. */
@@ -3516,6 +3596,11 @@ class PipelinesPanel implements PanelHandle {
     this.traceHeights.clear();
     this.traceIndexed = false;
     this.traceWindowStart = -1;
+    this.traceWindowEnd = -1;
+    this.tracePaintedText = null;
+    this.drawerRootEl = null;
+    this.drawerHeadEl = null;
+    this.drawerJobKey = null;
     this.clearTraceRefs();
   }
 
@@ -3525,6 +3610,7 @@ class PipelinesPanel implements PanelHandle {
     this.traceRawText = null;
     this.traceIndexed = false;
     this.traceWindowStart = -1;
+    this.traceWindowEnd = -1;
     this.clearTraceRefs();
   }
 
@@ -3627,11 +3713,11 @@ class PipelinesPanel implements PanelHandle {
     this.updateFindCount();
     const complete = this.traceIndexer?.complete ?? false;
     if (complete && !this.traceIndexed) {
-      // The index now knows every line: repaint so heights and highlights are exact.
+      // The index now knows every line: apply the highlights to the rendered
+      // lines in place rather than rebuilding the window, so the scroll position
+      // and any selection survive. See ADR-0013.
       this.traceIndexed = true;
-      // New highlights need a repaint even if the window has not moved.
-      this.traceWindowStart = -1;
-      this.repaintTrace(this.followTail);
+      this.applyTraceHighlights();
     } else if (!complete) {
       this.traceIndexed = false;
     }
@@ -3816,6 +3902,7 @@ class PipelinesPanel implements PanelHandle {
     const windowLines = Math.min(LOG_WINDOW_LINES, count);
     const end = Math.min(count, start + windowLines);
     this.traceWindowStart = start;
+    this.traceWindowEnd = end;
     let top = 0;
     for (let index = 0; index < start; index++) top += heights[index]!;
     let bottom = 0;
@@ -3840,7 +3927,10 @@ class PipelinesPanel implements PanelHandle {
     body.append(content);
     body.scrollTop = scroll;
     this.traceScrollSet = body.scrollTop;
-    this.drawerScrollTop = body.scrollTop;
+    // A body that is not in the document reports a clamped scrollTop, so never
+    // save that as the user's place. See ADR-0013.
+    if (body.isConnected) this.drawerScrollTop = body.scrollTop;
+    this.tracePaintedText = this.traceText;
     this.measureTraceRows(content);
   }
 
@@ -3861,6 +3951,35 @@ class PipelinesPanel implements PanelHandle {
       if (current === index) line.dataset.current = 'true';
     }
     return line;
+  }
+
+  /**
+   * Re-apply error and find highlights to the rendered lines in place, without
+   * rebuilding them, so an index that finishes after the window was painted does
+   * not disturb the scroll position or a selection. See ADR-0013.
+   */
+  private applyTraceHighlights(): void {
+    const body = this.drawerEl;
+    if (!body) return;
+    const errors = new Set(this.traceErrors);
+    const current = this.traceMatches[this.traceMatchAt];
+    const query = this.traceFindQuery.toLowerCase();
+    for (const node of body.querySelectorAll<HTMLElement>('.gp-log-line')) {
+      const index = Number(node.dataset.line);
+      if (!Number.isFinite(index)) continue;
+      if (errors.has(index)) node.dataset.error = 'true';
+      else delete node.dataset.error;
+      const indexed = this.traceIndexer?.lineAt(index);
+      const lower = indexed?.lower ?? (this.traceLines[index] ?? '').toLowerCase();
+      if (query && lower.includes(query)) {
+        node.dataset.match = 'true';
+        if (current === index) node.dataset.current = 'true';
+        else delete node.dataset.current;
+      } else {
+        delete node.dataset.match;
+        delete node.dataset.current;
+      }
+    }
   }
 
   /**
@@ -3886,6 +4005,34 @@ class PipelinesPanel implements PanelHandle {
     }
   }
 
+  /**
+   * Bring the drawer body up to date after a data change without tearing the
+   * drawer down. Repaints only when the visible window (or the wrap width) moved;
+   * while the user reads scrollback the visible lines are left in place and only
+   * the spacers grow, so scroll, focus and selection survive. See ADR-0013.
+   */
+  private syncTrace(): void {
+    const body = this.drawerEl;
+    if (!body || this.traceLines.length === 0) return;
+    const heights = this.traceLines.map((_, index) => this.traceLineHeight(index));
+    const total = heights.reduce((sum, height) => sum + height, 0);
+    const scroll = this.followTail
+      ? Math.max(0, total - this.traceViewport())
+      : Math.max(0, body.scrollTop);
+    const { start, end } = this.traceWindowFor(heights, scroll);
+    const windowMoved = start !== this.traceWindowStart || end !== this.traceWindowEnd;
+    const widthMoved = this.traceWrapChars() !== this.traceWrap;
+    const textChanged = this.traceText !== this.tracePaintedText;
+    // The rendered lines must be rebuilt when the window or the width moved, or
+    // when the change could touch a line inside the window (following the tail,
+    // or a window that reaches the tail).
+    if (widthMoved || windowMoved || (textChanged && (this.followTail || end === heights.length))) {
+      this.paintTrace(body, this.followTail);
+      return;
+    }
+    this.updateTraceSpacers(body, heights, start, end, total);
+  }
+
   private repaintTrace(reposition: boolean): void {
     const body = this.drawerEl;
     if (!body) return;
@@ -3893,7 +4040,8 @@ class PipelinesPanel implements PanelHandle {
     // on every scroll event is what makes the scrollbar stutter.
     if (!reposition && this.traceWrapChars() === this.traceWrap) {
       const heights = this.traceLines.map((_, index) => this.traceLineHeight(index));
-      if (this.traceStartFor(heights, Math.max(0, body.scrollTop)) === this.traceWindowStart) return;
+      const { start, end } = this.traceWindowFor(heights, Math.max(0, body.scrollTop));
+      if (start === this.traceWindowStart && end === this.traceWindowEnd) return;
     }
     this.paintTrace(body, reposition);
   }
@@ -3904,6 +4052,42 @@ class PipelinesPanel implements PanelHandle {
     const windowLines = Math.min(LOG_WINDOW_LINES, count);
     const anchor = lineAtOffset(heights, scroll);
     return Math.max(0, Math.min(anchor - Math.floor(LOG_WINDOW_LINES / 10), count - windowLines));
+  }
+
+  /** The rendered window for a scroll offset: its start and its exclusive end. */
+  private traceWindowFor(
+    heights: readonly number[],
+    scroll: number,
+  ): { start: number; end: number } {
+    const count = heights.length;
+    const start = this.traceStartFor(heights, scroll);
+    const end = Math.min(count, start + Math.min(LOG_WINDOW_LINES, count));
+    return { start, end };
+  }
+
+  /**
+   * Resize the spacers that stand in for the unrendered lines, without touching
+   * the rendered line elements. This keeps the scrollbar tracking a growing Trace
+   * while the user reads scrollback.
+   */
+  private updateTraceSpacers(
+    body: HTMLElement,
+    heights: readonly number[],
+    start: number,
+    end: number,
+    total: number,
+  ): void {
+    this.traceTotal = total;
+    const content = body.querySelector('.gp-log');
+    if (!content) return;
+    let top = 0;
+    for (let index = 0; index < start; index++) top += heights[index]!;
+    let bottom = 0;
+    for (let index = end; index < heights.length; index++) bottom += heights[index]!;
+    const first = content.firstElementChild;
+    if (first && first.classList.contains('gp-log-pad')) (first as HTMLElement).style.height = `${top}px`;
+    const last = content.lastElementChild;
+    if (last && last.classList.contains('gp-log-pad')) (last as HTMLElement).style.height = `${bottom}px`;
   }
 
   private renderFooter(): HTMLElement {

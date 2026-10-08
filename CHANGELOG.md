@@ -7,6 +7,14 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.12.2] - 2026-10-08
+
+### Fixed
+
+- A running Job's log no longer jumps to the top on every poll. The open drawer is kept in place
+  across a re-render, so scrolling, the find field's focus and a text selection survive; while you
+  read scrollback only the spacer behind the scrollbar grows as new lines arrive.
+
 ## [0.12.1] - 2026-10-07
 
 ### Fixed

@@ -34,10 +34,15 @@ in for it.
 _Avoid_: bridge (GitLab's internal name), trigger, pipeline trigger
 
 **Trace**:
-A build Job's complete log as GitLab returns it, fetched in a single request and bounded by the
-host's response cap. The Panel renders it in the log drawer, where its own line cap may shorten it
-further.
+A build Job's complete log as GitLab returns it. A settled Job's Trace is fetched whole; a running
+Job's is accumulated a window at a time as it grows, then bounded by the host's response cap and,
+in the Panel, by the log drawer's own line cap.
 _Avoid_: output, console, log tail (the tail is just the end of a Trace)
+
+**Follow-tail**:
+The log drawer keeping the newest Trace lines in view as a running Job appends to them. Scrolling up
+suspends it; returning to the end resumes it.
+_Avoid_: stick-to-bottom, auto-scroll
 
 **Downstream pipeline**:
 A Pipeline started by a Trigger job in another Pipeline. One Trigger job starts exactly one Downstream

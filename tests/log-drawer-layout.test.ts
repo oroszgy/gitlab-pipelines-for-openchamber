@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test';
+import { afterAll, beforeAll, beforeEach, describe, expect, test } from 'bun:test';
 import { LOG_MAX_LINES } from '../panel/config';
 import { mountPanel } from '../panel/panel';
 import { FakeHost, FakeTimers, GIT_CONFIG, flush, job, pipeline, readyContext } from './fakes';
@@ -204,3 +204,120 @@ describe('the windowed log drawer under real layout', () => {
     }
   });
 });
+
+describe('the live log drawer under real layout', () => {
+  // Each test starts from a fresh scroll position in the shared emulation.
+  beforeEach(() => {
+    scrollTopValue = 0;
+  });
+
+  /** A running Pipeline whose Trace grows through `current()`. */
+  function runningHost(current: () => string): FakeHost {
+    const host = new FakeHost();
+    host.files.set('.git/config', GIT_CONFIG);
+    host.files.set('.git/HEAD', 'ref: refs/heads/main\n');
+    host.projects = [{ id: 'p1', name: 'project', directory: '/repo' }];
+    host.worktrees = [{ directory: '/repo', name: 'primary', branch: 'main', status: 'ready' }];
+    host.tokens['gitlab.com'] = 'pat';
+    host.gitlabHandler = (request) => {
+      if (request.path.endsWith('/pipelines')) {
+        return { status: 200, body: JSON.stringify([pipeline({ id: 7, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/jobs')) {
+        return { status: 200, body: JSON.stringify([job({ id: 9, status: 'running', finished_at: null })]) };
+      }
+      if (request.path.endsWith('/trace')) {
+        const offset = Number((request.query as Record<string, unknown> | undefined)?.byte_offset ?? 0);
+        return { status: 200, body: current().slice(offset) };
+      }
+      return { status: 404, body: '' };
+    };
+    return host;
+  }
+
+  async function openRunning(host: FakeHost, timers: FakeTimers): Promise<HTMLElement> {
+    const root = document.createElement('div');
+    document.body.append(root);
+    mountPanel(root, host, { timers });
+    host.emitReady(readyContext());
+    await flush();
+    const row = root.querySelector('.gp-row') as HTMLElement;
+    if (row.getAttribute('aria-expanded') !== 'true') {
+      row.click();
+      await flush();
+    }
+    (root.querySelector('.gp-job') as HTMLElement).click();
+    await flush();
+    timers.advance(0);
+    return root;
+  }
+
+  function dispatchScroll(body: HTMLElement): void {
+    const EventCtor = (body.ownerDocument.defaultView as unknown as { Event: typeof Event }).Event;
+    body.dispatchEvent(new EventCtor('scroll'));
+  }
+
+  test('a scrolled-up log keeps its place through a live poll', async () => {
+    let trace = Array.from({ length: 300 }, (_, index) => `line ${index + 1} ${'x'.repeat(70)}`).join('\n');
+    const timers = new FakeTimers();
+    const root = await openRunning(runningHost(() => trace), timers);
+    const body = root.querySelector('.gp-drawer-body') as HTMLElement;
+
+    body.scrollTop = 360;
+    dispatchScroll(body);
+    expect(body.scrollTop).toBe(360);
+
+    trace = `${trace}\nline 301 ${'x'.repeat(70)}`;
+    timers.advance(5000);
+    await flush();
+
+    const after = root.querySelector('.gp-drawer-body') as HTMLElement;
+    // The drawer and its body are the same elements, and the offset survived.
+    expect(after).toBe(body);
+    expect(after.scrollTop).toBe(360);
+  });
+
+  test('the find field survives a poll and keeps focus', async () => {
+    let trace = Array.from({ length: 300 }, (_, index) => `line ${index + 1} ${'x'.repeat(70)}`).join('\n');
+    const timers = new FakeTimers();
+    const root = await openRunning(runningHost(() => trace), timers);
+    const find = root.querySelector('.gp-log-find') as HTMLInputElement;
+    find.focus();
+    expect(document.activeElement).toBe(find);
+
+    trace = `${trace}\nline 301 ${'x'.repeat(70)}`;
+    timers.advance(5000);
+    await flush();
+
+    expect(root.querySelector('.gp-log-find')).toBe(find);
+    expect(document.activeElement).toBe(find);
+  });
+
+  test('reading scrollback is undisturbed while the tail grows', async () => {
+    let trace = Array.from({ length: 300 }, (_, index) => `line ${index + 1} ${'x'.repeat(70)}`).join('\n');
+    const timers = new FakeTimers();
+    const root = await openRunning(runningHost(() => trace), timers);
+    const body = root.querySelector('.gp-drawer-body') as HTMLElement;
+
+    body.scrollTop = 0;
+    dispatchScroll(body);
+    const firstBefore = root.querySelector<HTMLElement>('.gp-log-line');
+    const bottomBefore = lastPadHeight(root);
+
+    trace = `${trace}\nline 301 ${'x'.repeat(70)}`;
+    timers.advance(5000);
+    await flush();
+
+    // The visible line elements are the very same nodes, so a selection would
+    // survive; only the spacer standing in for the tail grew.
+    expect(root.querySelector<HTMLElement>('.gp-log-line')).toBe(firstBefore);
+    expect(lastPadHeight(root)).toBeGreaterThan(bottomBefore);
+  });
+});
+
+/** The height of the bottom spacer that follows the rendered lines, if any. */
+function lastPadHeight(root: HTMLElement): number {
+  const pads = [...root.querySelectorAll<HTMLElement>('.gp-log > .gp-log-pad')];
+  const last = pads[pads.length - 1];
+  return Number.parseFloat(last?.style.height ?? '0') || 0;
+}

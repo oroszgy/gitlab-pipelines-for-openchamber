@@ -3,7 +3,8 @@
 Status: implemented — tickets `log-drawer/01`–`05` are mapped in [`README.md`](README.md).
 Feature: `log-drawer`
 Follows: [`docs/specs/pipelines-panel.md`](pipelines-panel.md) (the drawer it deepens) and
-[`docs/specs/downstream-pipelines.md`](downstream-pipelines.md) (nested Traces), and records ADR-0012.
+[`docs/specs/downstream-pipelines.md`](downstream-pipelines.md) (nested Traces), and records ADR-0012
+and ADR-0013.
 
 ## Problem Statement
 
@@ -79,6 +80,15 @@ prev/next, a **Jump to error** control (present only when `errorLines` is non-em
 closes the drawer as today. Every control is a real `<button>`/`<input>` in the drawer, and a test
 proves it activates as a user would (including keyboard).
 
+### The open drawer survives a re-render
+
+The Panel paints by clearing its root, and a running Job's poll repaints several times per cycle. The
+open drawer is therefore treated as a fixed child of the root: `render()` replaces every other element
+but leaves the drawer connected in place, updating its header and notice in place. The body is repainted
+only when the visible window changes; while the user reads scrollback, only the spacers grow, so scroll,
+focus, selection and the find query survive the poll. A paint on a body that is not in the document never
+writes back the saved scroll state. See ADR-0013.
+
 ### Empty and truncated states
 
 The existing "no log output yet", "Could not load the log" and truncation notices are unchanged. Find
@@ -107,5 +117,5 @@ over an empty Trace shows a zero count rather than an error; Jump to error is ab
 - **Host API, cited:** `host.writeClipboard` is ungated (`node_modules/@openchamber/sdk/dist/host.d.ts`);
   the sandbox is `allow-scripts` with an opaque origin, `worker-src` allows `blob:`/`data:`, and
   `requestIdleCallback` exists — see ADR-0012.
-- **Decision recorded:** ADR-0012.
+- **Decision recorded:** ADR-0012, and ADR-0013 for the open drawer surviving a re-render.
 - **Domain language:** no new `GLOSSARY.md` term; "Trace" already covers the log.

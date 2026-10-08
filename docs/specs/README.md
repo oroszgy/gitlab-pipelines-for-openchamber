@@ -16,6 +16,7 @@ Issues titled `<feature>/<NN>: <title>`; this table maps each stable ticket id t
 - [`smart-defaults`](smart-defaults.md) — Smart defaults
 - [`log-drawer`](log-drawer.md) — Log drawer usability
 - [`notifications`](notifications.md) — Notifications
+- [`artifacts`](artifacts.md) — Job artifacts and Pipeline reports
 
 ## Tickets
 
@@ -80,3 +81,9 @@ Issues titled `<feature>/<NN>: <title>`; this table maps each stable ticket id t
 | `notifications/05` | Status section contribution | [#68](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/68) |
 | `notifications/06` | Badge lifecycle | [#69](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/69) |
 | `notifications/07` | Older-service degradation | [#70](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/70) |
+| `artifacts/01` | The Artifacts tab — browse the archive, preview a text file | [#71](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/71) |
+| `artifacts/02` | The Reports strip — test report and coverage on the Pipeline | [#72](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/72) |
+| `artifacts/03` | Download the archive to the cache directory | [#73](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/73) |
+| `artifacts/04` | Degrade when the archive cannot be browsed | [#74](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/74) |
+| `artifacts/05` | Docs, glossary and the download ADR | [#75](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/75) |
+| `log-drawer/06` | Keep the open log through a re-render | [#76](https://github.com/oroszgy/gitlab-pipelines-for-openchamber/issues/76) |
