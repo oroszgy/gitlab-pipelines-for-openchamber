@@ -7,6 +7,12 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.12.3] - 2026-11-20
+
+### Fixed
+
+- The proxy now uses system CA certificates on supported Node.js versions when connecting to self-managed GitLab.
+
 ## [0.12.2] - 2026-10-08
 
 ### Fixed
