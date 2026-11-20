@@ -12,6 +12,7 @@
  */
 import { chmod, mkdir, readFile, stat, writeFile } from 'node:fs/promises';
 import { createServer } from 'node:http';
+import tls from 'node:tls';
 import { configPath, type ConfigFs } from './config';
 import type { GitConfigFs } from './git-config';
 import { createPoller } from './poller';
@@ -26,6 +27,12 @@ try {
 } catch (error) {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
   process.exit(1);
+}
+
+// The host may not pass Node's CA options to the service. Add the OS trust
+// store before the first outbound request, without replacing the default CAs.
+if (typeof tls.getCACertificates === 'function' && typeof tls.setDefaultCACertificates === 'function') {
+  tls.setDefaultCACertificates([...tls.getCACertificates('default'), ...tls.getCACertificates('system')]);
 }
 
 const gitConfigFs: GitConfigFs = {
