@@ -7,6 +7,15 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ## [Unreleased]
 
+## [0.12.4] - 2026-11-27
+
+### Fixed
+
+- The **Proxy service** no longer fails to start when the OS certificate store
+  cannot be read. It keeps Node's default CAs and carries on serving, so the
+  Panel still reaches its routes, and TLS verification stays on. Restart
+  OpenChamber, or disable and re-enable the extension, to load the new service.
+
 ## [0.12.3] - 2026-11-20
 
 ### Fixed
