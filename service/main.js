@@ -1011,6 +1011,15 @@ async function handleRequest(request, deps) {
   }
 }
 
+// service/tls-defaults.ts
+function installSystemCAs(surface) {
+  const { getCACertificates, setDefaultCACertificates } = surface;
+  if (typeof getCACertificates !== "function" || typeof setDefaultCACertificates !== "function") {
+    return;
+  }
+  setDefaultCACertificates([...getCACertificates("default"), ...getCACertificates("system")]);
+}
+
 // service/main.ts
 var CONFIG_PATH = configPath(process.env);
 var TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? "";
@@ -1022,9 +1031,7 @@ try {
 `);
   process.exit(1);
 }
-if (typeof tls.getCACertificates === "function" && typeof tls.setDefaultCACertificates === "function") {
-  tls.setDefaultCACertificates([...tls.getCACertificates("default"), ...tls.getCACertificates("system")]);
-}
+installSystemCAs(tls);
 var gitConfigFs = {
   async stat(path) {
     try {

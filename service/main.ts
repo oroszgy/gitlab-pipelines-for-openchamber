@@ -17,6 +17,7 @@ import { configPath, type ConfigFs } from './config';
 import type { GitConfigFs } from './git-config';
 import { createPoller } from './poller';
 import { handleRequest, parsePort, type ServiceDeps } from './server';
+import { installSystemCAs } from './tls-defaults';
 
 const CONFIG_PATH = configPath(process.env);
 const TOKEN = process.env.OPENCHAMBER_SERVICE_TOKEN ?? '';
@@ -29,11 +30,10 @@ try {
   process.exit(1);
 }
 
-// The host may not pass Node's CA options to the service. Add the OS trust
-// store before the first outbound request, without replacing the default CAs.
-if (typeof tls.getCACertificates === 'function' && typeof tls.setDefaultCACertificates === 'function') {
-  tls.setDefaultCACertificates([...tls.getCACertificates('default'), ...tls.getCACertificates('system')]);
-}
+// The host does not pass Node's CA options to the service, so add the OS trust
+// store before the first outbound request. Both TLS APIs need Node 24.5+; older
+// runtimes are left with Node's defaults.
+installSystemCAs(tls);
 
 const gitConfigFs: GitConfigFs = {
   async stat(path) {
