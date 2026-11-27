@@ -1,6 +1,7 @@
 // service/main.ts
 import { chmod, mkdir, readFile, stat, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
+import tls from "node:tls";
 
 // service/config.ts
 import { dirname, posix, win32 } from "node:path";
@@ -1020,6 +1021,9 @@ try {
   process.stderr.write(`${error instanceof Error ? error.message : String(error)}
 `);
   process.exit(1);
+}
+if (typeof tls.getCACertificates === "function" && typeof tls.setDefaultCACertificates === "function") {
+  tls.setDefaultCACertificates([...tls.getCACertificates("default"), ...tls.getCACertificates("system")]);
 }
 var gitConfigFs = {
   async stat(path) {
