@@ -47,7 +47,7 @@ https://github.com/oroszgy/gitlab-pipelines-for-openchamber
 Approve the permissions and **allow its Proxy service** (see [Security](#security)). The icon then
 appears on the rail, and a **Status section** joins Work Status. Installed from a git URL, the
 extension updates itself: when the version bumps, the card shows **Update available**. Add a release
-tag to the URL to pin one, for example `#v0.12.0`.
+tag to the URL to pin one, for example `#v0.12.3`.
 
 The built bundles (`panel/main.js`, `service/main.js` and `status/main.js`) ship in the repository,
 because OpenChamber never compiles an extension. To run a checkout instead, build it and install the

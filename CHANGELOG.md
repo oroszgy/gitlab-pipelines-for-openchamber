@@ -11,7 +11,9 @@ entry land in the same commit as the change; see the Versioning section of `AGEN
 
 ### Fixed
 
-- The proxy now uses system CA certificates on supported Node.js versions when connecting to self-managed GitLab.
+- A self-managed GitLab behind a private CA that the OS already trusts no longer shows **Could not
+  reach GitLab**. The Proxy service now trusts the system CA store while still verifying TLS; restart
+  OpenChamber, or disable and re-enable the extension, to load the new service.
 
 ## [0.12.2] - 2026-10-08
 
