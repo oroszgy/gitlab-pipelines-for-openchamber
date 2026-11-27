@@ -1012,12 +1012,30 @@ async function handleRequest(request, deps) {
 }
 
 // service/tls-defaults.ts
-function installSystemCAs(surface) {
+var KEPT_DEFAULTS = `Proxy service: could not add the system CA store; keeping the default CAs.
+`;
+function installSystemCAs(surface, report = (line) => process.stderr.write(line)) {
   const { getCACertificates, setDefaultCACertificates } = surface;
   if (typeof getCACertificates !== "function" || typeof setDefaultCACertificates !== "function") {
     return;
   }
-  setDefaultCACertificates([...getCACertificates("default"), ...getCACertificates("system")]);
+  let merged;
+  try {
+    merged = [...getCACertificates("default"), ...getCACertificates("system")];
+  } catch {
+    diagnose(report);
+    return;
+  }
+  try {
+    setDefaultCACertificates(merged);
+  } catch {
+    diagnose(report);
+  }
+}
+function diagnose(report) {
+  try {
+    report(KEPT_DEFAULTS);
+  } catch {}
 }
 
 // service/main.ts
